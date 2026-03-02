@@ -29,6 +29,8 @@ class GeminiCLI:
         inter_call_delay: Seconds to sleep after each successful call. Default 0.
     """
 
+    _RETRY_BASE_WAIT_SECONDS: int = 10  # base wait for linear-backoff retry: wait = base * (attempt+1)
+
     def __init__(
         self,
         model: Optional[str] = None,
@@ -104,7 +106,7 @@ class GeminiCLI:
             except Exception as e:
                 last_error = e
                 if attempt < self.max_retries:
-                    wait = 10 * (attempt + 1)
+                    wait = self._RETRY_BASE_WAIT_SECONDS * (attempt + 1)
                     print(
                         f"[GeminiCLI] Error, retrying in {wait}s "
                         f"(attempt {attempt + 1}/{self.max_retries}): {e}"
@@ -135,7 +137,10 @@ class GeminiCLI:
             Parsed JSON as a dict.
 
         Raises:
-            RuntimeError: If all retries are exhausted without valid JSON.
+            RuntimeError: If all retries (on JSONDecodeError) are exhausted.
+                Note: RuntimeError raised by self.call() (transport/timeout/
+                agent-mode) propagates immediately — only JSONDecodeError
+                triggers this method's retry loop.
         """
         json_prompt = prompt + "\n\nReturn ONLY valid JSON. No markdown, no explanation."
 
@@ -148,12 +153,11 @@ class GeminiCLI:
                     system_prompt=system_prompt,
                     max_response_chars=10000,
                 )
-                # Strip markdown fences if present
+                # Strip markdown fences if present (e.g. ```json ... ```)
                 clean = raw.strip()
                 if clean.startswith("```"):
                     lines = clean.split("\n")
-                    if lines[0].startswith("```"):
-                        lines = lines[1:]
+                    lines = lines[1:]  # remove opening fence line
                     if lines and lines[-1].startswith("```"):
                         lines = lines[:-1]
                     clean = "\n".join(lines).strip()
@@ -163,7 +167,7 @@ class GeminiCLI:
             except json.JSONDecodeError as e:
                 last_error = e
                 if attempt < self.max_retries:
-                    wait = 10 * (attempt + 1)
+                    wait = self._RETRY_BASE_WAIT_SECONDS * (attempt + 1)
                     print(
                         f"[GeminiCLI] JSON parse failed, retrying in {wait}s "
                         f"(attempt {attempt + 1}/{self.max_retries}): {e}"

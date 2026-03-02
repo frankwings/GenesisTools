@@ -9,6 +9,13 @@ import pytest
 from genesis_tools.gemini_cli import GeminiCLI
 
 
+@pytest.fixture(autouse=True)
+def _no_sleep():
+    """Patch time.sleep in gemini_cli so retry tests don't actually wait."""
+    with patch("genesis_tools.gemini_cli.time.sleep"):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
