@@ -2,8 +2,6 @@
 
 All tests mock subprocess.run — no real gemini binary required.
 """
-import json
-import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -58,7 +56,7 @@ class TestCall:
         with _patch_run() as mock_run:
             cli = GeminiCLI(model="gemini-2.0-flash")
             cli.call("hello")
-            cmd, _ = mock_run.call_args[0]
+            cmd = mock_run.call_args[0][0]
             assert "-m" in cmd
             assert "gemini-2.0-flash" in cmd
 
@@ -67,7 +65,7 @@ class TestCall:
         with _patch_run() as mock_run:
             cli = GeminiCLI(model=None)
             cli.call("hello")
-            cmd, _ = mock_run.call_args[0]
+            cmd = mock_run.call_args[0][0]
             assert "-m" not in cmd
 
     def test_system_prompt_prepended(self):
@@ -75,14 +73,14 @@ class TestCall:
         with _patch_run() as mock_run:
             cli = GeminiCLI()
             cli.call("user msg", system_prompt="sys msg")
-            cmd, _ = mock_run.call_args[0]
+            cmd = mock_run.call_args[0][0]
             p_idx = cmd.index("-p")
             combined = cmd[p_idx + 1]
             assert "sys msg" in combined
             assert "user msg" in combined
             assert combined.index("sys msg") < combined.index("user msg")
 
-    def test_agent_mode_guard_triggers_retry(self):
+    def test_long_response_triggers_retry(self):
         """Response longer than max_response_chars triggers retry."""
         long_output = "x" * 3000
         short_output = "table"
@@ -136,7 +134,7 @@ class TestCallJson:
                    return_value=_make_result(stdout='{"x": 1}')) as mock_run:
             cli = GeminiCLI()
             cli.call_json("base prompt")
-            cmd, _ = mock_run.call_args[0]
+            cmd = mock_run.call_args[0][0]
             p_idx = cmd.index("-p")
             prompt_used = cmd[p_idx + 1]
             assert "valid JSON" in prompt_used
