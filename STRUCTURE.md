@@ -10,6 +10,8 @@
   - `vlm_scoring.py` — VLM-based image comparison and tournament selection
   - `config_loader.py` — JSON config loading with environment variable overrides
   - `path_resolver.py` — Config-driven Python environment path resolution
+  - `blender_runner.py` — Subprocess wrapper for Blender scripts (run, run_and_render, undo, get_scene_info; cross-platform Blender finder)
+  - `gemini_cli.py` — Subprocess wrapper for the local `gemini` CLI binary (text + JSON calls, image attachment via @filepath, retry logic; no API key required)
 - `tests/` — Unit tests (one per module, all externals mocked)
 
 ## Dependencies
