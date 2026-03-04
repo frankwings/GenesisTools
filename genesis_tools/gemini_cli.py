@@ -13,7 +13,10 @@ Usage:
 """
 
 import json
+import os
+import shutil
 import subprocess
+import tempfile
 import time
 from typing import Optional
 
@@ -74,55 +77,67 @@ class GeminiCLI:
         else:
             model_flags = []
 
+        tmpdir = None
         if images:
-            # @filepath refs only work in stdin mode (no -p flag).
-            # Pipe image refs + prompt together through stdin.
-            image_refs = " ".join(f"@{p}" for p in images)
+            # gemini-cli applies .gitignore rules and blocks git-ignored files.
+            # Copy images to a fresh temp dir outside any repo, then add it
+            # via --include-directories so gemini-cli can read them.
+            tmpdir = tempfile.mkdtemp(prefix="gemini_vlm_")
+            tmp_images = []
+            for img in images:
+                dst = os.path.join(tmpdir, os.path.basename(img))
+                shutil.copy2(img, dst)
+                tmp_images.append(dst)
+            image_refs = " ".join(f"@{p}" for p in tmp_images)
             stdin_content = f"{image_refs}\n\n{combined_prompt}"
-            cmd = ["gemini", "-o", "text"] + model_flags
+            cmd = ["gemini", "-o", "text", "--include-directories", tmpdir] + model_flags
         else:
             stdin_content = ""
             cmd = ["gemini", "-p", combined_prompt, "-o", "text"] + model_flags
 
         last_error: Optional[Exception] = None
-        for attempt in range(self.max_retries + 1):
-            try:
-                result = subprocess.run(
-                    cmd,
-                    input=stdin_content,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.timeout,
-                )
-                if result.returncode != 0:
-                    raise RuntimeError(result.stderr.strip() or f"exit code {result.returncode}")
-
-                output = result.stdout.strip()
-
-                if len(output) > max_response_chars:
-                    raise RuntimeError(
-                        f"Response too long ({len(output)} chars); "
-                        "likely entered agent mode"
+        try:
+            for attempt in range(self.max_retries + 1):
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        input=stdin_content,
+                        capture_output=True,
+                        text=True,
+                        timeout=self.timeout,
                     )
+                    if result.returncode != 0:
+                        raise RuntimeError(result.stderr.strip() or f"exit code {result.returncode}")
 
-                if self.inter_call_delay > 0:
-                    time.sleep(self.inter_call_delay)
+                    output = result.stdout.strip()
 
-                return output
+                    if len(output) > max_response_chars:
+                        raise RuntimeError(
+                            f"Response too long ({len(output)} chars); "
+                            "likely entered agent mode"
+                        )
 
-            except Exception as e:
-                last_error = e
-                if attempt < self.max_retries:
-                    wait = self._RETRY_BASE_WAIT_SECONDS * (attempt + 1)
-                    print(
-                        f"[GeminiCLI] Error, retrying in {wait}s "
-                        f"(attempt {attempt + 1}/{self.max_retries}): {e}"
-                    )
-                    time.sleep(wait)
+                    if self.inter_call_delay > 0:
+                        time.sleep(self.inter_call_delay)
 
-        raise RuntimeError(
-            f"GeminiCLI failed after {self.max_retries + 1} attempts: {last_error}"
-        )
+                    return output
+
+                except Exception as e:
+                    last_error = e
+                    if attempt < self.max_retries:
+                        wait = self._RETRY_BASE_WAIT_SECONDS * (attempt + 1)
+                        print(
+                            f"[GeminiCLI] Error, retrying in {wait}s "
+                            f"(attempt {attempt + 1}/{self.max_retries}): {e}"
+                        )
+                        time.sleep(wait)
+
+            raise RuntimeError(
+                f"GeminiCLI failed after {self.max_retries + 1} attempts: {last_error}"
+            )
+        finally:
+            if tmpdir:
+                shutil.rmtree(tmpdir, ignore_errors=True)
 
     def call_json(
         self,
