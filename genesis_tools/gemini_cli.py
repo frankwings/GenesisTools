@@ -69,13 +69,20 @@ class GeminiCLI:
         if system_prompt:
             combined_prompt = f"{system_prompt}\n\n---\nUser: {prompt}"
 
-        cmd = ["gemini", "-p", combined_prompt, "-o", "text"]
         if self.model:
-            cmd += ["-m", self.model]
+            model_flags = ["-m", self.model]
+        else:
+            model_flags = []
 
-        stdin_content = ""
         if images:
-            stdin_content = " ".join(f"@{p}" for p in images)
+            # @filepath refs only work in stdin mode (no -p flag).
+            # Pipe image refs + prompt together through stdin.
+            image_refs = " ".join(f"@{p}" for p in images)
+            stdin_content = f"{image_refs}\n\n{combined_prompt}"
+            cmd = ["gemini", "-o", "text"] + model_flags
+        else:
+            stdin_content = ""
+            cmd = ["gemini", "-p", combined_prompt, "-o", "text"] + model_flags
 
         last_error: Optional[Exception] = None
         for attempt in range(self.max_retries + 1):
