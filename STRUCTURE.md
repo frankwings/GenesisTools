@@ -12,6 +12,10 @@
   - `path_resolver.py` — Config-driven Python environment path resolution
   - `blender_runner.py` — Subprocess wrapper for Blender scripts (run, run_and_render, undo, get_scene_info; cross-platform Blender finder)
   - `gemini_cli.py` — Subprocess wrapper for the local `gemini` CLI binary (text + JSON calls, image attachment via @filepath, retry logic; no API key required)
+  - `walkthrough_renderer/` — Scene walkthrough animation generator (sub-package)
+    - `__init__.py` — `render_scene_walkthrough()` public API + subprocess wrapper
+    - `render_walkthrough.py` — Blender headless script: floor detection, capsule occupancy grid, coverage path (farthest-point sampling + Catmull-Rom), QUATERNION camera animation with line-of-sight look-at
+    - `tests/test_walkthrough_renderer.py` — 9 unit tests (all subprocess mocked)
 - `tests/` — Unit tests (one per module, all externals mocked)
 
 ## Dependencies
