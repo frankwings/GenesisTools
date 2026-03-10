@@ -48,9 +48,11 @@ def render_scene_walkthrough(
     grid_resolution: float = 0.5,
     obstacle_radius: float = 0.5,
     fps: int = 12,
-    duration_seconds: float = 15.0,
+    duration_seconds: float = None,
+    walk_speed_mps: float = 1.2,
     num_waypoints: int = 20,
     look_range: float = 15.0,
+    rotation_smooth_seconds: float = 2.0,
     gif_frame_duration: int = 80,
     render_engine: str = "CYCLES",
     seed: int = 42,
@@ -76,9 +78,14 @@ def render_scene_walkthrough(
         obstacle_radius:   Horizontal clearance radius in metres (default 0.5).
         fps:               Frames per second rendered by Blender (default 12).
                            Lower = faster render and smaller GIF.
-        duration_seconds:  Total walkthrough duration in seconds (default 15.0).
+        duration_seconds:  Total walkthrough duration in seconds. ``None`` (default)
+                           = auto-calculated from path length / walk_speed_mps.
+        walk_speed_mps:    Walking speed in m/s used for auto duration (default 1.2).
+                           Only used when duration_seconds is None.
         num_waypoints:     Number of coverage waypoints (default 20).
         look_range:        Maximum distance in metres for look-at targets (default 15.0).
+        rotation_smooth_seconds: Camera rotation time constant in seconds (default 2.0).
+                           Larger = slower, more cinematic rotation.
         gif_frame_duration: Milliseconds per GIF frame (default 80 ≈ 12.5 fps).
         render_engine:     Blender render engine — ``"CYCLES"`` (GPU, default),
                            ``"EEVEE"``, or ``"WORKBENCH"``.
@@ -109,9 +116,11 @@ def render_scene_walkthrough(
         "grid_resolution": grid_resolution,
         "obstacle_radius": obstacle_radius,
         "fps": fps,
-        "duration_seconds": duration_seconds,
+        "duration_seconds": duration_seconds,   # None = auto from path length
+        "walk_speed_mps": walk_speed_mps,
         "num_waypoints": num_waypoints,
         "look_range": look_range,
+        "rotation_smooth_seconds": rotation_smooth_seconds,
         "render": True,  # always render frames so we can build a GIF
         "render_engine": render_engine,
         "seed": seed,
