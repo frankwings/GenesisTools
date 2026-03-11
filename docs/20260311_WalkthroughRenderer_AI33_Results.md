@@ -62,9 +62,9 @@ The `local_area_ratio` is dimensionless — it scales with scene size in Blender
 
 ## 3. Render
 
-Two runs were produced: v1 (initial) and v2 (camera-seed path fix applied).
+Four runs were produced iterating toward the correct camera position:
 
-### v2 — Camera seed path fix (current)
+### v4 — Full fix: Z-correction + original camera view (current)
 
 | Metric | Value |
 |--------|-------|
@@ -72,70 +72,63 @@ Two runs were produced: v1 (initial) and v2 (camera-seed path fix applied).
 | Frame count | 240 |
 | Frame rate | 8 fps |
 | Resolution | 1280 × 720 |
-| Frame size | ~72 KB each |
-| GIF size | 428 KB |
+| Frame size | ~650–710 KB each |
+| GIF size | 22 MB |
 | Path points | 1,394 |
 
-**Sample frame (frame_0001)**:
+**Sample frame (frame_0001)** — matches original camera view exactly:
 
-![frame 001](../results/ai33_walkthrough_v2/frames/frame_0001.png)
+![frame 001](../results/ai33_walkthrough_v4/frames/frame_0001.png)
 
-**Walkthrough GIF** (240 frames, 8 fps, 428 KB):
+**Sample frame (frame_0240)** — end of walkthrough:
 
-![walkthrough GIF](../results/ai33_walkthrough_v2/AI33_002_280_walkthrough.gif)
+![frame 240](../results/ai33_walkthrough_v4/frames/frame_0240.png)
 
-### v1 — Initial run (reference)
+### v1 — Initial run (reference, blank — camera above ceiling)
 
-| Metric | Value |
-|--------|-------|
-| Render engine | CYCLES (GPU, CUDA — RTX 5090) |
-| Frame count | 240 |
-| Frame rate | 8 fps |
-| Resolution | 1280 × 720 |
-| Frame size | ~94 KB each |
-| GIF size | 710 KB |
-| Path points | 1,241 |
-
-![v1 walkthrough GIF](../results/ai33_walkthrough/AI33_002_280_walkthrough.gif)
+| Frame size | GIF size | Issue |
+|-----------|---------|-------|
+| ~94 KB each | 710 KB | Voxel quantisation: camera at 2.095 m (above ceiling) |
 
 ---
 
 ## 4. Timing Breakdown
 
-### v2 run — Camera seed path fix (2026-03-11)
+### v4 run — Full fix (2026-03-11)
 
 | Phase | Duration | Notes |
 |-------|----------|-------|
 | Depsgraph evaluation | ~0 s | Called lazily; evaluated only for nearby object meshes during BVH build |
 | Object AABB filter | ~0 s | Fast bounding-box sweep over 979 objects |
-| **Local BVH build** | **4.8 s** | `BVHTree.FromPolygons` from evaluated meshes of nearby objects only |
+| **Local BVH build** | **4.1 s** | `BVHTree.FromPolygons` from evaluated meshes of nearby objects only |
 | Local voxel grid | ~0 s | ~2,100 rays into local BVHTree |
-| Walkable + flood fill | ~0 s | BFS from camera seed (downward ray cast); 35×35×13 grid |
-| Path planning | ~0 s | Farthest-point sample (fixed_first=camera_seed) → TSP → BFS → smooth → upsample |
-| Camera animation | ~0 s | 1,394 keyframes written |
-| CYCLES render (240 frames) | 621.1 s | RTX 5090 CUDA, 1280×720, ~2.6 s/frame |
+| Walkable + flood fill | ~0 s | BFS from camera seed (downward ray); 35×35×13 grid |
+| Path planning | ~0 s | Farthest-point sample (fixed_first) → TSP → BFS → smooth → upsample + Z correction |
+| Camera animation | ~0 s | 1,394 keyframes; frame 1 = original camera quat |
+| CYCLES render (240 frames) | 781.0 s | RTX 5090 CUDA, 1280×720, ~3.3 s/frame (frames richer = more light paths) |
 | GIF assembly | <5 s | Pillow |
-| **Total** | **626.2 s (~10.4 min)** | |
+| **Total** | **785.4 s (~13.1 min)** | |
 
-### v1 run — Initial (2026-03-11)
+### Run history
 
-| Phase | Duration | Notes |
-|-------|----------|-------|
-| **Local BVH build** | **6.8 s** | |
-| CYCLES render (240 frames) | 693.4 s | ~2.9 s/frame |
-| **Total** | **700.4 s (~11.7 min)** | |
+| Run | Total | BVH | Render | Frames | Issue |
+|-----|-------|-----|--------|--------|-------|
+| v1 | 700 s | 6.8 s | 693 s | ~94 KB | Blank — camera in ceiling (voxel quantisation, no Z fix) |
+| v2 | 626 s | 4.8 s | 621 s | ~72 KB | Blank — same quantisation issue |
+| v3 | 651 s | 3.7 s | 647 s | ~72 KB | Frame 1 OK (orig rotation), rest blank (path Z still wrong) |
+| **v4** | **785 s** | **4.1 s** | **781 s** | **~650–710 KB** | **All frames correct** |
 
-### Comparison: Global mode (desert) vs Local mode v2 (AI33_002)
+### Comparison: Global mode (desert) vs Local mode v4 (AI33_002)
 
-| Metric | Desert (WORKBENCH, global) | AI33_002 v2 (CYCLES, local) |
+| Metric | Desert (WORKBENCH, global) | AI33_002 v4 (CYCLES, local) |
 |--------|---------------------------|-----------------------------|
 | Scene size | 3.0 GB, 96M triangles | 117 MB, office |
-| BVH / depsgraph build | **~40 min** (global, all 1380 objects) | **4.8 s** (local, nearby objects only) |
+| BVH / depsgraph build | **~40 min** (global, all 1380 objects) | **4.1 s** (local, nearby objects only) |
 | Voxel grid | ~1 min | ~0 s |
-| Render | ~5 min (240 WORKBENCH frames) | ~10.4 min (240 CYCLES frames) |
-| **Total** | **~51 min** | **~10.4 min** |
+| Render | ~5 min (240 WORKBENCH frames) | ~13 min (240 CYCLES frames, rich content) |
+| **Total** | **~51 min** | **~13 min** |
 
-Local mode eliminates the dominant bottleneck for large outdoor scenes. For the AI33 office scene the BVH build dropped from an estimated 40+ min to **4.8 seconds** by limiting `BVHTree.FromPolygons` to only nearby objects.
+Local mode eliminates the dominant bottleneck for large outdoor scenes. BVH build dropped from ~40 min to **4.1 seconds** by limiting `BVHTree.FromPolygons` to only nearby objects.
 
 ---
 
@@ -144,17 +137,16 @@ Local mode eliminates the dominant bottleneck for large outdoor scenes. For the 
 ### Output files
 
 ```
-GenesisTools/results/ai33_walkthrough_v2/          ← v2 (camera seed path fix)
-├── AI33_002_280_walkthrough.gif         (428 KB, 240 frames, 8 fps, CYCLES)
+GenesisTools/results/ai33_walkthrough_v4/          ← v4 (current, all frames correct)
+├── AI33_002_280_walkthrough.gif         (22 MB, 240 frames, 8 fps, CYCLES)
 ├── AI33_002_280_walkthrough.blend       (animated camera)
 └── frames/
-    ├── frame_0001.png … frame_0240.png  (1280×720, ~72 KB each)
+    ├── frame_0001.png … frame_0240.png  (1280×720, ~650–710 KB each)
 
-GenesisTools/results/ai33_walkthrough/             ← v1 (reference)
-├── AI33_002_280_walkthrough.gif         (710 KB, 240 frames, 8 fps, CYCLES)
-├── AI33_002_280_walkthrough.blend       (90 MB, animated camera)
+GenesisTools/results/ai33_walkthrough/             ← v1 (reference, blank frames)
+├── AI33_002_280_walkthrough.gif         (710 KB, 240 frames)
 └── frames/
-    ├── frame_0001.png … frame_0240.png  (1280×720, ~94 KB each)
+    └── frame_0001.png … frame_0240.png  (1280×720, ~94 KB each)
 ```
 
 ### Pipeline config
@@ -169,24 +161,27 @@ GenesisTools/results/ai33_walkthrough/             ← v1 (reference)
 ### Key Observations
 
 - **Local BVH mode works end-to-end** for a complex 979-object office scene
-- **BVH build 500× faster** than global mode equivalent (4.8 s vs ~40 min)
-- **`local_area_ratio` is unit-agnostic** — same value (0.3) works for metre scenes and centimetre scenes
-- **Camera path starts at camera position** (v2 fix): downward ray cast finds exact floor voxel; `fixed_first=camera_seed` ensures first waypoint is camera location; `cam_floor_start` prepended to path
-- **v2 faster overall**: 626 s (~10.4 min) vs 700 s (~11.7 min) — ~11% improvement
-- **v2 frames smaller** (72 KB vs 94 KB) and **GIF smaller** (428 KB vs 710 KB) — different camera path covers more varied geometry with less frame-to-frame redundancy
+- **BVH build 600× faster** than global mode equivalent (4.1 s vs ~40 min)
+- **`local_area_ratio` is unit-agnostic** — same value (0.3) works for metre and centimetre scenes
+- **Frame 1 = exact original camera view**: `matrix_world.to_quaternion()` used directly for frame 1; SLERP transitions into path-based look direction
+- **Z correction fixes voxel quantisation**: `actual_floor_z − voxel_floor_z` shifts all path points to true floor level; on 40 BU/voxel grids (40 cm voxels) the error was 39.5 BU, pushing camera from 1.7 m to 2.1 m (above ceiling)
+- **Frames 650–710 KB each** — rich photorealistic office content (vs 72–94 KB for blank/ceiling frames)
+- **GIF 22 MB** — large due to photorealistic content; compressed GIF encoding inefficient for complex CYCLES renders
 - **EEVEE unsuitable for headless WSL2**: no OpenGL GPU passthrough → Mesa LLVMpipe CPU fallback; CYCLES + CUDA works correctly
 
 ### Known Limitations
 
-- **`solid_voxels_count == walkable_voxels_count`** in result dict — minor reporting bug (same variable referenced twice); does not affect rendering
-- **Grid is coarse for cm-scale scene**: 40 BU/voxel = 40 cm — acceptable for 7m radius area
-- **`local_area_ratio=0.3`** may need tuning per scene; very large or very small scenes may need different ratios
+- **`solid_voxels_count == walkable_voxels_count`** in result dict — minor reporting bug; does not affect rendering
+- **Z correction assumes flat floor**: uses seed voxel's `actual_floor_z` as a uniform correction; multi-level floors may still have height variation along the path
+- **GIF 22 MB** — unsuitable for direct embedding in markdown; use frame samples instead
+- **`local_area_ratio=0.3`** may need tuning per scene
 
 ### Next Steps
 
-- Add a `--local` flag to the CLI so local mode can be triggered without editing Python
-- Test `local_area_ratio` values: 0.1 (smaller area, faster) vs 0.5 (wider coverage)
-- Fix `solid_voxels_count` reporting in result dict (should use separate solid/walkable accumulators)
+- Add a `--local` flag to the CLI
+- Test `local_area_ratio` values: 0.1 vs 0.5
+- Fix `solid_voxels_count` reporting
+- For multi-level floors: cast per-path-point downward ray for exact Z at each step
 
 ---
 
