@@ -339,11 +339,14 @@ def _flood_fill_walkable(solid, config, local_bounds, nx, ny, nz, center):
     Step 1 — Find walkable voxels: same as global mode (solid voxel with
     empty space above for camera_height clearance).
 
-    Step 2 — Flood fill: BFS from the walkable voxel nearest to `center` in
-    XY. This replaces _bfs_largest_component for the local mode and ensures
-    the path starts where the camera is, not the geometrically largest region.
+    Step 2 — Find seed: nearest walkable voxel to camera by 3D voxel distance.
+    Uses 3D distance (not just XY) so a camera embedded in a solid voxel (e.g.
+    clipping through furniture or floor) still resolves to a sensible nearby
+    walkable cell at the correct floor level.
 
-    Returns the reachable set (subset of walkable, connected to seed).
+    Step 3 — Flood fill BFS outward from seed.
+
+    Returns (reachable, seed) where seed is the voxel index closest to camera.
     """
     min_x, min_y, _mx, _my, min_z, _mz = local_bounds
     res = config.get("_effective_grid_resolution", config["grid_resolution"])
@@ -363,13 +366,20 @@ def _flood_fill_walkable(solid, config, local_bounds, nx, ny, nz, center):
 
     print(f"[Walkthrough] Walkable voxels: {len(walkable)}")
     if not walkable:
-        return walkable
+        return walkable, None
 
-    # --- Step 2: flood fill from seed nearest to camera center ---
+    # --- Step 2: find seed by 3D distance from camera ---
+    # Convert camera world position to voxel indices.
     seed_ix = int((center.x - min_x) / res)
     seed_iy = int((center.y - min_y) / res)
-    seed = min(walkable, key=lambda c: (c[0] - seed_ix) ** 2 + (c[1] - seed_iy) ** 2)
+    seed_iz = int((center.z - min_z) / res)
+    seed = min(walkable, key=lambda c: (c[0] - seed_ix) ** 2
+                                     + (c[1] - seed_iy) ** 2
+                                     + (c[2] - seed_iz) ** 2)
+    print(f"[Walkthrough] Camera voxel=({seed_ix},{seed_iy},{seed_iz})  "
+          f"seed=({seed[0]},{seed[1]},{seed[2]})")
 
+    # --- Step 3: flood fill from seed ---
     reachable = set()
     queue = deque([seed])
     while queue:
@@ -385,7 +395,7 @@ def _flood_fill_walkable(solid, config, local_bounds, nx, ny, nz, center):
                     queue.append(nb)
 
     print(f"[Walkthrough] Reachable from seed: {len(reachable)} / {len(walkable)} walkable voxels")
-    return reachable
+    return reachable, seed
 
 
 # ---------------------------------------------------------------------------
@@ -548,14 +558,23 @@ def _bfs_largest_component(walkable):
     return best
 
 
-def _farthest_point_sample(cells, n, rng_seed):
-    """Return n cells using farthest-point sampling (XY distance)."""
+def _farthest_point_sample(cells, n, rng_seed, fixed_first=None):
+    """Return n cells using farthest-point sampling (XY distance).
+
+    If fixed_first is provided it is used as the first waypoint instead of a
+    random choice. This ensures the path always starts at the camera seed.
+    """
     import random
     rng = random.Random(rng_seed)
     cells_list = list(cells)
     if len(cells_list) <= n:
+        # Return fixed_first as first element if given, rest in original order.
+        if fixed_first is not None and fixed_first in cells:
+            rest = [c for c in cells_list if c != fixed_first]
+            return [fixed_first] + rest
         return cells_list
-    first = rng.choice(cells_list)
+    first = fixed_first if (fixed_first is not None and fixed_first in cells) \
+            else rng.choice(cells_list)
     selected = [first]
     dist = {c: (c[0] - first[0]) ** 2 + (c[1] - first[1]) ** 2
             for c in cells_list}
@@ -960,7 +979,7 @@ def main():
             print(f"[Timing] local voxel grid: {timing['voxel_grid_s']}s")
 
             t0 = time.time()
-            walkable = _flood_fill_walkable(
+            walkable, camera_seed = _flood_fill_walkable(
                 solid, config, local_bounds, nx, ny, nz, center
             )
             timing["walkable_s"] = round(time.time() - t0, 1)
@@ -1000,9 +1019,11 @@ def main():
             component = walkable   # flood-fill already gives reachable set
         else:
             component = _bfs_largest_component(walkable)
+            camera_seed = None
 
         n_wp      = min(config["num_waypoints"], len(component))
-        waypoints = _farthest_point_sample(component, n_wp, config["seed"])
+        waypoints = _farthest_point_sample(component, n_wp, config["seed"],
+                                           fixed_first=camera_seed)
         tour      = _greedy_tsp_tour(waypoints)
         path_points = _build_smooth_path(tour, walkable, config, bounds_for_path)
         timing["path_s"] = round(time.time() - t0, 1)
