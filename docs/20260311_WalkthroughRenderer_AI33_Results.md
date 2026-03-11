@@ -60,11 +60,83 @@ The `local_area_ratio` is dimensionless — it scales with scene size in Blender
 
 ---
 
-## 3. Render
+## 3. Render — Version History
 
-Four runs were produced iterating toward the correct camera position:
+Four runs were produced, each fixing one layer of the camera positioning problem.
 
-### v4 — Full fix: Z-correction + original camera view (current)
+---
+
+### v1 — Initial local BVH run
+
+**Algorithm**: Basic local BVH mode. Camera seed found by 3D voxel-index distance. First waypoint chosen by farthest-point sampling (random first). Path Z = `min_z + iz × res` (raw voxel grid). No Z correction.
+
+**Bug**: `min_z + iz × res = −0.5 + 1 × 40 = 39.5 BU`. Camera placed at `39.5 + 170 = 209.5 BU = 2.095 m` — **above the ceiling** of the office (~200 BU = 2 m). All frames show ceiling or are blank.
+
+| Metric | Value |
+|--------|-------|
+| Frame size | ~94 KB each |
+| GIF size | 710 KB |
+| Path points | 1,241 |
+| Total time | 700 s |
+
+![v1 frame 001](../results/ai33_walkthrough/frames/frame_0001.png)
+
+---
+
+### v2 — Camera seed + fixed_first waypoint
+
+**Algorithm changes vs v1**:
+- `_flood_fill_walkable` casts a **downward BVH ray** from camera position to find the exact floor voxel (not nearest voxel by 3D distance)
+- `_farthest_point_sample` gains `fixed_first=camera_seed` parameter so the camera seed is always waypoint 0
+- `cam_floor_start` prepended to path_points with `seed_floor_z = bounds_for_path[4] + camera_seed[2] × res`
+
+**Bug**: `cam_floor_start.z = seed_floor_z = 39.5 BU` (same voxel quantisation error). Camera still at 209.5 BU. All frames blank.
+
+| Metric | Value |
+|--------|-------|
+| Frame size | ~72 KB each |
+| GIF size | 428 KB |
+| Path points | 1,394 |
+| Total time | 626 s |
+
+---
+
+### v3 — Correct cam_floor_start height + original rotation for frame 1
+
+**Algorithm changes vs v2**:
+- `cam_floor_start.z = center.z − cam_h_bu` — places path start at `center.z − 170 = −7.7 BU`, so camera lands exactly at `center.z = 162.3 BU` (original camera height) for **frame 1 only**
+- `initial_rotation_quat = scene.camera.matrix_world.to_quaternion()` — frame 1 uses original scene camera rotation; subsequent frames SLERP into path-based look direction
+
+**Bug**: Only `cam_floor_start` (path index 0) was corrected. The remaining path points from `_build_smooth_path` still used raw voxel Z (`39.5 BU`), so camera jumps to 209.5 BU from frame 2 onward. Frames 2–240 blank.
+
+| Metric | Value |
+|--------|-------|
+| Frame size | ~72 KB (blank after frame 1) |
+| GIF size | 428 KB |
+| Path points | 1,394 |
+| Total time | 651 s |
+
+Frame 1:
+
+![v3 frame 001](../results/ai33_walkthrough_v3/frames/frame_0001.png)
+
+---
+
+### v4 — Full fix: Z-correction applied to all path points (current)
+
+**Algorithm changes vs v3**:
+- `_flood_fill_walkable` returns `actual_floor_z` (the BVH ray hit z) in addition to `(reachable, seed)`
+- After `_build_smooth_path`, a **uniform Z correction** is applied to all path points:
+  ```
+  z_correction = actual_floor_z − voxel_floor_z
+               = 0 − 39.5 = −39.5 BU
+  path_points[i].z += z_correction   (for all i)
+  ```
+  This shifts every path point's floor Z from the quantised voxel level down to the true floor surface
+- `cam_floor_start.z = center.z − cam_h_bu` (from v3) ensures camera starts at exact original height
+- `initial_rotation_quat` (from v3) ensures frame 1 = original camera view
+
+**Result**: All 240 frames show correct office interior content.
 
 | Metric | Value |
 |--------|-------|
@@ -75,20 +147,34 @@ Four runs were produced iterating toward the correct camera position:
 | Frame size | ~650–710 KB each |
 | GIF size | 22 MB |
 | Path points | 1,394 |
+| Total time | 785 s (~13 min) |
 
-**Sample frame (frame_0001)** — matches original camera view exactly:
+**Frame 1** — exact original camera view:
 
-![frame 001](../results/ai33_walkthrough_v4/frames/frame_0001.png)
+![v4 frame 001](../results/ai33_walkthrough_v4/frames/frame_0001.png)
 
-**Sample frame (frame_0240)** — end of walkthrough:
+**Frame 60** — office corner with kitchen/dining area visible:
 
-![frame 240](../results/ai33_walkthrough_v4/frames/frame_0240.png)
+![v4 frame 060](../results/ai33_walkthrough_v4/frames/frame_0060.png)
 
-### v1 — Initial run (reference, blank — camera above ceiling)
+**Frame 150** — window wall:
 
-| Frame size | GIF size | Issue |
-|-----------|---------|-------|
-| ~94 KB each | 710 KB | Voxel quantisation: camera at 2.095 m (above ceiling) |
+![v4 frame 150](../results/ai33_walkthrough_v4/frames/frame_0150.png)
+
+**Frame 240** — end of walkthrough:
+
+![v4 frame 240](../results/ai33_walkthrough_v4/frames/frame_0240.png)
+
+---
+
+### Version summary
+
+| Run | cam_floor_start.z | Path Z | Frame 1 rot | Result |
+|-----|-------------------|--------|-------------|--------|
+| v1 | `seed_floor_z` = 39.5 BU | voxel raw | random | Blank (all) |
+| v2 | `seed_floor_z` = 39.5 BU | voxel raw | random | Blank (all) |
+| v3 | `center.z − cam_h` = −7.7 BU | voxel raw | orig quat ✓ | Frame 1 OK, rest blank |
+| **v4** | `center.z − cam_h` = −7.7 BU | **corrected** | orig quat ✓ | **All correct** |
 
 ---
 
@@ -169,18 +255,30 @@ GenesisTools/results/ai33_walkthrough/             ← v1 (reference, blank fram
 - **GIF 22 MB** — large due to photorealistic content; compressed GIF encoding inefficient for complex CYCLES renders
 - **EEVEE unsuitable for headless WSL2**: no OpenGL GPU passthrough → Mesa LLVMpipe CPU fallback; CYCLES + CUDA works correctly
 
+### Near-Clip Plane Artifact (v4)
+
+Some v4 frames show a **curved dark edge** cutting into nearby wall geometry:
+
+![v4 clipping artifact — frame 180](../results/ai33_walkthrough_v4/frames/frame_0180.png)
+
+**Root cause**: Blender default `clip_start = 0.1 m`. In a cm-scale scene (`unit_scale = 0.01`, 1 BU = 1 cm), `0.1 m = 10 BU = 10 cm`. The 40 BU/voxel grid allows the camera to walk within ~20 BU of walls. When the camera comes within 10 cm of a surface, the near clip plane intersects the geometry and renders as a curved dark hole.
+
+**Fix applied to code** (`cam_data.clip_start = 0.001 / unit_scale`): sets near clip to **1 mm** in world space (0.1 BU in cm-scale). Requires re-render (v5) to validate.
+
 ### Known Limitations
 
 - **`solid_voxels_count == walkable_voxels_count`** in result dict — minor reporting bug; does not affect rendering
-- **Z correction assumes flat floor**: uses seed voxel's `actual_floor_z` as a uniform correction; multi-level floors may still have height variation along the path
-- **GIF 22 MB** — unsuitable for direct embedding in markdown; use frame samples instead
+- **Z correction assumes flat floor**: uses seed voxel's `actual_floor_z` as uniform correction; multi-level floors may have residual height error along the path
+- **GIF 22 MB** — unsuitable for direct embedding in markdown; reference individual frames
 - **`local_area_ratio=0.3`** may need tuning per scene
 
 ### Next Steps
 
+- **Re-render AI33 (v5)** with `clip_start = 1 mm` fix to eliminate near-clip wall artifacts
 - Add a `--local` flag to the CLI
 - Test `local_area_ratio` values: 0.1 vs 0.5
 - Fix `solid_voxels_count` reporting
+- For multi-level floors: per-path-point downward ray for exact Z
 - For multi-level floors: cast per-path-point downward ray for exact Z at each step
 
 ---
