@@ -59,6 +59,8 @@ def render_scene_walkthrough(
     gif_frame_duration: int = 80,
     render_engine: str = "CYCLES",
     seed: int = 42,
+    local_area_ratio: float = None,
+    local_height: float = 8.0,
     blender_command: str = "blender",
 ) -> dict:
     """Render a patrol-style walkthrough GIF inside a Blender scene.
@@ -139,6 +141,8 @@ def render_scene_walkthrough(
         "render": True,  # always render frames so we can build a GIF
         "render_engine": render_engine,
         "seed": seed,
+        "local_area_ratio": local_area_ratio,  # None = global mode; float = ratio × min(span_x,span_y)
+        "local_height": local_height,
     }
 
     # Windows fix: NamedTemporaryFile stays open until explicitly closed;

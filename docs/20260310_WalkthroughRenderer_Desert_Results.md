@@ -156,3 +156,85 @@ GenesisExp/GenesisCode2Worlds/outputs/scene_desert/walkthrough/
 - Test with `render_engine="CYCLES"` for material-quality output (GPU required)
 - Raise `camera_height=3.0` to reduce terrain clipping on large-voxel scenes
 - Test on a smaller indoor scene (e.g., bedroom) where BVH build is fast and CYCLES quality is visible
+
+---
+
+## 6. Algorithm Reference
+
+### 6.1 Voxel Grid Construction (Global Mode)
+
+**Tri-axial sweep voxelisation** — marks solid voxels without building an explicit mesh representation.
+
+```
+Scene bounding box
+    │
+    ├── Z sweep (top → down)   : detects floors, terrain, tabletops, ceilings
+    ├── X sweep (left → right) : detects walls facing ±X
+    └── Y sweep (front → back) : detects walls facing ±Y
+```
+
+Each sweep fires one ray per grid row. Each ray calls `scene.ray_cast()` repeatedly, stepping 5 cm past each surface hit to find the next one (`_cast_all_hits`). This captures multi-layer structures (mezzanines, furniture stacks on shelves).
+
+**Ray count**: `O(nx·ny + ny·nz + nx·nz)` rays. With `max_grid_cells_xy=80, max_grid_cells_z=40`: worst-case `80×80 + 80×40 + 80×40 = 9,600` initial rays, each potentially spawning 2–10 `ray_cast()` calls depending on scene density.
+
+**Voxel size scaling**: `res = max(grid_resolution, span_x / max_xy, span_y / max_xy, span_z / max_z)`. For a 150m desert with defaults: `res = max(0.5, 150/80) = 1.875 m`.
+
+### 6.2 Walkable Voxel Detection
+
+A voxel `(ix, iy, iz)` is **walkable** (camera feet position) when:
+1. `(ix, iy, iz-1)` is solid — floor surface directly below
+2. `(ix, iy, iz)` through `(ix, iy, iz + ceil(camera_height/res) - 1)` are all **not** solid — full headroom clearance
+
+The world-space floor height is `min_z + iz * res`. Camera eye height is `floor_z + camera_height`.
+
+### 6.3 Coverage Path Generation
+
+```
+walkable cells
+    │
+    ├── _bfs_largest_component()      — keep only the largest 4-connected region
+    │                                   (±1 Z allowed for terrain slopes)
+    ├── _farthest_point_sample(n=12)  — spread n waypoints maximally apart (XY distance)
+    ├── _greedy_tsp_tour()            — nearest-neighbour tour, closes the loop
+    ├── _bfs_path() per segment       — wall-free shortest path between each pair
+    ├── Laplacian smooth (5 passes)   — XY only; Z re-snapped to floor after each pass
+    └── 4× linear upsample           — dense per-frame samples for smooth camera motion
+```
+
+**Farthest-point sampling**: iteratively picks the cell furthest from all already-selected cells. Ensures even spatial coverage rather than clustering waypoints in one area.
+
+**Greedy TSP**: nearest-neighbour heuristic starting from waypoint[0]. Not optimal but fast and good enough for short paths.
+
+**Constrained Laplacian**: smooths XY independently from Z. After each XY move, Z is re-resolved by looking up `walkable_xy[(ix, iy)]` — the floor level at the smoothed XY position. This prevents the path from floating above or sinking below the terrain.
+
+### 6.4 Camera Steering
+
+**Rotation mode**: `QUATERNION` — avoids gimbal lock that occurs with Euler angles when the camera pitches vertically.
+
+**Gaze state machine** (per-frame):
+
+```
+State: FORWARD
+  │  no nearby object with LOS → look ahead along path (t + 0.15)
+  │
+  └─→ found interesting object within look_range AND has_line_of_sight()
+        │
+        └─→ State: GLANCING (hold for glance_duration = fps × 3 frames)
+                  │
+                  └─→ cooldown[object] = 4 × glance_duration
+                      (prevents re-visiting same object too soon)
+                      → back to FORWARD
+```
+
+**Object scoring**: objects are pre-filtered by name (exclude "floor", "wall", "ceiling", etc.) and volume (> 0.001 m³, < 30m dimension). Nearest eligible object within `look_range` that has clear line-of-sight wins.
+
+**Line-of-sight**: `scene.ray_cast()` from camera eye to object centre. If any geometry is hit before reaching the target, LOS is blocked.
+
+**Rotation smoothing**: first-order low-pass SLERP filter applied every frame:
+```
+α = 1 - exp(-1 / (fps × rotation_smooth_seconds))
+q_current = SLERP(q_prev, q_target, α)
+```
+With `rotation_smooth_seconds=2.0` at `fps=8`: `α ≈ 0.06` → camera reaches 63% of target rotation after 2s. Higher τ = slower, more cinematic rotation.
+
+**F-curves**: all keyframes set to `LINEAR` interpolation. Combined with the per-frame SLERP smoothing, this gives smooth motion without Blender's default Bezier overshooting.

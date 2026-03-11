@@ -12,9 +12,12 @@ Prints a single ``WALKTHROUGH_RESULT:{...}`` JSON line to stdout on completion.
 Algorithm
 ---------
 1. Parse CLI args
-2. Build 3D voxel grid  (tri-axial sweep: Z + X + Y marks solid voxels)
-3. Find walkable voxels  (floor surface voxel + camera-height clearance above)
-4. Plan coverage path   (BFS component → farthest-point sampling →
+2. Build voxel grid — two modes:
+   a. LOCAL  (local_radius_xy set): build BVHTree only from nearby objects,
+      voxelise a fixed-size region around the camera, flood-fill reachable cells.
+   b. GLOBAL (legacy): tri-axial sweep over the full scene using scene.ray_cast.
+3. Find walkable voxels  (floor surface + camera-height clearance above)
+4. Plan coverage path   (BFS component / flood-fill → farthest-point sampling →
                           greedy tour → BFS pathfinding between waypoints →
                           constrained Laplacian smoothing → 4× upsample)
 5. Find interesting objects (volume scoring, pre-filter by name/size)
@@ -22,17 +25,20 @@ Algorithm
 7. Animate camera          (gaze state machine: FORWARD / GLANCING,
                             per-frame line-of-sight, SLERP, LINEAR interp)
 8. Save .blend + optional render
-9. Print WALKTHROUGH_RESULT
+9. Print WALKTHROUGH_RESULT (includes per-phase timing)
 """
 
 import json
 import math
 import sys
+import time
 from collections import deque
 from pathlib import Path
 
 import bpy
 from mathutils import Vector
+from mathutils.bvhtree import BVHTree
+
 
 # ---------------------------------------------------------------------------
 # CLI parsing
@@ -74,7 +80,7 @@ def _parse_args():
 
 
 # ---------------------------------------------------------------------------
-# Scene bounds
+# Scene bounds (used by global mode)
 # ---------------------------------------------------------------------------
 
 def _scene_bounds():
@@ -94,15 +100,304 @@ def _scene_bounds():
 
 
 # ---------------------------------------------------------------------------
-# Step 2: 3D voxel grid (tri-axial sweep)
+# Unit scale helper
 # ---------------------------------------------------------------------------
 
-def _cast_all_hits(scene, depsgraph, origin, direction, max_dist):
-    """Yield every surface hit location along a ray (steps past each surface)."""
+def _get_unit_scale():
+    """Return scene unit scale: metres per Blender unit.
+
+    Blender stores coordinates in 'Blender units'. The scene unit_settings
+    tell us what 1 Blender unit equals in metres.
+      - Standard metric scene:  scale_length = 1.0  (1 BU = 1 m)
+      - Centimetre scene:       scale_length = 0.01 (1 BU = 1 cm)
+    All config distances (grid_resolution, local_radius_xy, etc.) are in
+    real metres; divide by scale to convert to Blender units for ray_cast.
+    """
+    scale = bpy.context.scene.unit_settings.scale_length
+    if scale <= 0:
+        scale = 1.0
+    return scale
+
+
+# ---------------------------------------------------------------------------
+# LOCAL MODE helpers
+# ---------------------------------------------------------------------------
+
+def _find_local_center(config):
+    """Find a good XYZ centre for the local voxel region.
+
+    Priority:
+      1. Scene's active camera position.
+      2. First camera object found in the scene.
+      3. XY centre of all mesh objects at 60% height (fallback).
+    """
+    cam = bpy.context.scene.camera
+    if cam is not None:
+        return cam.location.copy()
+    for obj in bpy.context.scene.objects:
+        if obj.type == "CAMERA":
+            return obj.location.copy()
+    # Geometric fallback
+    xs, ys, zs = [], [], []
+    for obj in bpy.context.scene.objects:
+        if obj.type != "MESH":
+            continue
+        for corner in obj.bound_box:
+            w = obj.matrix_world @ Vector(corner)
+            xs.append(w.x); ys.append(w.y); zs.append(w.z)
+    if xs:
+        return Vector((
+            (min(xs) + max(xs)) / 2,
+            (min(ys) + max(ys)) / 2,
+            min(zs) + (max(zs) - min(zs)) * 0.6,
+        ))
+    return Vector((0.0, 0.0, 1.7))
+
+
+def _filter_nearby_objects(center, radius_xy_bu, height_above_bu, height_below_bu):
+    """Return mesh objects whose world AABB overlaps the local region.
+
+    All distance arguments are in Blender units (caller is responsible for
+    converting from real-world distances).
+
+    The local region is a box:
+      X: [cx - radius_xy, cx + radius_xy]
+      Y: [cy - radius_xy, cy + radius_xy]
+      Z: [cz - height_below, cz + height_above]
+    """
+    radius_xy   = radius_xy_bu
+    height_above = height_above_bu
+    height_below = height_below_bu
+    cx, cy, cz = center.x, center.y, center.z
+    nearby = []
+    for obj in bpy.context.scene.objects:
+        if obj.type != "MESH":
+            continue
+        corners = [obj.matrix_world @ Vector(c) for c in obj.bound_box]
+        ox_min = min(c.x for c in corners)
+        ox_max = max(c.x for c in corners)
+        oy_min = min(c.y for c in corners)
+        oy_max = max(c.y for c in corners)
+        oz_min = min(c.z for c in corners)
+        oz_max = max(c.z for c in corners)
+        if (ox_max < cx - radius_xy or ox_min > cx + radius_xy or
+                oy_max < cy - radius_xy or oy_min > cy + radius_xy or
+                oz_max < cz - height_below or oz_min > cz + height_above):
+            continue
+        nearby.append(obj)
+    return nearby
+
+
+def _build_bvh_from_objects(objects, depsgraph):
+    """Build a combined BVHTree from the evaluated meshes of given objects.
+
+    Each object is evaluated via depsgraph (applies modifiers/geometry nodes),
+    transformed to world space, and merged into a single BVHTree.
+    """
+    verts_all = []
+    polys_all = []
+    vert_offset = 0
+
+    for obj in objects:
+        try:
+            eval_obj = obj.evaluated_get(depsgraph)
+            mesh = eval_obj.to_mesh()
+            if mesh is None or len(mesh.polygons) == 0:
+                eval_obj.to_mesh_clear()
+                continue
+            mat = obj.matrix_world
+            for v in mesh.vertices:
+                verts_all.append(mat @ v.co)
+            for poly in mesh.polygons:
+                polys_all.append(tuple(vert_offset + i for i in poly.vertices))
+            vert_offset += len(mesh.vertices)
+            eval_obj.to_mesh_clear()
+        except Exception as exc:
+            print(f"[Walkthrough] Skipping {obj.name}: {exc}")
+
+    if not verts_all:
+        raise RuntimeError("No mesh data available for local BVHTree — no nearby objects?")
+
+    return BVHTree.FromPolygons(verts_all, polys_all, all_triangles=False)
+
+
+def _cast_all_hits_bvh(bvh, origin, direction, max_dist):
+    """Yield every surface hit along a ray using a local BVHTree."""
     origin = Vector(origin)
     direction = Vector(direction).normalized()
     remaining = max_dist
-    step_past = 0.05  # 5 cm step past each surface to find the next one
+    step_past = 0.05
+    while remaining > step_past:
+        loc, _normal, _index, _dist = bvh.ray_cast(origin, direction, remaining)
+        if loc is None:
+            break
+        yield loc
+        traveled = (loc - origin).length
+        remaining -= traveled + step_past
+        origin = loc + direction * step_past
+
+
+def _build_local_voxel_grid(config, center, bvh):
+    """Tri-axial voxelisation of a fixed local region using a local BVHTree.
+
+    Unlike the global mode, the grid is anchored at `center` with a fixed
+    physical size (local_radius_xy × local_radius_xy × local_height metres),
+    so computation cost is O(1) regardless of scene size.
+
+    All config distances are in real metres; they are converted to Blender
+    units via _get_unit_scale() before use in ray_cast or coordinate maths.
+
+    The floor level is auto-detected by casting a ray down from `center`.
+
+    Returns
+    -------
+    solid      : set of (ix, iy, iz) voxel indices
+    nx, ny, nz : grid dimensions
+    res        : voxel size in Blender units
+    local_bounds : (min_x, min_y, max_x, max_y, min_z, max_z) in Blender units
+    """
+    unit_scale = _get_unit_scale()   # metres per Blender unit (still needed for res, height)
+    radius_xy = config["_local_radius_bu"]           # pre-computed ratio × scene size (BU)
+    height    = config.get("local_height", 8.0)     / unit_scale
+    res       = config["grid_resolution"]            / unit_scale
+
+    min_x = center.x - radius_xy
+    max_x = center.x + radius_xy
+    min_y = center.y - radius_xy
+    max_y = center.y + radius_xy
+
+    # Auto-detect floor level from camera center.
+    floor_loc, _, _, _ = bvh.ray_cast(
+        Vector((center.x, center.y, center.z + height)),
+        Vector((0.0, 0.0, -1.0)),
+        height * 3.0,
+    )
+    if floor_loc is not None:
+        min_z = floor_loc.z - 0.5
+        max_z = floor_loc.z + height
+    else:
+        min_z = center.z - 1.0
+        max_z = center.z + height
+
+    local_bounds = (min_x, min_y, max_x, max_y, min_z, max_z)
+    config["_effective_grid_resolution"] = res
+    config["_local_bounds"] = local_bounds
+
+    span_x = max_x - min_x
+    span_y = max_y - min_y
+    span_z = max_z - min_z
+
+    nx = max(1, int(math.ceil(span_x / res)))
+    ny = max(1, int(math.ceil(span_y / res)))
+    nz = max(1, int(math.ceil(span_z / res)))
+
+    print(f"[Walkthrough] LOCAL grid {nx}×{ny}×{nz}  res={res}m  "
+          f"centre=({center.x:.1f},{center.y:.1f},{center.z:.1f})  "
+          f"z=[{min_z:.1f},{max_z:.1f}]")
+
+    solid = set()
+
+    def mark(loc_v):
+        ix = min(nx - 1, max(0, int((loc_v.x - min_x) / res)))
+        iy = min(ny - 1, max(0, int((loc_v.y - min_y) / res)))
+        iz = min(nz - 1, max(0, int((loc_v.z - min_z) / res)))
+        solid.add((ix, iy, iz))
+
+    ray_span_z = span_z + 2.0
+    ray_span_x = span_x + 2.0
+    ray_span_y = span_y + 2.0
+
+    for ix in range(nx):
+        x = min_x + (ix + 0.5) * res
+        for iy in range(ny):
+            y = min_y + (iy + 0.5) * res
+            for loc_v in _cast_all_hits_bvh(bvh, (x, y, max_z + 1.0), (0, 0, -1), ray_span_z):
+                mark(loc_v)
+
+    for iy in range(ny):
+        y = min_y + (iy + 0.5) * res
+        for iz in range(nz):
+            z = min_z + (iz + 0.5) * res
+            for loc_v in _cast_all_hits_bvh(bvh, (min_x - 1.0, y, z), (1, 0, 0), ray_span_x):
+                mark(loc_v)
+
+    for ix in range(nx):
+        x = min_x + (ix + 0.5) * res
+        for iz in range(nz):
+            z = min_z + (iz + 0.5) * res
+            for loc_v in _cast_all_hits_bvh(bvh, (x, min_y - 1.0, z), (0, 1, 0), ray_span_y):
+                mark(loc_v)
+
+    print(f"[Walkthrough] Local voxel grid {nx}×{ny}×{nz} "
+          f"({nx * ny * nz} total), {len(solid)} solid voxels")
+    return solid, nx, ny, nz, res, local_bounds
+
+
+def _flood_fill_walkable(solid, config, local_bounds, nx, ny, nz, center):
+    """Find walkable voxels and flood-fill reachable cells from camera seed.
+
+    Step 1 — Find walkable voxels: same as global mode (solid voxel with
+    empty space above for camera_height clearance).
+
+    Step 2 — Flood fill: BFS from the walkable voxel nearest to `center` in
+    XY. This replaces _bfs_largest_component for the local mode and ensures
+    the path starts where the camera is, not the geometrically largest region.
+
+    Returns the reachable set (subset of walkable, connected to seed).
+    """
+    min_x, min_y, _mx, _my, min_z, _mz = local_bounds
+    res = config.get("_effective_grid_resolution", config["grid_resolution"])
+    unit_scale = config.get("_unit_scale", 1.0)
+    cam_h = config["camera_height"] / unit_scale   # convert metres → BU
+    cam_h_voxels = max(1, int(math.ceil(cam_h / res)))
+
+    # --- Step 1: walkable voxels ---
+    floor_surfaces = {(ix, iy, iz) for (ix, iy, iz) in solid
+                      if (ix, iy, iz + 1) not in solid}
+    walkable = set()
+    for (ix, iy, iz_floor) in floor_surfaces:
+        iz_feet = iz_floor + 1
+        if all((ix, iy, iz_feet + k) not in solid and iz_feet + k < nz
+               for k in range(cam_h_voxels)):
+            walkable.add((ix, iy, iz_feet))
+
+    print(f"[Walkthrough] Walkable voxels: {len(walkable)}")
+    if not walkable:
+        return walkable
+
+    # --- Step 2: flood fill from seed nearest to camera center ---
+    seed_ix = int((center.x - min_x) / res)
+    seed_iy = int((center.y - min_y) / res)
+    seed = min(walkable, key=lambda c: (c[0] - seed_ix) ** 2 + (c[1] - seed_iy) ** 2)
+
+    reachable = set()
+    queue = deque([seed])
+    while queue:
+        cell = queue.popleft()
+        if cell in reachable:
+            continue
+        reachable.add(cell)
+        cx, cy, cz = cell
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            for dz in (-1, 0, 1):
+                nb = (cx + dx, cy + dy, cz + dz)
+                if nb in walkable and nb not in reachable:
+                    queue.append(nb)
+
+    print(f"[Walkthrough] Reachable from seed: {len(reachable)} / {len(walkable)} walkable voxels")
+    return reachable
+
+
+# ---------------------------------------------------------------------------
+# GLOBAL MODE helpers  (legacy — used when local_radius_xy is not set)
+# ---------------------------------------------------------------------------
+
+def _cast_all_hits(scene, depsgraph, origin, direction, max_dist):
+    """Yield every surface hit along a ray via scene.ray_cast (global BVH)."""
+    origin = Vector(origin)
+    direction = Vector(direction).normalized()
+    remaining = max_dist
+    step_past = 0.05
     while remaining > step_past:
         hit, loc, _normal, *_ = scene.ray_cast(depsgraph, origin, direction,
                                                 distance=remaining)
@@ -115,52 +410,36 @@ def _cast_all_hits(scene, depsgraph, origin, direction, max_dist):
 
 
 def _build_voxel_grid(config, scene_bounds):
-    """Tri-axial sweep voxelisation covering the full scene bounding box.
-
-    Three orthogonal sweeps ensure all surface orientations are captured:
-    - Z sweep  (top→down)  : floors, terrain, tabletops, ceilings
-    - X sweep  (left→right): walls facing ±X
-    - Y sweep  (front→back): walls facing ±Y
-
-    Each sweep fires one ray per grid row and steps past every surface hit,
-    so multi-layer structures (mezzanines, furniture stacks) are all captured.
+    """Tri-axial sweep voxelisation over the full scene (global BVH mode).
 
     Grid dimensions are capped at max_grid_cells_xy / max_grid_cells_z so that
-    ray count stays fixed regardless of scene size. The voxel size is scaled up
+    ray count stays fixed regardless of scene size. Voxel size is scaled up
     when the scene is larger than grid_resolution * max_grid_cells.
 
     Complexity: O(nx*ny + ny*nz + nx*nz) rays, each with O(surfaces) hits.
-    For a 20×20×10 indoor grid: ~800 rays, ~2 400 ray_cast calls.
-
-    Returns
-    -------
-    solid : set of (ix, iy, iz)
-    nx, ny, nz : grid dimensions
-    res : effective voxel size used (may be larger than config["grid_resolution"])
     """
     min_x, min_y, max_x, max_y, min_z, max_z = scene_bounds
-    max_xy = config.get("max_grid_cells_xy", 80)
+    max_xy     = config.get("max_grid_cells_xy", 80)
     max_z_cells = config.get("max_grid_cells_z", 40)
-    min_res = config["grid_resolution"]
+    min_res    = config["grid_resolution"]
 
-    # Scale voxel size up so nx/ny/nz never exceed the caps.
     span_x = max_x - min_x
     span_y = max_y - min_y
     span_z = max_z - min_z
     res_xy = max(min_res, span_x / max_xy, span_y / max_xy)
     res_z  = max(min_res, span_z / max_z_cells)
-    res    = max(res_xy, res_z)   # uniform grid (simplest for downstream BFS)
+    res    = max(res_xy, res_z)
 
-    scene = bpy.context.scene
+    scene     = bpy.context.scene
     depsgraph = bpy.context.evaluated_depsgraph_get()
 
     nx = max(1, int(math.ceil(span_x / res)))
     ny = max(1, int(math.ceil(span_y / res)))
     nz = max(1, int(math.ceil(span_z / res)))
 
-    # Store effective resolution back so downstream functions pick it up.
     config["_effective_grid_resolution"] = res
-    print(f"[Walkthrough] Config res={min_res}m  →  effective res={res:.2f}m  "
+    print(f"[Walkthrough] GLOBAL grid {nx}×{ny}×{nz}  "
+          f"config_res={min_res}m → effective_res={res:.2f}m  "
           f"(caps: xy≤{max_xy}, z≤{max_z_cells})")
 
     solid = set()
@@ -171,12 +450,10 @@ def _build_voxel_grid(config, scene_bounds):
         iz = min(nz - 1, max(0, int((loc.z - min_z) / res)))
         solid.add((ix, iy, iz))
 
-    # Ray-cast span: +2m margin on each axis so rays start/end outside geometry.
     ray_span_x = span_x + 2.0
     ray_span_y = span_y + 2.0
     ray_span_z = span_z + 2.0
 
-    # Z sweep: captures horizontal surfaces (floors, terrain, tabletops).
     for ix in range(nx):
         x = min_x + (ix + 0.5) * res
         for iy in range(ny):
@@ -185,7 +462,6 @@ def _build_voxel_grid(config, scene_bounds):
                                       (x, y, max_z + 1.0), (0, 0, -1), ray_span_z):
                 mark(loc)
 
-    # X sweep: captures walls facing ±X.
     for iy in range(ny):
         y = min_y + (iy + 0.5) * res
         for iz in range(nz):
@@ -194,7 +470,6 @@ def _build_voxel_grid(config, scene_bounds):
                                       (min_x - 1.0, y, z), (1, 0, 0), ray_span_x):
                 mark(loc)
 
-    # Y sweep: captures walls facing ±Y.
     for ix in range(nx):
         x = min_x + (ix + 0.5) * res
         for iz in range(nz):
@@ -209,27 +484,21 @@ def _build_voxel_grid(config, scene_bounds):
 
 
 # ---------------------------------------------------------------------------
-# Step 3: Walkable voxels
+# Step 3: Walkable voxels (global mode)
 # ---------------------------------------------------------------------------
 
 def _find_walkable_voxels(solid, config, scene_bounds, nx, ny, nz):
-    """Find voxels where the camera can stand.
+    """Find voxels where the camera can stand (global mode).
 
-    A voxel (ix, iy, iz) is **walkable** (camera feet position) when:
-    - (ix, iy, iz-1) is solid  → there is a floor surface below
-    - (ix, iy, iz) … (ix, iy, iz + cam_h_voxels - 1) are all NOT solid
-      → enough headroom for the full camera height
-
-    The returned iz represents the camera FEET. World-space floor Z =
-    ``min_z + iz * res``  (top face of the solid voxel below).
-    Camera eye Z = floor Z + camera_height.
+    A voxel (ix, iy, iz) is walkable when:
+    - (ix, iy, iz-1) is solid  → floor surface below
+    - (ix, iy, iz) … (ix, iy, iz + cam_h_voxels - 1) are NOT solid → headroom
     """
     res = config.get("_effective_grid_resolution", config["grid_resolution"])
-    cam_h = config["camera_height"]
-    min_z = scene_bounds[4]
+    unit_scale = config.get("_unit_scale", 1.0)
+    cam_h = config["camera_height"] / unit_scale   # convert metres → BU
     cam_h_voxels = max(1, int(math.ceil(cam_h / res)))
 
-    # Floor surface voxels: solid with an empty voxel directly above.
     floor_surfaces = {
         (ix, iy, iz) for (ix, iy, iz) in solid
         if (ix, iy, iz + 1) not in solid
@@ -237,7 +506,7 @@ def _find_walkable_voxels(solid, config, scene_bounds, nx, ny, nz):
 
     walkable = set()
     for (ix, iy, iz_floor) in floor_surfaces:
-        iz_feet = iz_floor + 1          # first empty voxel = camera feet
+        iz_feet = iz_floor + 1
         clear = True
         for k in range(cam_h_voxels):
             if (ix, iy, iz_feet + k) in solid or iz_feet + k >= nz:
@@ -255,12 +524,7 @@ def _find_walkable_voxels(solid, config, scene_bounds, nx, ny, nz):
 # ---------------------------------------------------------------------------
 
 def _bfs_largest_component(walkable):
-    """Return the largest connected component of walkable voxels.
-
-    Two walkable voxels are neighbours if they differ by ±1 in X or Y
-    (4-connected) and by at most ±1 in Z — allowing one-voxel steps up/down
-    for terrain slopes and shallow stairs.
-    """
+    """Return the largest 4-connected XY component (±1 Z) of walkable voxels."""
     remaining = set(walkable)
     best = set()
     while remaining:
@@ -285,7 +549,7 @@ def _bfs_largest_component(walkable):
 
 
 def _farthest_point_sample(cells, n, rng_seed):
-    """Return n cells using farthest-point sampling (XY distance, 3-tuple aware)."""
+    """Return n cells using farthest-point sampling (XY distance)."""
     import random
     rng = random.Random(rng_seed)
     cells_list = list(cells)
@@ -293,7 +557,6 @@ def _farthest_point_sample(cells, n, rng_seed):
         return cells_list
     first = rng.choice(cells_list)
     selected = [first]
-    # Distance of each cell to its nearest selected neighbour.
     dist = {c: (c[0] - first[0]) ** 2 + (c[1] - first[1]) ** 2
             for c in cells_list}
     for _ in range(n - 1):
@@ -318,15 +581,12 @@ def _greedy_tsp_tour(waypoints):
                       key=lambda c: (c[0] - last[0]) ** 2 + (c[1] - last[1]) ** 2)
         remaining.remove(nearest)
         tour.append(nearest)
-    tour.append(tour[0])   # close loop
+    tour.append(tour[0])
     return tour
 
 
 def _bfs_path(start, goal, walkable):
-    """BFS shortest path between two walkable voxels.
-
-    Uses 4-connected XY with |Δiz| ≤ 1 — matches component connectivity.
-    """
+    """BFS shortest path between two walkable voxels (4-connected XY, ±1 Z)."""
     if start == goal:
         return [start]
     parent = {start: None}
@@ -348,23 +608,24 @@ def _bfs_path(start, goal, walkable):
                 if nb in walkable and nb not in parent:
                     parent[nb] = cell
                     queue.append(nb)
-    return [start, goal]   # disconnected — fallback
+    return [start, goal]
 
 
-def _build_smooth_path(tour, walkable, config, scene_bounds):
+def _build_smooth_path(tour, walkable, config, bounds):
     """BFS corridor + constrained Laplacian smoothing + 4× upsample.
 
     1. BFS between consecutive waypoints — guaranteed wall-free path.
     2. Laplacian smoothing in XY only; Z is re-resolved from the walkable
        voxel at each XY so the camera follows terrain correctly.
     3. 4× linear upsampling for dense per-frame path sampling.
+
+    `bounds` must be (min_x, min_y, max_x, max_y, min_z, max_z).
     """
-    min_x = scene_bounds[0]
-    min_y = scene_bounds[1]
-    min_z = scene_bounds[4]
+    min_x = bounds[0]
+    min_y = bounds[1]
+    min_z = bounds[4]
     res = config.get("_effective_grid_resolution", config["grid_resolution"])
 
-    # ---- 1. BFS corridor ------------------------------------------------
     cell_path = []
     n = len(tour)
     for i in range(n - 1):
@@ -372,12 +633,11 @@ def _build_smooth_path(tour, walkable, config, scene_bounds):
         if i == 0:
             cell_path.extend(segment)
         else:
-            cell_path.extend(segment[1:])   # skip duplicate join point
+            cell_path.extend(segment[1:])
 
     if not cell_path:
         return []
 
-    # (ix, iy) → lowest walkable iz at that XY (for smooth terrain following).
     walkable_xy = {}
     for (ix, iy, iz) in walkable:
         if (ix, iy) not in walkable_xy or iz < walkable_xy[(ix, iy)]:
@@ -388,12 +648,11 @@ def _build_smooth_path(tour, walkable, config, scene_bounds):
         return [
             min_x + (ix + 0.5) * res,
             min_y + (iy + 0.5) * res,
-            min_z + iz * res,             # floor top = bottom of walkable voxel
+            min_z + iz * res,
         ]
 
     points = [c2w(c) for c in cell_path]
 
-    # ---- 2. Constrained Laplacian smoothing (5 passes, XY only) ---------
     for _ in range(5):
         new_pts = [points[0]]
         for i in range(1, len(points) - 1):
@@ -405,11 +664,10 @@ def _build_smooth_path(tour, walkable, config, scene_bounds):
                 sz = min_z + walkable_xy[(ix, iy)] * res
                 new_pts.append([sx, sy, sz])
             else:
-                new_pts.append(points[i])   # smoothed pos out of bounds — keep
+                new_pts.append(points[i])
         new_pts.append(points[-1])
         points = new_pts
 
-    # ---- 3. 4× linear upsampling ----------------------------------------
     upsampled = []
     steps = 4
     for i in range(len(points) - 1):
@@ -425,7 +683,7 @@ def _build_smooth_path(tour, walkable, config, scene_bounds):
 
 
 def _sample_path(path_points, t):
-    """Sample a point along path_points at normalised t in [0, 1]."""
+    """Sample a point along path_points at normalised t ∈ [0, 1]."""
     if not path_points:
         return Vector((0, 0, 0))
     idx = t * (len(path_points) - 1)
@@ -437,7 +695,7 @@ def _sample_path(path_points, t):
 
 
 def _travel_direction_target(cam_pos, path_points, t, ahead=0.05):
-    """Return a point slightly ahead along the path for forward-look fallback."""
+    """Return a point slightly ahead along the path (forward-look fallback)."""
     t_ahead = min(1.0, t + ahead)
     return _sample_path(path_points, t_ahead)
 
@@ -474,38 +732,45 @@ def _find_interesting_objects():
 
 
 # ---------------------------------------------------------------------------
-# Step 5b: Line-of-sight
+# Step 5b: Line-of-sight  (accepts BVHTree for local mode, depsgraph for global)
 # ---------------------------------------------------------------------------
 
-def _has_line_of_sight(cam_pos, target_center, depsgraph):
-    """Return True if no geometry blocks the ray from cam_pos to target_center."""
-    scene = bpy.context.scene
+def _has_line_of_sight(cam_pos, target_center, depsgraph_or_bvh):
+    """Return True if no geometry blocks cam_pos → target_center."""
     direction = (target_center - cam_pos).normalized()
     distance = (target_center - cam_pos).length
     if distance < 0.1:
         return True
-    hit, *_ = scene.ray_cast(depsgraph, cam_pos, direction, distance=distance - 0.1)
-    return not hit
+    if isinstance(depsgraph_or_bvh, BVHTree):
+        loc, _, _, _ = depsgraph_or_bvh.ray_cast(cam_pos, direction, distance - 0.1)
+        return loc is None
+    else:
+        hit, *_ = bpy.context.scene.ray_cast(
+            depsgraph_or_bvh, cam_pos, direction, distance=distance - 0.1
+        )
+        return not hit
 
 
 # ---------------------------------------------------------------------------
-# Step 6 + 7: Camera setup & animation
+# Steps 6 + 7: Camera setup & animation
 # ---------------------------------------------------------------------------
 
 def _compute_look_at_quaternion(from_pos, to_pos):
-    """Return a quaternion pointing the camera (-Z local) toward to_pos."""
+    """Quaternion pointing the camera (-Z local) toward to_pos."""
     direction = (to_pos - from_pos).normalized()
     if direction.length < 1e-6:
         direction = Vector((0, 1, 0))
     return direction.to_track_quat("-Z", "Y")
 
 
-def _setup_and_animate_camera(path_points, interesting_objects, config, depsgraph):
-    cam_h = config["camera_height"]
-    fps = config["fps"]
-    total_frames = max(1, int(config["duration_seconds"] * fps))
-    glance_range = min(config["look_range"], 5.0)
-    glance_duration = fps * 3   # hold gaze 3 s
+def _setup_and_animate_camera(path_points, interesting_objects, config,
+                               depsgraph_or_bvh):
+    unit_scale = config.get("_unit_scale", 1.0)
+    cam_h         = config["camera_height"] / unit_scale   # metres → BU
+    fps           = config["fps"]
+    total_frames  = max(1, int(config["duration_seconds"] * fps))
+    glance_range  = min(config["look_range"], 5.0)
+    glance_duration = fps * 3
 
     for obj in list(bpy.data.objects):
         if obj.name == "WalkthroughCamera":
@@ -521,25 +786,19 @@ def _setup_and_animate_camera(path_points, interesting_objects, config, depsgrap
     bpy.context.scene.frame_start = 1
     bpy.context.scene.frame_end = total_frames
 
-    prev_quat = None
-    gaze_target = None
-    gaze_remaining = 0
-    glance_cooldown = {}    # name → frames until eligible again
+    prev_quat       = None
+    gaze_target     = None
+    gaze_remaining  = 0
+    glance_cooldown = {}
 
-    # Rotation smoothing: first-order low-pass filter (frame-rate independent).
-    # τ = rotation_smooth_seconds → camera reaches 63% of target in τ seconds.
-    # α = 1 - exp(-1 / (fps * τ))
-    # τ=2s at 12fps → α≈0.04  (slow, cinematic)
-    # τ=2s at 24fps → α≈0.02  (same feel at higher frame rate)
-    rotation_tau = config.get("rotation_smooth_seconds", 2.0)
-    slerp_alpha = 1.0 - math.exp(-1.0 / max(1, fps * rotation_tau))
+    rotation_tau  = config.get("rotation_smooth_seconds", 2.0)
+    slerp_alpha   = 1.0 - math.exp(-1.0 / max(1, fps * rotation_tau))
 
     for frame_idx in range(total_frames):
-        t = frame_idx / max(1, total_frames - 1)
-        path_pt = _sample_path(path_points, t)
-        cam_pos = path_pt + Vector((0, 0, cam_h))
+        t        = frame_idx / max(1, total_frames - 1)
+        path_pt  = _sample_path(path_points, t)
+        cam_pos  = path_pt + Vector((0, 0, cam_h))
 
-        # Tick cooldowns.
         for name in list(glance_cooldown):
             glance_cooldown[name] -= 1
             if glance_cooldown[name] <= 0:
@@ -550,36 +809,37 @@ def _setup_and_animate_camera(path_points, interesting_objects, config, depsgrap
             if gaze_remaining == 0:
                 gaze_target = None
 
-        # When looking forward, find a nearby object to glance at.
         if gaze_target is None:
             best_candidate = None
-            best_dist = float("inf")
+            best_dist      = float("inf")
             for obj_info in interesting_objects:
                 if obj_info["name"] in glance_cooldown:
                     continue
                 dist = (obj_info["center"] - cam_pos).length
                 if 0.5 < dist < glance_range and dist < best_dist:
-                    if _has_line_of_sight(cam_pos, obj_info["center"], depsgraph):
+                    if _has_line_of_sight(cam_pos, obj_info["center"],
+                                          depsgraph_or_bvh):
                         best_candidate = obj_info
-                        best_dist = dist
+                        best_dist      = dist
             if best_candidate:
-                gaze_target = best_candidate["center"]
+                gaze_target    = best_candidate["center"]
                 gaze_remaining = glance_duration
                 glance_cooldown[best_candidate["name"]] = glance_duration * 4
 
         if gaze_target is not None:
             look_target = gaze_target
         else:
-            look_target = _travel_direction_target(cam_pos, path_points, t, ahead=0.15)
+            look_target = _travel_direction_target(cam_pos, path_points, t,
+                                                    ahead=0.15)
 
         target_quat = _compute_look_at_quaternion(cam_pos, look_target)
         if prev_quat is not None:
             target_quat = prev_quat.slerp(target_quat, slerp_alpha)
         prev_quat = target_quat
 
-        cam_obj.location = cam_pos
-        cam_obj.rotation_quaternion = target_quat
-        cam_obj.keyframe_insert(data_path="location", frame=frame_idx + 1)
+        cam_obj.location             = cam_pos
+        cam_obj.rotation_quaternion  = target_quat
+        cam_obj.keyframe_insert(data_path="location",            frame=frame_idx + 1)
         cam_obj.keyframe_insert(data_path="rotation_quaternion", frame=frame_idx + 1)
 
     if cam_obj.animation_data and cam_obj.animation_data.action:
@@ -595,24 +855,16 @@ def _setup_and_animate_camera(path_points, interesting_objects, config, depsgrap
 # ---------------------------------------------------------------------------
 
 def _enable_cycles_gpu(scene):
-    """Activate GPU rendering for Cycles.
-
-    WSL2 note: OptiX requires /dev/nvidia* which doesn't exist in WSL2 (GPU
-    access goes through /dev/dxg / DirectX passthrough). Setting OptiX in WSL2
-    enumerates devices successfully but causes a silent CPU fallback at render
-    time. We detect WSL2 and skip OPTIX, using CUDA directly instead.
-    """
+    """Activate GPU for Cycles.  Skips OPTIX on WSL2 (silent CPU fallback bug)."""
     import os
     is_wsl2 = os.path.exists("/dev/dxg")
 
     scene.cycles.device = "GPU"
     prefs = bpy.context.preferences.addons["cycles"].preferences
 
+    device_order = ("CUDA", "HIP", "METAL") if is_wsl2 else ("OPTIX", "CUDA", "HIP", "METAL")
     if is_wsl2:
-        device_order = ("CUDA", "HIP", "METAL")
         print("[Walkthrough] WSL2 detected — skipping OPTIX (silent CPU fallback)")
-    else:
-        device_order = ("OPTIX", "CUDA", "HIP", "METAL")
 
     activated = False
     for device_type in device_order:
@@ -622,12 +874,10 @@ def _enable_cycles_gpu(scene):
             gpu_devices = [d for d in prefs.devices if d.type != "CPU"]
             if gpu_devices:
                 for d in prefs.devices:
-                    d.use = (d.type != "CPU")   # GPU only — CPU+GPU hybrid is slower
+                    d.use = (d.type != "CPU")
                 bpy.ops.wm.save_userpref()
-                print(
-                    f"[Walkthrough] GPU ({device_type}): "
-                    + ", ".join(d.name for d in prefs.devices if d.use)
-                )
+                print(f"[Walkthrough] GPU ({device_type}): "
+                      + ", ".join(d.name for d in prefs.devices if d.use))
                 activated = True
                 break
         except Exception as exc:
@@ -643,6 +893,9 @@ def _enable_cycles_gpu(scene):
 # ---------------------------------------------------------------------------
 
 def main():
+    t_total_start = time.time()
+    timing = {}
+
     try:
         config, output_blend, output_dir = _parse_args()
     except Exception as exc:
@@ -652,12 +905,89 @@ def main():
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # ---- Step 2: 3D voxel grid ----
-        scene_bounds = _scene_bounds()
-        solid, nx, ny, nz, _eff_res = _build_voxel_grid(config, scene_bounds)
+        local_area_ratio = config.get("local_area_ratio")
 
-        # ---- Step 3: Walkable voxels ----
-        walkable = _find_walkable_voxels(solid, config, scene_bounds, nx, ny, nz)
+        # ---- Unit scale (metres per Blender unit; needed for grid_res, camera_height) ----
+        unit_scale = _get_unit_scale()
+        config["_unit_scale"] = unit_scale
+        print(f"[Walkthrough] Scene unit scale: {unit_scale:.4f} m/BU "
+              f"({'metric' if abs(unit_scale - 1.0) < 0.01 else f'{unit_scale*100:.1f}cm/BU'})")
+
+        # ---- Scene bounds (fast; needed for ratio calculation and global mode) ----
+        scene_bounds = _scene_bounds()
+        span_x = scene_bounds[2] - scene_bounds[0]
+        span_y = scene_bounds[3] - scene_bounds[1]
+
+        # ---- Depsgraph (needed by both modes for camera animation LOS) ----
+        t0 = time.time()
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        timing["depsgraph_s"] = round(time.time() - t0, 1)
+        print(f"[Timing] depsgraph eval: {timing['depsgraph_s']}s")
+
+        # ================================================================
+        # LOCAL MODE  (local_area_ratio set)
+        # ================================================================
+        if local_area_ratio:
+            # Radius = ratio × min(span_x, span_y) — uses scene-relative sizing,
+            # independent of unit system (cm vs m vs inches).
+            scene_char_bu = min(span_x, span_y)
+            radius_bu = local_area_ratio * scene_char_bu
+            config["_local_radius_bu"] = radius_bu
+            height_bu = config.get("local_height", 8.0) / unit_scale
+            print(f"[Walkthrough] LOCAL mode: ratio={local_area_ratio}  "
+                  f"scene_char={scene_char_bu:.0f} BU ({scene_char_bu * unit_scale:.1f}m)  "
+                  f"radius={radius_bu:.0f} BU ({radius_bu * unit_scale:.1f}m)")
+
+            t0 = time.time()
+            center = _find_local_center(config)
+            nearby = _filter_nearby_objects(
+                center, radius_bu, height_bu, height_bu * 0.5
+            )
+            timing["object_filter_s"] = round(time.time() - t0, 1)
+            print(f"[Walkthrough] Centre=({center.x:.1f},{center.y:.1f},{center.z:.1f})  "
+                  f"nearby={len(nearby)}/{len(bpy.context.scene.objects)} objects")
+
+            t0 = time.time()
+            local_bvh = _build_bvh_from_objects(nearby, depsgraph)
+            timing["bvh_build_s"] = round(time.time() - t0, 1)
+            print(f"[Timing] local BVH build: {timing['bvh_build_s']}s")
+
+            t0 = time.time()
+            solid, nx, ny, nz, _res, local_bounds = _build_local_voxel_grid(
+                config, center, local_bvh
+            )
+            timing["voxel_grid_s"] = round(time.time() - t0, 1)
+            print(f"[Timing] local voxel grid: {timing['voxel_grid_s']}s")
+
+            t0 = time.time()
+            walkable = _flood_fill_walkable(
+                solid, config, local_bounds, nx, ny, nz, center
+            )
+            timing["walkable_s"] = round(time.time() - t0, 1)
+
+            bounds_for_path = local_bounds
+            bvh_for_los     = local_bvh
+
+        # ================================================================
+        # GLOBAL MODE  (legacy: full scene.ray_cast)
+        # ================================================================
+        else:
+            t0 = time.time()
+            solid, nx, ny, nz, _res = _build_voxel_grid(config, scene_bounds)
+            timing["voxel_grid_s"] = round(time.time() - t0, 1)
+            print(f"[Timing] global voxel grid: {timing['voxel_grid_s']}s")
+
+            t0 = time.time()
+            walkable = _find_walkable_voxels(solid, config, scene_bounds, nx, ny, nz)
+            timing["walkable_s"] = round(time.time() - t0, 1)
+
+            bounds_for_path = scene_bounds
+            bvh_for_los     = depsgraph
+
+        # ================================================================
+        # Shared: path planning, camera, render
+        # ================================================================
+
         if not walkable:
             raise RuntimeError(
                 "No walkable voxels found. Check the scene has upward-facing floor "
@@ -665,46 +995,50 @@ def main():
             )
 
         # ---- Step 4: Coverage path ----
-        component = _bfs_largest_component(walkable)
-        n_wp = min(config["num_waypoints"], len(component))
+        t0 = time.time()
+        if local_area_ratio:
+            component = walkable   # flood-fill already gives reachable set
+        else:
+            component = _bfs_largest_component(walkable)
+
+        n_wp      = min(config["num_waypoints"], len(component))
         waypoints = _farthest_point_sample(component, n_wp, config["seed"])
-        tour = _greedy_tsp_tour(waypoints)
-        path_points = _build_smooth_path(tour, walkable, config, scene_bounds)
+        tour      = _greedy_tsp_tour(waypoints)
+        path_points = _build_smooth_path(tour, walkable, config, bounds_for_path)
+        timing["path_s"] = round(time.time() - t0, 1)
+        print(f"[Timing] path planning: {timing['path_s']}s")
 
         if not path_points:
             raise RuntimeError("Path planning produced no points.")
 
-        # Auto-calculate duration from path length if not set by user.
+        # Auto-calculate duration from path length.
         if not config.get("duration_seconds"):
             path_length = sum(
                 (path_points[i + 1] - path_points[i]).length
                 for i in range(len(path_points) - 1)
             )
-            walk_speed = config.get("walk_speed_mps", 1.2)
+            walk_speed  = config.get("walk_speed_mps", 1.2)
             raw_duration = max(5.0, path_length / walk_speed)
-            max_dur = config.get("max_duration_seconds")
+            max_dur      = config.get("max_duration_seconds")
             if max_dur and raw_duration > max_dur:
                 config["duration_seconds"] = max_dur
-                print(
-                    f"[Walkthrough] Path length: {path_length:.1f}m "
-                    f"/ {walk_speed}m/s = {raw_duration:.1f}s "
-                    f"(capped to {max_dur}s by max_duration_seconds)"
-                )
+                print(f"[Walkthrough] Path {path_length:.1f}m / {walk_speed}m/s "
+                      f"= {raw_duration:.1f}s → capped to {max_dur}s")
             else:
                 config["duration_seconds"] = raw_duration
-                print(
-                    f"[Walkthrough] Path length: {path_length:.1f}m "
-                    f"/ {walk_speed}m/s = {config['duration_seconds']:.1f}s"
-                )
+                print(f"[Walkthrough] Path {path_length:.1f}m / {walk_speed}m/s "
+                      f"= {config['duration_seconds']:.1f}s")
 
         # ---- Step 5: Interesting objects ----
         interesting_objects = _find_interesting_objects()
 
         # ---- Steps 6 & 7: Camera animation ----
-        depsgraph = bpy.context.evaluated_depsgraph_get()
+        t0 = time.time()
         cam_obj, total_frames = _setup_and_animate_camera(
-            path_points, interesting_objects, config, depsgraph
+            path_points, interesting_objects, config, bvh_for_los
         )
+        timing["camera_anim_s"] = round(time.time() - t0, 1)
+        print(f"[Timing] camera animation: {timing['camera_anim_s']}s")
 
         # ---- Step 8: Save ----
         output_blend.parent.mkdir(parents=True, exist_ok=True)
@@ -712,9 +1046,10 @@ def main():
 
         frames_dir = None
         if config.get("render"):
+            t0 = time.time()
             frames_dir = output_dir / "frames"
             frames_dir.mkdir(parents=True, exist_ok=True)
-            scene = bpy.context.scene
+            scene  = bpy.context.scene
             engine = config.get("render_engine", "CYCLES").upper()
 
             if engine == "WORKBENCH":
@@ -723,36 +1058,43 @@ def main():
                 scene.render.engine = "BLENDER_EEVEE_NEXT"
             else:
                 scene.render.engine = "CYCLES"
-                scene.cycles.samples = 32
+                scene.cycles.samples               = 32
                 scene.cycles.use_adaptive_sampling = True
-                scene.cycles.adaptive_threshold = 0.01
-                scene.cycles.adaptive_min_samples = 4
+                scene.cycles.adaptive_threshold    = 0.01
+                scene.cycles.adaptive_min_samples  = 4
                 scene.view_layers[0].cycles.use_denoising = True
                 _enable_cycles_gpu(scene)
 
             scene.render.resolution_x = 1280
             scene.render.resolution_y = 720
-            scene.render.filepath = str(frames_dir / "frame_")
+            scene.render.filepath     = str(frames_dir / "frame_")
             scene.render.image_settings.file_format = "PNG"
             scene.render.use_persistent_data = True
             bpy.ops.render.render(animation=True)
+            timing["render_s"] = round(time.time() - t0, 1)
+            print(f"[Timing] render: {timing['render_s']}s")
+
+        timing["total_s"] = round(time.time() - t_total_start, 1)
+        print(f"[Timing] TOTAL: {timing['total_s']}s")
 
         # ---- Step 9: Report ----
         print("WALKTHROUGH_RESULT:" + json.dumps({
             "status": "success",
-            "blend_output": str(output_blend),
-            "frames_dir": str(frames_dir) if frames_dir else None,
-            "path_points_count": len(path_points),
-            "walkable_voxels_count": len(walkable),
-            "solid_voxels_count": len(solid),
+            "blend_output":              str(output_blend),
+            "frames_dir":                str(frames_dir) if frames_dir else None,
+            "path_points_count":         len(path_points),
+            "walkable_voxels_count":     len(walkable),
+            "solid_voxels_count":        len(solid),
             "interesting_objects_count": len(interesting_objects),
+            "timing":                    timing,
+            "mode":                      "local" if local_area_ratio else "global",
         }))
 
     except Exception as exc:
         import traceback
         print("WALKTHROUGH_RESULT:" + json.dumps({
-            "status": "error",
-            "message": str(exc),
+            "status":    "error",
+            "message":   str(exc),
             "traceback": traceback.format_exc(),
         }))
 
