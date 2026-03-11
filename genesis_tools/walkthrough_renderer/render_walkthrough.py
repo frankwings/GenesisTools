@@ -420,7 +420,8 @@ def _flood_fill_walkable(solid, config, local_bounds, nx, ny, nz, center, bvh):
                     queue.append(nb)
 
     print(f"[Walkthrough] Reachable from seed: {len(reachable)} / {len(walkable)} walkable voxels")
-    return reachable, seed
+    actual_floor_z = floor_hit.z if floor_hit is not None else None
+    return reachable, seed, actual_floor_z
 
 
 # ---------------------------------------------------------------------------
@@ -1032,7 +1033,7 @@ def main():
             print(f"[Timing] local voxel grid: {timing['voxel_grid_s']}s")
 
             t0 = time.time()
-            walkable, camera_seed = _flood_fill_walkable(
+            walkable, camera_seed, actual_floor_z = _flood_fill_walkable(
                 solid, config, local_bounds, nx, ny, nz, center, local_bvh
             )
             timing["walkable_s"] = round(time.time() - t0, 1)
@@ -1085,26 +1086,36 @@ def main():
         if not path_points:
             raise RuntimeError("Path planning produced no points.")
 
-        # In local mode, prepend the camera's actual XY+Z position as the first
-        # path point so the walkthrough starts at the camera's exact location.
-        #
-        # cam_floor_start.z = center.z - cam_h_bu places the PATH point at
-        # "floor under camera" so that the camera (path_pt + cam_h) ends up
-        # exactly at center.z — the original camera's height in the scene.
-        # This avoids the voxel-quantisation error from seed_floor_z which can
-        # push the camera above the ceiling on coarse grids (e.g. 40 BU/voxel).
-        #
-        # The original scene camera rotation is saved so frame 1 can render the
-        # exact original-camera view; subsequent frames SLERP into path-based look.
+        # In local mode:
+        # 1. Correct path Z for voxel quantisation. The voxel grid uses
+        #    iz * res as the floor Z, but the actual floor surface is at
+        #    actual_floor_z (from BVH ray cast). Shift all path points by the
+        #    difference so the camera walks at floor level, not above the ceiling.
+        # 2. Prepend the camera's actual XY+Z as the first path point.
+        # 3. Use the original scene camera orientation for frame 1 so it renders
+        #    exactly the original camera view; SLERP into path direction after.
         initial_rotation_quat = None
         if local_area_ratio and camera_seed is not None:
             cam_h_bu = config["camera_height"] / unit_scale
+            res = config.get("_effective_grid_resolution", config["grid_resolution"])
+
+            # Step 1: Z correction — shift voxel-grid floor up/down to actual floor.
+            if actual_floor_z is not None:
+                voxel_floor_z = bounds_for_path[4] + camera_seed[2] * res
+                z_correction = actual_floor_z - voxel_floor_z
+                path_points = [Vector((pt.x, pt.y, pt.z + z_correction))
+                               for pt in path_points]
+                print(f"[Walkthrough] Floor Z correction: voxel={voxel_floor_z:.1f}  "
+                      f"actual={actual_floor_z:.1f}  correction={z_correction:.1f} BU")
+
+            # Step 2: prepend camera start.
             cam_floor_start = Vector((center.x, center.y, center.z - cam_h_bu))
             path_points = [cam_floor_start] + path_points
             print(f"[Walkthrough] Prepended camera floor start: "
                   f"({cam_floor_start.x:.1f}, {cam_floor_start.y:.1f}, {cam_floor_start.z:.1f})  "
-                  f"→ cam z = {cam_floor_start.z + cam_h_bu:.1f} BU ({(cam_floor_start.z + cam_h_bu)*unit_scale:.3f}m)")
-            # Capture original scene camera orientation for the first keyframe.
+                  f"→ cam z = {center.z:.1f} BU ({center.z * unit_scale:.3f}m)")
+
+            # Step 3: original camera rotation for frame 1.
             orig_cam = bpy.context.scene.camera
             if orig_cam is not None:
                 initial_rotation_quat = orig_cam.matrix_world.to_quaternion()
