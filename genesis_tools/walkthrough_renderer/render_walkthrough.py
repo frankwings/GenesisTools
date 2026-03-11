@@ -808,7 +808,7 @@ def _compute_look_at_quaternion(from_pos, to_pos):
 
 
 def _setup_and_animate_camera(path_points, interesting_objects, config,
-                               depsgraph_or_bvh):
+                               depsgraph_or_bvh, initial_rotation_quat=None):
     unit_scale = config.get("_unit_scale", 1.0)
     cam_h         = config["camera_height"] / unit_scale   # metres → BU
     fps           = config["fps"]
@@ -830,7 +830,10 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
     bpy.context.scene.frame_start = 1
     bpy.context.scene.frame_end = total_frames
 
-    prev_quat       = None
+    # Seed prev_quat from the original scene camera so frame 0 shows the
+    # exact original camera view and then smoothly SLERPs into the path-based
+    # walk-through orientation over the next few seconds.
+    prev_quat       = initial_rotation_quat  # None → no override
     gaze_target     = None
     gaze_remaining  = 0
     glance_cooldown = {}
@@ -879,9 +882,13 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
                                                    ahead=0.15)
             look_target = floor_ahead + Vector((0.0, 0.0, cam_h))
 
-        target_quat = _compute_look_at_quaternion(cam_pos, look_target)
-        if prev_quat is not None:
-            target_quat = prev_quat.slerp(target_quat, slerp_alpha)
+        if frame_idx == 0 and initial_rotation_quat is not None:
+            # Frame 1 must exactly match the original scene camera view.
+            target_quat = initial_rotation_quat
+        else:
+            target_quat = _compute_look_at_quaternion(cam_pos, look_target)
+            if prev_quat is not None:
+                target_quat = prev_quat.slerp(target_quat, slerp_alpha)
         prev_quat = target_quat
 
         cam_obj.location             = cam_pos
@@ -1078,21 +1085,30 @@ def main():
         if not path_points:
             raise RuntimeError("Path planning produced no points.")
 
-        # In local mode, prepend the camera's actual XY position (with the
-        # seed voxel's floor Z) as the first path point, so the walkthrough
-        # starts directly under the camera before moving to the seed voxel.
+        # In local mode, prepend the camera's actual XY+Z position as the first
+        # path point so the walkthrough starts at the camera's exact location.
         #
-        # We use the seed voxel's Z (min_z + seed_iz * res) as the floor level
-        # rather than (center.z - cam_h_bu), because camera_height is in metres
-        # and cm-scale scenes (unit_scale=0.01) produce very large BU values that
-        # may place the floor far below the actual ground.
+        # cam_floor_start.z = center.z - cam_h_bu places the PATH point at
+        # "floor under camera" so that the camera (path_pt + cam_h) ends up
+        # exactly at center.z — the original camera's height in the scene.
+        # This avoids the voxel-quantisation error from seed_floor_z which can
+        # push the camera above the ceiling on coarse grids (e.g. 40 BU/voxel).
+        #
+        # The original scene camera rotation is saved so frame 1 can render the
+        # exact original-camera view; subsequent frames SLERP into path-based look.
+        initial_rotation_quat = None
         if local_area_ratio and camera_seed is not None:
-            res = config.get("_effective_grid_resolution", config["grid_resolution"])
-            seed_floor_z = bounds_for_path[4] + camera_seed[2] * res  # min_z + iz*res
-            cam_floor_start = Vector((center.x, center.y, seed_floor_z))
+            cam_h_bu = config["camera_height"] / unit_scale
+            cam_floor_start = Vector((center.x, center.y, center.z - cam_h_bu))
             path_points = [cam_floor_start] + path_points
             print(f"[Walkthrough] Prepended camera floor start: "
-                  f"({cam_floor_start.x:.1f}, {cam_floor_start.y:.1f}, {cam_floor_start.z:.1f})")
+                  f"({cam_floor_start.x:.1f}, {cam_floor_start.y:.1f}, {cam_floor_start.z:.1f})  "
+                  f"→ cam z = {cam_floor_start.z + cam_h_bu:.1f} BU ({(cam_floor_start.z + cam_h_bu)*unit_scale:.3f}m)")
+            # Capture original scene camera orientation for the first keyframe.
+            orig_cam = bpy.context.scene.camera
+            if orig_cam is not None:
+                initial_rotation_quat = orig_cam.matrix_world.to_quaternion()
+                print(f"[Walkthrough] Original camera quat: {initial_rotation_quat}")
 
         # Auto-calculate duration from path length.
         if not config.get("duration_seconds"):
@@ -1118,7 +1134,8 @@ def main():
         # ---- Steps 6 & 7: Camera animation ----
         t0 = time.time()
         cam_obj, total_frames = _setup_and_animate_camera(
-            path_points, interesting_objects, config, bvh_for_los
+            path_points, interesting_objects, config, bvh_for_los,
+            initial_rotation_quat=initial_rotation_quat,
         )
         timing["camera_anim_s"] = round(time.time() - t0, 1)
         print(f"[Timing] camera animation: {timing['camera_anim_s']}s")
