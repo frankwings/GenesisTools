@@ -81,6 +81,10 @@ Four runs were produced, each fixing one layer of the camera positioning problem
 
 ![v1 frame 001](../results/ai33_walkthrough/frames/frame_0001.png)
 
+**GIF** (240 frames, 8 fps, 710 KB — blank/ceiling throughout):
+
+![v1 walkthrough GIF](../results/ai33_walkthrough/AI33_002_280_walkthrough.gif)
+
 ---
 
 ### v2 — Camera seed + fixed_first waypoint
@@ -164,6 +168,10 @@ Frame 1:
 **Frame 240** — end of walkthrough:
 
 ![v4 frame 240](../results/ai33_walkthrough_v4/frames/frame_0240.png)
+
+**GIF** (240 frames, 8 fps, 22 MB — full office walkthrough):
+
+![v4 walkthrough GIF](../results/ai33_walkthrough_v4/AI33_002_280_walkthrough.gif)
 
 ---
 
