@@ -823,6 +823,11 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
 
     cam_data = bpy.data.cameras.new("WalkthroughCamera")
     cam_data.lens = 35
+    # Set clip_start to 1 mm in world-space (0.001 m / unit_scale).
+    # Blender default is 0.1 m; on cm-scale scenes that is 10 BU = 10 cm,
+    # which clips wall geometry whenever the camera comes within 10 cm of a
+    # surface — visible as a curved black/dark edge in the frame.
+    cam_data.clip_start = 0.001 / unit_scale
     cam_obj = bpy.data.objects.new("WalkthroughCamera", cam_data)
     bpy.context.scene.collection.objects.link(cam_obj)
     bpy.context.scene.camera = cam_obj
