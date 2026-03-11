@@ -333,20 +333,24 @@ def _build_local_voxel_grid(config, center, bvh):
     return solid, nx, ny, nz, res, local_bounds
 
 
-def _flood_fill_walkable(solid, config, local_bounds, nx, ny, nz, center):
+def _flood_fill_walkable(solid, config, local_bounds, nx, ny, nz, center, bvh):
     """Find walkable voxels and flood-fill reachable cells from camera seed.
 
     Step 1 — Find walkable voxels: same as global mode (solid voxel with
     empty space above for camera_height clearance).
 
-    Step 2 — Find seed: nearest walkable voxel to camera by 3D voxel distance.
-    Uses 3D distance (not just XY) so a camera embedded in a solid voxel (e.g.
-    clipping through furniture or floor) still resolves to a sensible nearby
-    walkable cell at the correct floor level.
+    Step 2 — Find seed via downward ray cast from camera.
+    The camera voxel may be solid simply because the voxel is large enough to
+    straddle both the camera position and the floor surface beneath it — the
+    camera is not literally inside geometry. Casting a ray straight down from
+    the camera finds the exact floor hit point, and the walkable voxel
+    immediately above that hit is the correct standing position directly under
+    the camera. Falls back to nearest walkable by 3D voxel distance if the ray
+    misses (camera above an open void, etc.).
 
     Step 3 — Flood fill BFS outward from seed.
 
-    Returns (reachable, seed) where seed is the voxel index closest to camera.
+    Returns (reachable, seed) where seed is the voxel index to start the path.
     """
     min_x, min_y, _mx, _my, min_z, _mz = local_bounds
     res = config.get("_effective_grid_resolution", config["grid_resolution"])
@@ -368,16 +372,37 @@ def _flood_fill_walkable(solid, config, local_bounds, nx, ny, nz, center):
     if not walkable:
         return walkable, None
 
-    # --- Step 2: find seed by 3D distance from camera ---
-    # Convert camera world position to voxel indices.
-    seed_ix = int((center.x - min_x) / res)
-    seed_iy = int((center.y - min_y) / res)
-    seed_iz = int((center.z - min_z) / res)
-    seed = min(walkable, key=lambda c: (c[0] - seed_ix) ** 2
-                                     + (c[1] - seed_iy) ** 2
-                                     + (c[2] - seed_iz) ** 2)
-    print(f"[Walkthrough] Camera voxel=({seed_ix},{seed_iy},{seed_iz})  "
-          f"seed=({seed[0]},{seed[1]},{seed[2]})")
+    # --- Step 2: find seed via downward ray from camera ---
+    # Cast straight down from camera; the first floor hit gives the precise
+    # floor position regardless of voxel size.
+    seed = None
+    floor_hit, _, _, _ = bvh.ray_cast(
+        Vector((center.x, center.y, center.z)),
+        Vector((0.0, 0.0, -1.0)),
+        cam_h * 10.0,       # search up to 10× camera height below
+    )
+    if floor_hit is not None:
+        fx = int((floor_hit.x - min_x) / res)
+        fy = int((floor_hit.y - min_y) / res)
+        fz = int((floor_hit.z - min_z) / res) + 1   # +1: stand on top of floor voxel
+        candidate = (max(0, fx), max(0, fy), max(0, fz))
+        if candidate in walkable:
+            seed = candidate
+            print(f"[Walkthrough] Seed from downward ray: floor z={floor_hit.z:.1f}  "
+                  f"seed={seed}")
+        else:
+            print(f"[Walkthrough] Ray hit floor at z={floor_hit.z:.1f} but "
+                  f"candidate {candidate} not walkable — falling back to 3D distance")
+
+    if seed is None:
+        # Fallback: nearest walkable by 3D voxel-index distance.
+        seed_ix = int((center.x - min_x) / res)
+        seed_iy = int((center.y - min_y) / res)
+        seed_iz = int((center.z - min_z) / res)
+        seed = min(walkable, key=lambda c: (c[0] - seed_ix) ** 2
+                                         + (c[1] - seed_iy) ** 2
+                                         + (c[2] - seed_iz) ** 2)
+        print(f"[Walkthrough] Seed from 3D distance fallback: seed={seed}")
 
     # --- Step 3: flood fill from seed ---
     reachable = set()
@@ -980,7 +1005,7 @@ def main():
 
             t0 = time.time()
             walkable, camera_seed = _flood_fill_walkable(
-                solid, config, local_bounds, nx, ny, nz, center
+                solid, config, local_bounds, nx, ny, nz, center, local_bvh
             )
             timing["walkable_s"] = round(time.time() - t0, 1)
 
