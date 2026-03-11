@@ -912,22 +912,19 @@ def _ensure_lights(scene):
     if lights:
         return
     print("[Walkthrough] No lights found — adding sun + fill for EEVEE.")
-    # Sun (key light)
+    # Key light: sun (directional, no per-light shadow cost in EEVEE)
     sun_data = bpy.data.lights.new("WalkthroughSun", type="SUN")
     sun_data.energy = 3.0
+    sun_data.use_shadow = False   # disable shadow for speed
     sun_obj = bpy.data.objects.new("WalkthroughSun", sun_data)
     sun_obj.rotation_euler = (0.785, 0.0, 0.785)   # 45° down, 45° yaw
     scene.collection.objects.link(sun_obj)
-    # Ambient fill (area light high above scene centre)
-    fill_data = bpy.data.lights.new("WalkthroughFill", type="AREA")
-    fill_data.energy = 500.0
-    fill_data.size   = 20.0
-    bounds = _scene_bounds()
-    cx = (bounds[0] + bounds[2]) * 0.5
-    cy = (bounds[1] + bounds[3]) * 0.5
-    cz =  bounds[5] + 10.0
+    # Fill light: second sun from opposite side (much cheaper than area light)
+    fill_data = bpy.data.lights.new("WalkthroughFill", type="SUN")
+    fill_data.energy = 1.0
+    fill_data.use_shadow = False
     fill_obj = bpy.data.objects.new("WalkthroughFill", fill_data)
-    fill_obj.location = (cx, cy, cz)
+    fill_obj.rotation_euler = (-0.785, 0.0, -0.785)  # opposite direction
     scene.collection.objects.link(fill_obj)
 
 
