@@ -1057,12 +1057,18 @@ def main():
         if not path_points:
             raise RuntimeError("Path planning produced no points.")
 
-        # In local mode, prepend the camera's actual floor position as the
-        # very first path point so the walkthrough starts exactly where the
-        # camera is, then smoothly travels to the seed voxel.
+        # In local mode, prepend the camera's actual XY position (with the
+        # seed voxel's floor Z) as the first path point, so the walkthrough
+        # starts directly under the camera before moving to the seed voxel.
+        #
+        # We use the seed voxel's Z (min_z + seed_iz * res) as the floor level
+        # rather than (center.z - cam_h_bu), because camera_height is in metres
+        # and cm-scale scenes (unit_scale=0.01) produce very large BU values that
+        # may place the floor far below the actual ground.
         if local_area_ratio and camera_seed is not None:
-            cam_h_bu = config["camera_height"] / config.get("_unit_scale", 1.0)
-            cam_floor_start = Vector((center.x, center.y, center.z - cam_h_bu))
+            res = config.get("_effective_grid_resolution", config["grid_resolution"])
+            seed_floor_z = bounds_for_path[4] + camera_seed[2] * res  # min_z + iz*res
+            cam_floor_start = Vector((center.x, center.y, seed_floor_z))
             path_points = [cam_floor_start] + path_points
             print(f"[Walkthrough] Prepended camera floor start: "
                   f"({cam_floor_start.x:.1f}, {cam_floor_start.y:.1f}, {cam_floor_start.z:.1f})")
