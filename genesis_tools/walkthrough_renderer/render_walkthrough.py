@@ -873,8 +873,11 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
         if gaze_target is not None:
             look_target = gaze_target
         else:
-            look_target = _travel_direction_target(cam_pos, path_points, t,
-                                                    ahead=0.15)
+            # Lift the forward look-target to eye height so the camera looks
+            # horizontally ahead rather than down at the floor path point.
+            floor_ahead = _travel_direction_target(cam_pos, path_points, t,
+                                                   ahead=0.15)
+            look_target = floor_ahead + Vector((0.0, 0.0, cam_h))
 
         target_quat = _compute_look_at_quaternion(cam_pos, look_target)
         if prev_quat is not None:
@@ -897,6 +900,36 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
 # ---------------------------------------------------------------------------
 # GPU setup
 # ---------------------------------------------------------------------------
+
+def _ensure_lights(scene):
+    """Add a sun + ambient fill if the scene has no lights.
+
+    EEVEE requires explicit lights; Cycles can work from world HDRI alone.
+    Only adds lights when none exist so we never clobber an existing lighting
+    rig.
+    """
+    lights = [o for o in scene.objects if o.type == "LIGHT"]
+    if lights:
+        return
+    print("[Walkthrough] No lights found — adding sun + fill for EEVEE.")
+    # Sun (key light)
+    sun_data = bpy.data.lights.new("WalkthroughSun", type="SUN")
+    sun_data.energy = 3.0
+    sun_obj = bpy.data.objects.new("WalkthroughSun", sun_data)
+    sun_obj.rotation_euler = (0.785, 0.0, 0.785)   # 45° down, 45° yaw
+    scene.collection.objects.link(sun_obj)
+    # Ambient fill (area light high above scene centre)
+    fill_data = bpy.data.lights.new("WalkthroughFill", type="AREA")
+    fill_data.energy = 500.0
+    fill_data.size   = 20.0
+    bounds = _scene_bounds()
+    cx = (bounds[0] + bounds[2]) * 0.5
+    cy = (bounds[1] + bounds[3]) * 0.5
+    cz =  bounds[5] + 10.0
+    fill_obj = bpy.data.objects.new("WalkthroughFill", fill_data)
+    fill_obj.location = (cx, cy, cz)
+    scene.collection.objects.link(fill_obj)
+
 
 def _enable_cycles_gpu(scene):
     """Activate GPU for Cycles.  Skips OPTIX on WSL2 (silent CPU fallback bug)."""
@@ -1116,8 +1149,9 @@ def main():
 
             if engine == "WORKBENCH":
                 scene.render.engine = "BLENDER_WORKBENCH"
-            elif engine == "EEVEE":
+            elif engine in ("EEVEE", "BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"):
                 scene.render.engine = "BLENDER_EEVEE_NEXT"
+                _ensure_lights(scene)
             else:
                 scene.render.engine = "CYCLES"
                 scene.cycles.samples               = 32
