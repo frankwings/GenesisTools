@@ -163,53 +163,94 @@ GenesisExp/GenesisCode2Worlds/outputs/scene_desert/walkthrough/
 
 ### 6.1 Voxel Grid Construction (Global Mode)
 
-**Tri-axial sweep voxelisation** — marks solid voxels without building an explicit mesh representation.
+**Step 1 — Bounding box**
+
+Compute `(min_x, min_y, min_z, max_x, max_y, max_z)` from all scene objects. This defines the region to voxelise.
+
+**Step 2 — Voxel size**
 
 ```
-Scene bounding box
-    │
-    ├── Z sweep (top → down)   : detects floors, terrain, tabletops, ceilings
-    ├── X sweep (left → right) : detects walls facing ±X
-    └── Y sweep (front → back) : detects walls facing ±Y
+res = max(grid_resolution, span_x / max_xy, span_y / max_xy, span_z / max_z)
 ```
 
-Each sweep fires one ray per grid row. Each ray calls `scene.ray_cast()` repeatedly, stepping 5 cm past each surface hit to find the next one (`_cast_all_hits`). This captures multi-layer structures (mezzanines, furniture stacks on shelves).
+The voxel size scales up so the grid never exceeds `max_grid_cells_xy × max_grid_cells_xy × max_grid_cells_z` cells. For a 150 m desert with defaults: `res = max(0.5, 150/80) = 1.875 m`.
 
-**Ray count**: `O(nx·ny + ny·nz + nx·nz)` rays. With `max_grid_cells_xy=80, max_grid_cells_z=40`: worst-case `80×80 + 80×40 + 80×40 = 9,600` initial rays, each potentially spawning 2–10 `ray_cast()` calls depending on scene density.
+**Step 3 — Tri-axial sweep**
 
-**Voxel size scaling**: `res = max(grid_resolution, span_x / max_xy, span_y / max_xy, span_z / max_z)`. For a 150m desert with defaults: `res = max(0.5, 150/80) = 1.875 m`.
+Three independent sweeps mark voxels as **solid**. Each sweep covers one face of the bounding box and fires rays perpendicular to it, one ray per grid cell centre on that face:
+
+| Sweep | Ray origin | Direction | Ray count | Detects |
+|-------|-----------|-----------|-----------|---------|
+| Z (top → down) | `(x, y, max_z + 1)` | `(0, 0, -1)` | `nx × ny` | floors, terrain, tabletops, ceilings |
+| X (left → right) | `(min_x - 1, y, z)` | `(1, 0, 0)` | `ny × nz` | walls facing ±X |
+| Y (front → back) | `(x, min_y - 1, z)` | `(0, 1, 0)` | `nx × nz` | walls facing ±Y |
+
+Every ray travels from **1 unit outside** the bounding box all the way to **1 unit past the opposite side** — it penetrates the full depth of the scene. `_cast_all_hits` steps 5 cm past each surface hit and fires again, so one ray records every surface it passes through (mezzanines, furniture stacks, multi-layer terrain).
+
+**Total ray count**: `nx·ny + ny·nz + nx·nz`. With `max_grid_cells_xy=80, max_grid_cells_z=40`: `80×80 + 80×40 + 80×40 = 9,600` initial rays, each spawning 2–10 `ray_cast()` calls depending on scene density.
+
+Three sweeps are necessary because a single Z sweep misses vertical surfaces (walls), and a single X or Y sweep misses horizontal surfaces (floors). Together they cover all surface orientations.
 
 ### 6.2 Walkable Voxel Detection
 
-A voxel `(ix, iy, iz)` is **walkable** (camera feet position) when:
-1. `(ix, iy, iz-1)` is solid — floor surface directly below
-2. `(ix, iy, iz)` through `(ix, iy, iz + ceil(camera_height/res) - 1)` are all **not** solid — full headroom clearance
+After sweeping, determine which voxels a camera can stand in. A voxel `(ix, iy, iz)` is **walkable** when both conditions hold:
 
-The world-space floor height is `min_z + iz * res`. Camera eye height is `floor_z + camera_height`.
+1. **Floor below**: `(ix, iy, iz-1)` is solid — there is a surface to stand on
+2. **Headroom above**: `(ix, iy, iz)` through `(ix, iy, iz + ceil(camera_height/res) - 1)` are all **not** solid — enough vertical clearance for the camera
 
-### 6.3 Coverage Path Generation
+```
+         iz + N  ┤  free  ┐
+                 ┤  free  │ camera_height clearance
+         iz + 1  ┤  free  ┘
+         iz      ┤  free  ← walkable voxel (camera feet here)
+         iz - 1  ┤  SOLID ← floor
+```
+
+World-space position: `floor_z = min_z + iz * res`, camera eye at `floor_z + camera_height`.
+
+### 6.3 Walk Start Point
+
+**Global mode**: `_bfs_largest_component()` — take the largest 4-connected group of walkable voxels (±1 Z allowed for terrain slopes). This discards small isolated pockets and ensures a contiguous traversable region.
+
+**Local mode**: flood fill BFS from a **camera seed** — the nearest walkable voxel to the active camera's position. This guarantees the walk starts at the camera's actual location rather than the geometrically largest region, which may be elsewhere in the scene.
+
+### 6.4 Coverage Path Generation
+
+Starting from the walkable set, the path is built in four stages:
 
 ```
 walkable cells
     │
-    ├── _bfs_largest_component()      — keep only the largest 4-connected region
-    │                                   (±1 Z allowed for terrain slopes)
-    ├── _farthest_point_sample(n=12)  — spread n waypoints maximally apart (XY distance)
-    ├── _greedy_tsp_tour()            — nearest-neighbour tour, closes the loop
-    ├── _bfs_path() per segment       — wall-free shortest path between each pair
-    ├── Laplacian smooth (5 passes)   — XY only; Z re-snapped to floor after each pass
-    └── 4× linear upsample           — dense per-frame samples for smooth camera motion
+    ├── 1. _farthest_point_sample(n)  — spread n waypoints maximally apart (XY distance)
+    ├── 2. _greedy_tsp_tour()         — nearest-neighbour tour, closes the loop
+    ├── 3. _bfs_path() per segment    — wall-free shortest BFS path between each pair
+    ├── 4. Laplacian smooth (5 passes)— XY only; Z re-snapped to floor after each pass
+    └──    4× linear upsample         — dense per-frame samples for smooth camera motion
 ```
 
-**Farthest-point sampling**: iteratively picks the cell furthest from all already-selected cells. Ensures even spatial coverage rather than clustering waypoints in one area.
+**Farthest-point sampling**: iteratively picks the cell furthest (XY distance) from all already-selected cells. Guarantees even spatial coverage — waypoints spread across the whole walkable area rather than clustering in one corner.
 
-**Greedy TSP**: nearest-neighbour heuristic starting from waypoint[0]. Not optimal but fast and good enough for short paths.
+**Greedy TSP**: nearest-neighbour heuristic starting from waypoint[0], closes back to the start. Not globally optimal but fast (O(n²)) and avoids extreme backtracking.
 
-**Constrained Laplacian**: smooths XY independently from Z. After each XY move, Z is re-resolved by looking up `walkable_xy[(ix, iy)]` — the floor level at the smoothed XY position. This prevents the path from floating above or sinking below the terrain.
+**BFS per segment**: shortest path through the walkable voxel graph between consecutive waypoints. Respects walls — the camera never clips through geometry between waypoints.
 
-### 6.4 Camera Steering
+**Constrained Laplacian**: smooths XY coordinates independently from Z. After each XY move, Z is re-resolved by looking up `walkable_xy[(ix, iy)]` — the floor level at the new XY position. This prevents the path from floating above or sinking below uneven terrain.
 
-**Rotation mode**: `QUATERNION` — avoids gimbal lock that occurs with Euler angles when the camera pitches vertically.
+**4× upsample**: linear interpolation produces one sample point per rendered frame, giving smooth per-frame camera positions without jarring jumps.
+
+### 6.5 Trajectory Duration and End Condition
+
+```
+estimated_duration = path_length_m / walk_speed_m_per_s
+capped_duration    = min(estimated_duration, max_duration_seconds)
+frame_count        = round(capped_duration × fps)
+```
+
+The dense path is sampled uniformly at `frame_count` points. Everything beyond `max_duration_seconds` is discarded. Default `max_duration_seconds=60` prevents runaway renders on large scenes (a 150 m desert path uncapped → 1,500 s → 12,000 frames at 8 fps).
+
+### 6.6 Camera Steering
+
+**Rotation mode**: `QUATERNION` — avoids gimbal lock that occurs with Euler angles when the camera pitches near vertical.
 
 **Gaze state machine** (per-frame):
 
@@ -226,7 +267,7 @@ State: FORWARD
                       → back to FORWARD
 ```
 
-**Object scoring**: objects are pre-filtered by name (exclude "floor", "wall", "ceiling", etc.) and volume (> 0.001 m³, < 30m dimension). Nearest eligible object within `look_range` that has clear line-of-sight wins.
+**Object scoring**: objects are pre-filtered by name (exclude "floor", "wall", "ceiling", etc.) and volume (> 0.001 m³, < 30 m dimension). Nearest eligible object within `look_range` that passes the LOS check wins.
 
 **Line-of-sight**: `scene.ray_cast()` from camera eye to object centre. If any geometry is hit before reaching the target, LOS is blocked.
 
@@ -235,6 +276,6 @@ State: FORWARD
 α = 1 - exp(-1 / (fps × rotation_smooth_seconds))
 q_current = SLERP(q_prev, q_target, α)
 ```
-With `rotation_smooth_seconds=2.0` at `fps=8`: `α ≈ 0.06` → camera reaches 63% of target rotation after 2s. Higher τ = slower, more cinematic rotation.
+With `rotation_smooth_seconds=2.0` at `fps=8`: `α ≈ 0.06` → camera reaches 63% of target rotation after 2 s. Higher τ = slower, more cinematic rotation.
 
 **F-curves**: all keyframes set to `LINEAR` interpolation. Combined with the per-frame SLERP smoothing, this gives smooth motion without Blender's default Bezier overshooting.
