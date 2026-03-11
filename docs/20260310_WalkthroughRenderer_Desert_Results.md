@@ -228,11 +228,23 @@ walkable cells
     └──    4× linear upsample         — dense per-frame samples for smooth camera motion
 ```
 
-**Farthest-point sampling**: iteratively picks the cell furthest (XY distance) from all already-selected cells. Guarantees even spatial coverage — waypoints spread across the whole walkable area rather than clustering in one corner.
+**Farthest-point sampling** uses **Euclidean (physical) XY distance**, not graph distance:
+
+```python
+# 1. Pick a random first waypoint
+# 2. dist[c] = squared XY distance from c to nearest already-selected waypoint
+# 3. Pick the cell with the largest dist[c] as the next waypoint
+# 4. Update dist[c] = min(dist[c], distance to new waypoint)
+# 5. Repeat until N waypoints selected
+
+dist[c] = (c[0] - farthest[0]) ** 2 + (c[1] - farthest[1]) ** 2
+```
+
+Using straight-line distance means waypoints spread evenly across space, but does **not** guarantee a walkable path between them — walls may block direct travel. That is handled by the BFS step below.
 
 **Greedy TSP**: nearest-neighbour heuristic starting from waypoint[0], closes back to the start. Not globally optimal but fast (O(n²)) and avoids extreme backtracking.
 
-**BFS per segment**: shortest path through the walkable voxel graph between consecutive waypoints. Respects walls — the camera never clips through geometry between waypoints.
+**BFS per segment**: shortest path through the walkable voxel **graph** between consecutive waypoints. This is where walls are respected — the camera never clips through geometry. If two waypoints have no BFS path (completely disconnected), that segment is skipped.
 
 **Constrained Laplacian**: smooths XY coordinates independently from Z. After each XY move, Z is re-resolved by looking up `walkable_xy[(ix, iy)]` — the floor level at the new XY position. This prevents the path from floating above or sinking below uneven terrain.
 
@@ -252,30 +264,43 @@ The dense path is sampled uniformly at `frame_count` points. Everything beyond `
 
 **Rotation mode**: `QUATERNION` — avoids gimbal lock that occurs with Euler angles when the camera pitches near vertical.
 
+Each frame computes a `look_target` point then converts it to a quaternion:
+
+```python
+target_quat = direction.to_track_quat("-Z", "Y")   # camera -Z axis points at look_target
+```
+
 **Gaze state machine** (per-frame):
 
 ```
 State: FORWARD
-  │  no nearby object with LOS → look ahead along path (t + 0.15)
+  │  no eligible object nearby → look_target = path point at t + 0.15 (slightly ahead)
   │
-  └─→ found interesting object within look_range AND has_line_of_sight()
+  └─→ found interesting object within look_range AND LOS is clear
         │
         └─→ State: GLANCING (hold for glance_duration = fps × 3 frames)
+            look_target = object centre (world space origin of the Blender object)
                   │
                   └─→ cooldown[object] = 4 × glance_duration
                       (prevents re-visiting same object too soon)
                       → back to FORWARD
 ```
 
-**Object scoring**: objects are pre-filtered by name (exclude "floor", "wall", "ceiling", etc.) and volume (> 0.001 m³, < 30 m dimension). Nearest eligible object within `look_range` that passes the LOS check wins.
+**Interesting object criteria** — an object qualifies as a gaze candidate only if:
+- It is a MESH object
+- Its name does not contain keywords: `floor, ground, terrain, sky, plane, landscape, ceiling, wall, room, baseboard, trim`
+- No single dimension exceeds 30 m (filters out whole-scene meshes, terrain, skyboxes)
+- Volume > 0.001 m³ (filters out degenerate/invisible objects)
 
-**Line-of-sight**: `scene.ray_cast()` from camera eye to object centre. If any geometry is hit before reaching the target, LOS is blocked.
+The look target is the **object's world-space origin** (not the nearest surface point). If an entire scene is one merged object, it will be filtered out by the 30 m dimension check, and the camera stays in FORWARD state for the whole walk.
+
+**Line-of-sight (LOS)**: a ray is cast from the camera eye to the object origin. If any geometry is intersected before reaching the target, LOS is blocked and the object is skipped. Uses local BVHTree in local mode, `scene.ray_cast(depsgraph)` in global mode.
 
 **Rotation smoothing**: first-order low-pass SLERP filter applied every frame:
 ```
 α = 1 - exp(-1 / (fps × rotation_smooth_seconds))
 q_current = SLERP(q_prev, q_target, α)
 ```
-With `rotation_smooth_seconds=2.0` at `fps=8`: `α ≈ 0.06` → camera reaches 63% of target rotation after 2 s. Higher τ = slower, more cinematic rotation.
+With `rotation_smooth_seconds=2.0` at `fps=8`: `α ≈ 0.06` — the camera moves only 6% toward the target each frame, reaching 63% of the target rotation after 2 s. This makes head turns slow and cinematic.
 
 **F-curves**: all keyframes set to `LINEAR` interpolation. Combined with the per-frame SLERP smoothing, this gives smooth motion without Blender's default Bezier overshooting.
