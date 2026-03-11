@@ -62,6 +62,30 @@ The `local_area_ratio` is dimensionless — it scales with scene size in Blender
 
 ## 3. Render
 
+Two runs were produced: v1 (initial) and v2 (camera-seed path fix applied).
+
+### v2 — Camera seed path fix (current)
+
+| Metric | Value |
+|--------|-------|
+| Render engine | CYCLES (GPU, CUDA — RTX 5090) |
+| Frame count | 240 |
+| Frame rate | 8 fps |
+| Resolution | 1280 × 720 |
+| Frame size | ~72 KB each |
+| GIF size | 428 KB |
+| Path points | 1,394 |
+
+**Sample frame (frame_0001)**:
+
+![frame 001](../results/ai33_walkthrough_v2/frames/frame_0001.png)
+
+**Walkthrough GIF** (240 frames, 8 fps, 428 KB):
+
+![walkthrough GIF](../results/ai33_walkthrough_v2/AI33_002_280_walkthrough.gif)
+
+### v1 — Initial run (reference)
+
 | Metric | Value |
 |--------|-------|
 | Render engine | CYCLES (GPU, CUDA — RTX 5090) |
@@ -70,45 +94,48 @@ The `local_area_ratio` is dimensionless — it scales with scene size in Blender
 | Resolution | 1280 × 720 |
 | Frame size | ~94 KB each |
 | GIF size | 710 KB |
+| Path points | 1,241 |
 
-**Sample frame (frame_0001)**:
-
-![frame 001](../results/ai33_walkthrough/frames/frame_0001.png)
-
-**Walkthrough GIF** (240 frames, 8 fps, 710 KB):
-
-![walkthrough GIF](../results/ai33_walkthrough/AI33_002_280_walkthrough.gif)
+![v1 walkthrough GIF](../results/ai33_walkthrough/AI33_002_280_walkthrough.gif)
 
 ---
 
 ## 4. Timing Breakdown
 
-### AI33_002 run (local BVH mode)
+### v2 run — Camera seed path fix (2026-03-11)
 
 | Phase | Duration | Notes |
 |-------|----------|-------|
 | Depsgraph evaluation | ~0 s | Called lazily; evaluated only for nearby object meshes during BVH build |
 | Object AABB filter | ~0 s | Fast bounding-box sweep over 979 objects |
-| **Local BVH build** | **6.8 s** | `BVHTree.FromPolygons` from evaluated meshes of nearby objects only |
+| **Local BVH build** | **4.8 s** | `BVHTree.FromPolygons` from evaluated meshes of nearby objects only |
 | Local voxel grid | ~0 s | ~2,100 rays into local BVHTree |
-| Walkable + flood fill | ~0 s | BFS from camera seed; constrained to 35×35×13 grid |
-| Path planning | ~0 s | Farthest-point sample → TSP → BFS → smooth → upsample |
-| Camera animation | ~0 s | 1,241 keyframes written |
-| CYCLES render (240 frames) | 693.4 s | RTX 5090 CUDA, 1280×720, ~2.9 s/frame |
+| Walkable + flood fill | ~0 s | BFS from camera seed (downward ray cast); 35×35×13 grid |
+| Path planning | ~0 s | Farthest-point sample (fixed_first=camera_seed) → TSP → BFS → smooth → upsample |
+| Camera animation | ~0 s | 1,394 keyframes written |
+| CYCLES render (240 frames) | 621.1 s | RTX 5090 CUDA, 1280×720, ~2.6 s/frame |
 | GIF assembly | <5 s | Pillow |
+| **Total** | **626.2 s (~10.4 min)** | |
+
+### v1 run — Initial (2026-03-11)
+
+| Phase | Duration | Notes |
+|-------|----------|-------|
+| **Local BVH build** | **6.8 s** | |
+| CYCLES render (240 frames) | 693.4 s | ~2.9 s/frame |
 | **Total** | **700.4 s (~11.7 min)** | |
 
-### Comparison: Global mode (desert) vs Local mode (AI33_002)
+### Comparison: Global mode (desert) vs Local mode v2 (AI33_002)
 
-| Metric | Desert (WORKBENCH, global) | AI33_002 (CYCLES, local) |
-|--------|---------------------------|--------------------------|
+| Metric | Desert (WORKBENCH, global) | AI33_002 v2 (CYCLES, local) |
+|--------|---------------------------|-----------------------------|
 | Scene size | 3.0 GB, 96M triangles | 117 MB, office |
-| BVH / depsgraph build | **~40 min** (global, all 1380 objects) | **6.8 s** (local, nearby objects only) |
+| BVH / depsgraph build | **~40 min** (global, all 1380 objects) | **4.8 s** (local, nearby objects only) |
 | Voxel grid | ~1 min | ~0 s |
-| Render | ~5 min (240 WORKBENCH frames) | ~11.6 min (240 CYCLES frames) |
-| **Total** | **~51 min** | **~11.7 min** |
+| Render | ~5 min (240 WORKBENCH frames) | ~10.4 min (240 CYCLES frames) |
+| **Total** | **~51 min** | **~10.4 min** |
 
-Local mode eliminates the dominant bottleneck for large outdoor scenes. For the AI33 office scene the BVH build dropped from an estimated 40+ min to **6.8 seconds** by limiting `BVHTree.FromPolygons` to only nearby objects.
+Local mode eliminates the dominant bottleneck for large outdoor scenes. For the AI33 office scene the BVH build dropped from an estimated 40+ min to **4.8 seconds** by limiting `BVHTree.FromPolygons` to only nearby objects.
 
 ---
 
@@ -117,7 +144,13 @@ Local mode eliminates the dominant bottleneck for large outdoor scenes. For the 
 ### Output files
 
 ```
-GenesisTools/results/ai33_walkthrough/
+GenesisTools/results/ai33_walkthrough_v2/          ← v2 (camera seed path fix)
+├── AI33_002_280_walkthrough.gif         (428 KB, 240 frames, 8 fps, CYCLES)
+├── AI33_002_280_walkthrough.blend       (animated camera)
+└── frames/
+    ├── frame_0001.png … frame_0240.png  (1280×720, ~72 KB each)
+
+GenesisTools/results/ai33_walkthrough/             ← v1 (reference)
 ├── AI33_002_280_walkthrough.gif         (710 KB, 240 frames, 8 fps, CYCLES)
 ├── AI33_002_280_walkthrough.blend       (90 MB, animated camera)
 └── frames/
@@ -136,10 +169,12 @@ GenesisTools/results/ai33_walkthrough/
 ### Key Observations
 
 - **Local BVH mode works end-to-end** for a complex 979-object office scene
-- **BVH build 350× faster** than global mode equivalent (6.8 s vs ~40 min)
+- **BVH build 500× faster** than global mode equivalent (4.8 s vs ~40 min)
 - **`local_area_ratio` is unit-agnostic** — same value (0.3) works for metre scenes and centimetre scenes
-- **CYCLES frames are 94 KB each** — much smaller than bedroom (2 MB) because the AI33 synthetic scene has less texture variety
-- **GIF is 710 KB** — smallest of all three scenes despite 240 frames (CYCLES quality, low texture entropy)
+- **Camera path starts at camera position** (v2 fix): downward ray cast finds exact floor voxel; `fixed_first=camera_seed` ensures first waypoint is camera location; `cam_floor_start` prepended to path
+- **v2 faster overall**: 626 s (~10.4 min) vs 700 s (~11.7 min) — ~11% improvement
+- **v2 frames smaller** (72 KB vs 94 KB) and **GIF smaller** (428 KB vs 710 KB) — different camera path covers more varied geometry with less frame-to-frame redundancy
+- **EEVEE unsuitable for headless WSL2**: no OpenGL GPU passthrough → Mesa LLVMpipe CPU fallback; CYCLES + CUDA works correctly
 
 ### Known Limitations
 
