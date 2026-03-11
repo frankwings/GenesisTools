@@ -902,30 +902,21 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
 # ---------------------------------------------------------------------------
 
 def _ensure_lights(scene):
-    """Add a sun + ambient fill if the scene has no lights.
+    """Set world ambient color for EEVEE when scene has no lights.
 
-    EEVEE requires explicit lights; Cycles can work from world HDRI alone.
-    Only adds lights when none exist so we never clobber an existing lighting
-    rig.
+    Does NOT add light objects to the scene — only modifies world/render
+    settings so the original scene geometry is unchanged.
+    EEVEE in headless WSL2 runs on CPU (no OpenGL GPU passthrough), so this
+    is only a visual improvement; CYCLES+CUDA is preferred for GPU renders.
     """
     lights = [o for o in scene.objects if o.type == "LIGHT"]
     if lights:
-        return
-    print("[Walkthrough] No lights found — adding sun + fill for EEVEE.")
-    # Key light: sun (directional, no per-light shadow cost in EEVEE)
-    sun_data = bpy.data.lights.new("WalkthroughSun", type="SUN")
-    sun_data.energy = 3.0
-    sun_data.use_shadow = False   # disable shadow for speed
-    sun_obj = bpy.data.objects.new("WalkthroughSun", sun_data)
-    sun_obj.rotation_euler = (0.785, 0.0, 0.785)   # 45° down, 45° yaw
-    scene.collection.objects.link(sun_obj)
-    # Fill light: second sun from opposite side (much cheaper than area light)
-    fill_data = bpy.data.lights.new("WalkthroughFill", type="SUN")
-    fill_data.energy = 1.0
-    fill_data.use_shadow = False
-    fill_obj = bpy.data.objects.new("WalkthroughFill", fill_data)
-    fill_obj.rotation_euler = (-0.785, 0.0, -0.785)  # opposite direction
-    scene.collection.objects.link(fill_obj)
+        return   # scene already has lighting, leave it alone
+    print("[Walkthrough] No lights — enabling EEVEE world ambient (no objects added).")
+    if scene.world is None:
+        scene.world = bpy.data.worlds.new("WalkthroughWorld")
+    scene.world.use_nodes = False
+    scene.world.color = (0.8, 0.8, 0.8)   # bright neutral ambient
 
 
 def _enable_cycles_gpu(scene):
