@@ -125,6 +125,10 @@ def _build_voxel_grid(config, scene_bounds):
     Each sweep fires one ray per grid row and steps past every surface hit,
     so multi-layer structures (mezzanines, furniture stacks) are all captured.
 
+    Grid dimensions are capped at max_grid_cells_xy / max_grid_cells_z so that
+    ray count stays fixed regardless of scene size. The voxel size is scaled up
+    when the scene is larger than grid_resolution * max_grid_cells.
+
     Complexity: O(nx*ny + ny*nz + nx*nz) rays, each with O(surfaces) hits.
     For a 20×20×10 indoor grid: ~800 rays, ~2 400 ray_cast calls.
 
@@ -132,15 +136,32 @@ def _build_voxel_grid(config, scene_bounds):
     -------
     solid : set of (ix, iy, iz)
     nx, ny, nz : grid dimensions
+    res : effective voxel size used (may be larger than config["grid_resolution"])
     """
     min_x, min_y, max_x, max_y, min_z, max_z = scene_bounds
-    res = config["grid_resolution"]
+    max_xy = config.get("max_grid_cells_xy", 80)
+    max_z_cells = config.get("max_grid_cells_z", 40)
+    min_res = config["grid_resolution"]
+
+    # Scale voxel size up so nx/ny/nz never exceed the caps.
+    span_x = max_x - min_x
+    span_y = max_y - min_y
+    span_z = max_z - min_z
+    res_xy = max(min_res, span_x / max_xy, span_y / max_xy)
+    res_z  = max(min_res, span_z / max_z_cells)
+    res    = max(res_xy, res_z)   # uniform grid (simplest for downstream BFS)
+
     scene = bpy.context.scene
     depsgraph = bpy.context.evaluated_depsgraph_get()
 
-    nx = max(1, int(math.ceil((max_x - min_x) / res)))
-    ny = max(1, int(math.ceil((max_y - min_y) / res)))
-    nz = max(1, int(math.ceil((max_z - min_z) / res)))
+    nx = max(1, int(math.ceil(span_x / res)))
+    ny = max(1, int(math.ceil(span_y / res)))
+    nz = max(1, int(math.ceil(span_z / res)))
+
+    # Store effective resolution back so downstream functions pick it up.
+    config["_effective_grid_resolution"] = res
+    print(f"[Walkthrough] Config res={min_res}m  →  effective res={res:.2f}m  "
+          f"(caps: xy≤{max_xy}, z≤{max_z_cells})")
 
     solid = set()
 
@@ -150,9 +171,10 @@ def _build_voxel_grid(config, scene_bounds):
         iz = min(nz - 1, max(0, int((loc.z - min_z) / res)))
         solid.add((ix, iy, iz))
 
-    span_x = max_x - min_x + 2.0
-    span_y = max_y - min_y + 2.0
-    span_z = max_z - min_z + 2.0
+    # Ray-cast span: +2m margin on each axis so rays start/end outside geometry.
+    ray_span_x = span_x + 2.0
+    ray_span_y = span_y + 2.0
+    ray_span_z = span_z + 2.0
 
     # Z sweep: captures horizontal surfaces (floors, terrain, tabletops).
     for ix in range(nx):
@@ -160,7 +182,7 @@ def _build_voxel_grid(config, scene_bounds):
         for iy in range(ny):
             y = min_y + (iy + 0.5) * res
             for loc in _cast_all_hits(scene, depsgraph,
-                                      (x, y, max_z + 1.0), (0, 0, -1), span_z):
+                                      (x, y, max_z + 1.0), (0, 0, -1), ray_span_z):
                 mark(loc)
 
     # X sweep: captures walls facing ±X.
@@ -169,7 +191,7 @@ def _build_voxel_grid(config, scene_bounds):
         for iz in range(nz):
             z = min_z + (iz + 0.5) * res
             for loc in _cast_all_hits(scene, depsgraph,
-                                      (min_x - 1.0, y, z), (1, 0, 0), span_x):
+                                      (min_x - 1.0, y, z), (1, 0, 0), ray_span_x):
                 mark(loc)
 
     # Y sweep: captures walls facing ±Y.
@@ -178,12 +200,12 @@ def _build_voxel_grid(config, scene_bounds):
         for iz in range(nz):
             z = min_z + (iz + 0.5) * res
             for loc in _cast_all_hits(scene, depsgraph,
-                                      (x, min_y - 1.0, z), (0, 1, 0), span_y):
+                                      (x, min_y - 1.0, z), (0, 1, 0), ray_span_y):
                 mark(loc)
 
     print(f"[Walkthrough] Voxel grid {nx}×{ny}×{nz} "
           f"({nx * ny * nz} total), {len(solid)} solid voxels")
-    return solid, nx, ny, nz
+    return solid, nx, ny, nz, res
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +224,7 @@ def _find_walkable_voxels(solid, config, scene_bounds, nx, ny, nz):
     ``min_z + iz * res``  (top face of the solid voxel below).
     Camera eye Z = floor Z + camera_height.
     """
-    res = config["grid_resolution"]
+    res = config.get("_effective_grid_resolution", config["grid_resolution"])
     cam_h = config["camera_height"]
     min_z = scene_bounds[4]
     cam_h_voxels = max(1, int(math.ceil(cam_h / res)))
@@ -340,7 +362,7 @@ def _build_smooth_path(tour, walkable, config, scene_bounds):
     min_x = scene_bounds[0]
     min_y = scene_bounds[1]
     min_z = scene_bounds[4]
-    res = config["grid_resolution"]
+    res = config.get("_effective_grid_resolution", config["grid_resolution"])
 
     # ---- 1. BFS corridor ------------------------------------------------
     cell_path = []
@@ -632,7 +654,7 @@ def main():
 
         # ---- Step 2: 3D voxel grid ----
         scene_bounds = _scene_bounds()
-        solid, nx, ny, nz = _build_voxel_grid(config, scene_bounds)
+        solid, nx, ny, nz, _eff_res = _build_voxel_grid(config, scene_bounds)
 
         # ---- Step 3: Walkable voxels ----
         walkable = _find_walkable_voxels(solid, config, scene_bounds, nx, ny, nz)
@@ -659,11 +681,21 @@ def main():
                 for i in range(len(path_points) - 1)
             )
             walk_speed = config.get("walk_speed_mps", 1.2)
-            config["duration_seconds"] = max(5.0, path_length / walk_speed)
-            print(
-                f"[Walkthrough] Path length: {path_length:.1f}m "
-                f"/ {walk_speed}m/s = {config['duration_seconds']:.1f}s"
-            )
+            raw_duration = max(5.0, path_length / walk_speed)
+            max_dur = config.get("max_duration_seconds")
+            if max_dur and raw_duration > max_dur:
+                config["duration_seconds"] = max_dur
+                print(
+                    f"[Walkthrough] Path length: {path_length:.1f}m "
+                    f"/ {walk_speed}m/s = {raw_duration:.1f}s "
+                    f"(capped to {max_dur}s by max_duration_seconds)"
+                )
+            else:
+                config["duration_seconds"] = raw_duration
+                print(
+                    f"[Walkthrough] Path length: {path_length:.1f}m "
+                    f"/ {walk_speed}m/s = {config['duration_seconds']:.1f}s"
+                )
 
         # ---- Step 5: Interesting objects ----
         interesting_objects = _find_interesting_objects()

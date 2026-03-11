@@ -46,9 +46,12 @@ def render_scene_walkthrough(
     *,
     camera_height: float = 1.7,
     grid_resolution: float = 0.5,
+    max_grid_cells_xy: int = 80,
+    max_grid_cells_z: int = 40,
     obstacle_radius: float = 0.5,
     fps: int = 12,
     duration_seconds: float = None,
+    max_duration_seconds: float = 60.0,
     walk_speed_mps: float = 1.2,
     num_waypoints: int = 20,
     look_range: float = 15.0,
@@ -71,26 +74,35 @@ def render_scene_walkthrough(
     6. Assemble frames into a looping GIF.
 
     Args:
-        blend_path:        Path to the input ``.blend`` file.
-        output_dir:        Directory for frames, GIF, and animated ``.blend``.
-        camera_height:     Camera height above detected floor in metres (default 1.7).
-        grid_resolution:   Grid cell size in metres (default 0.5).
-        obstacle_radius:   Horizontal clearance radius in metres (default 0.5).
-        fps:               Frames per second rendered by Blender (default 12).
-                           Lower = faster render and smaller GIF.
-        duration_seconds:  Total walkthrough duration in seconds. ``None`` (default)
-                           = auto-calculated from path length / walk_speed_mps.
-        walk_speed_mps:    Walking speed in m/s used for auto duration (default 1.2).
-                           Only used when duration_seconds is None.
-        num_waypoints:     Number of coverage waypoints (default 20).
-        look_range:        Maximum distance in metres for look-at targets (default 15.0).
+        blend_path:          Path to the input ``.blend`` file.
+        output_dir:          Directory for frames, GIF, and animated ``.blend``.
+        camera_height:       Camera height above detected floor in metres (default 1.7).
+        grid_resolution:     Minimum voxel size in metres (default 0.5). The actual
+                             voxel size is scaled up so the grid never exceeds
+                             max_grid_cells_xy × max_grid_cells_xy × max_grid_cells_z,
+                             keeping ray-cast count fixed regardless of scene size.
+        max_grid_cells_xy:   Maximum grid cells along X and Y axes (default 80).
+        max_grid_cells_z:    Maximum grid cells along Z axis (default 40).
+        obstacle_radius:     Horizontal clearance radius in metres (default 0.5).
+        fps:                 Frames per second rendered by Blender (default 12).
+                             Lower = faster render and smaller GIF.
+        duration_seconds:    Total walkthrough duration in seconds. ``None`` (default)
+                             = auto-calculated from path length / walk_speed_mps,
+                             then capped by max_duration_seconds.
+        max_duration_seconds: Hard cap on auto-calculated duration in seconds (default 60.0).
+                             Prevents multi-hour renders on large outdoor scenes.
+                             Set to ``None`` to disable the cap.
+        walk_speed_mps:      Walking speed in m/s used for auto duration (default 1.2).
+                             Only used when duration_seconds is None.
+        num_waypoints:       Number of coverage waypoints (default 20).
+        look_range:          Maximum distance in metres for look-at targets (default 15.0).
         rotation_smooth_seconds: Camera rotation time constant in seconds (default 2.0).
-                           Larger = slower, more cinematic rotation.
-        gif_frame_duration: Milliseconds per GIF frame (default 80 ≈ 12.5 fps).
-        render_engine:     Blender render engine — ``"CYCLES"`` (GPU, default),
-                           ``"EEVEE"``, or ``"WORKBENCH"``.
-        seed:              RNG seed for reproducible path sampling (default 42).
-        blender_command:   Path to the Blender executable (default ``"blender"``).
+                             Larger = slower, more cinematic rotation.
+        gif_frame_duration:  Milliseconds per GIF frame (default 80 ≈ 12.5 fps).
+        render_engine:       Blender render engine — ``"CYCLES"`` (GPU, default),
+                             ``"EEVEE"``, or ``"WORKBENCH"``.
+        seed:                RNG seed for reproducible path sampling (default 42).
+        blender_command:     Path to the Blender executable (default ``"blender"``).
 
     Returns:
         dict with keys:
@@ -114,9 +126,12 @@ def render_scene_walkthrough(
     config = {
         "camera_height": camera_height,
         "grid_resolution": grid_resolution,
+        "max_grid_cells_xy": max_grid_cells_xy,
+        "max_grid_cells_z": max_grid_cells_z,
         "obstacle_radius": obstacle_radius,
         "fps": fps,
         "duration_seconds": duration_seconds,   # None = auto from path length
+        "max_duration_seconds": max_duration_seconds,
         "walk_speed_mps": walk_speed_mps,
         "num_waypoints": num_waypoints,
         "look_range": look_range,
