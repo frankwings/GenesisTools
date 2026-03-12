@@ -79,11 +79,11 @@ Four runs were produced, each fixing one layer of the camera positioning problem
 | Path points | 1,241 |
 | Total time | 700 s |
 
-![v1 frame 001](../results/ai33_walkthrough/frames/frame_0001.png)
+![v1 frame 001](assets/ai33_walkthrough/v1_frame_0001.png)
 
 **GIF** (240 frames, 8 fps, 710 KB — blank/ceiling throughout):
 
-![v1 walkthrough GIF](../results/ai33_walkthrough/AI33_002_280_walkthrough.gif)
+![v1 walkthrough GIF](assets/ai33_walkthrough/v1_walkthrough.gif)
 
 ---
 
@@ -102,6 +102,12 @@ Four runs were produced, each fixing one layer of the camera positioning problem
 | GIF size | 428 KB |
 | Path points | 1,394 |
 | Total time | 626 s |
+
+![v2 frame 001](assets/ai33_walkthrough/v2_frame_0001.png)
+
+**GIF** (240 frames, 8 fps, 419 KB — blank/ceiling throughout):
+
+![v2 walkthrough GIF](assets/ai33_walkthrough/v2_walkthrough.gif)
 
 ---
 
@@ -122,7 +128,7 @@ Four runs were produced, each fixing one layer of the camera positioning problem
 
 Frame 1:
 
-![v3 frame 001](../results/ai33_walkthrough_v3/frames/frame_0001.png)
+*(v3 output directory was lost — rendered to a doubled path due to a CWD bug; no frames preserved.)*
 
 ---
 
@@ -155,23 +161,23 @@ Frame 1:
 
 **Frame 1** — exact original camera view:
 
-![v4 frame 001](../results/ai33_walkthrough_v4/frames/frame_0001.png)
+![v4 frame 001](assets/ai33_walkthrough/v4_frame_0001.png)
 
 **Frame 60** — office corner with kitchen/dining area visible:
 
-![v4 frame 060](../results/ai33_walkthrough_v4/frames/frame_0060.png)
+![v4 frame 060](assets/ai33_walkthrough/v4_frame_0060.png)
 
 **Frame 150** — window wall:
 
-![v4 frame 150](../results/ai33_walkthrough_v4/frames/frame_0150.png)
+![v4 frame 150](assets/ai33_walkthrough/v4_frame_0150.png)
 
 **Frame 240** — end of walkthrough:
 
-![v4 frame 240](../results/ai33_walkthrough_v4/frames/frame_0240.png)
+![v4 frame 240](assets/ai33_walkthrough/v4_frame_0240.png)
 
 **GIF** (240 frames, 8 fps, 22 MB — full office walkthrough):
 
-![v4 walkthrough GIF](../results/ai33_walkthrough_v4/AI33_002_280_walkthrough.gif)
+![v4 walkthrough GIF](assets/ai33_walkthrough/v4_walkthrough.gif)
 
 ---
 
@@ -267,7 +273,7 @@ GenesisTools/results/ai33_walkthrough/             ← v1 (reference, blank fram
 
 Some v4 frames show a **curved dark edge** cutting into nearby wall geometry:
 
-![v4 clipping artifact — frame 180](../results/ai33_walkthrough_v4/frames/frame_0180.png)
+![v4 clipping artifact — frame 180](assets/ai33_walkthrough/v4_frame_0180.png)
 
 **Root cause**: Blender default `clip_start = 0.1 m`. In a cm-scale scene (`unit_scale = 0.01`, 1 BU = 1 cm), `0.1 m = 10 BU = 10 cm`. The 40 BU/voxel grid allows the camera to walk within ~20 BU of walls. When the camera comes within 10 cm of a surface, the near clip plane intersects the geometry and renders as a curved dark hole.
 

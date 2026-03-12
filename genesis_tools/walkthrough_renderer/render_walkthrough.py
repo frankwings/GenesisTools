@@ -656,20 +656,29 @@ def _bfs_path(start, goal, walkable):
     return [start, goal]
 
 
-def _build_smooth_path(tour, walkable, config, bounds):
+def _build_smooth_path(tour, walkable, config, bounds, bvh=None):
     """BFS corridor + constrained Laplacian smoothing + 4× upsample.
 
     1. BFS between consecutive waypoints — guaranteed wall-free path.
     2. Laplacian smoothing in XY only; Z is re-resolved from the walkable
        voxel at each XY so the camera follows terrain correctly.
+       If ``bvh`` is supplied, each candidate smooth step is rejected when a
+       ray at camera height from the previous accepted point to the candidate
+       hits geometry — preventing the path from cutting through thin walls.
     3. 4× linear upsampling for dense per-frame path sampling.
+       If ``bvh`` is supplied, each interpolated segment is checked; blocked
+       segments fall back to the straight voxel-centre connection so the
+       camera never teleports through walls.
 
     `bounds` must be (min_x, min_y, max_x, max_y, min_z, max_z).
     """
+    from mathutils import Vector as _V
+
     min_x = bounds[0]
     min_y = bounds[1]
     min_z = bounds[4]
     res = config.get("_effective_grid_resolution", config["grid_resolution"])
+    cam_h_bu = config.get("camera_height", 1.7) / config.get("_unit_scale", 1.0)
 
     cell_path = []
     n = len(tour)
@@ -696,6 +705,19 @@ def _build_smooth_path(tour, walkable, config, bounds):
             min_z + iz * res,
         ]
 
+    def _los_clear(p0, p1):
+        """Return True if the segment p0→p1 at camera height is unobstructed."""
+        if bvh is None:
+            return True
+        origin = _V((p0[0], p0[1], p0[2] + cam_h_bu))
+        target = _V((p1[0], p1[1], p1[2] + cam_h_bu))
+        d = target - origin
+        dist = d.length
+        if dist < 1e-6:
+            return True
+        hit_loc, _, _, _ = bvh.ray_cast(origin, d / dist, dist * 0.99)
+        return hit_loc is None
+
     points = [c2w(c) for c in cell_path]
 
     for _ in range(5):
@@ -707,7 +729,12 @@ def _build_smooth_path(tour, walkable, config, bounds):
             iy = int((sy - min_y) / res)
             if (ix, iy) in walkable_xy:
                 sz = min_z + walkable_xy[(ix, iy)] * res
-                new_pts.append([sx, sy, sz])
+                candidate = [sx, sy, sz]
+                # LOS check: reject move if camera ray from previous accepted
+                # point to candidate is blocked by geometry.
+                if not _los_clear(new_pts[-1], candidate):
+                    candidate = points[i]
+                new_pts.append(candidate)
             else:
                 new_pts.append(points[i])
         new_pts.append(points[-1])
@@ -716,12 +743,21 @@ def _build_smooth_path(tour, walkable, config, bounds):
     upsampled = []
     steps = 4
     for i in range(len(points) - 1):
-        for j in range(steps):
-            t = j / steps
-            x = points[i][0] + t * (points[i + 1][0] - points[i][0])
-            y = points[i][1] + t * (points[i + 1][1] - points[i][1])
-            z = points[i][2] + t * (points[i + 1][2] - points[i][2])
-            upsampled.append([x, y, z])
+        p_start = points[i]
+        p_end   = points[i + 1]
+        if _los_clear(p_start, p_end):
+            for j in range(steps):
+                t = j / steps
+                x = p_start[0] + t * (p_end[0] - p_start[0])
+                y = p_start[1] + t * (p_end[1] - p_start[1])
+                z = p_start[2] + t * (p_end[2] - p_start[2])
+                upsampled.append([x, y, z])
+        else:
+            # Segment blocked: emit only the start point; the end point will
+            # be emitted as the start of the next iteration (or as the final
+            # append below), so the camera jumps cleanly between two
+            # wall-free positions rather than interpolating through a wall.
+            upsampled.append(p_start)
     upsampled.append(points[-1])
 
     return [Vector((p[0], p[1], p[2])) for p in upsampled]
@@ -823,11 +859,13 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
 
     cam_data = bpy.data.cameras.new("WalkthroughCamera")
     cam_data.lens = 35
-    # Set clip_start to 1 mm in world-space (0.001 m / unit_scale).
-    # Blender default is 0.1 m; on cm-scale scenes that is 10 BU = 10 cm,
-    # which clips wall geometry whenever the camera comes within 10 cm of a
-    # surface — visible as a curved black/dark edge in the frame.
+    # clip_start: 1 mm world-space.  Blender default (0.1 m = 10 BU in cm-scale)
+    # clips wall geometry when camera is within 10 cm of a surface → curved dark edge.
     cam_data.clip_start = 0.001 / unit_scale
+    # clip_end: 100 m world-space.  Blender default (1000 BU = 10 m in cm-scale)
+    # clips geometry beyond 10 m → large blank white areas in long corridors.
+    # ratio clip_end/clip_start = 100_000 — safe from z-fighting.
+    cam_data.clip_end = 100.0 / unit_scale
     cam_obj = bpy.data.objects.new("WalkthroughCamera", cam_data)
     bpy.context.scene.collection.objects.link(cam_obj)
     bpy.context.scene.camera = cam_obj
@@ -1084,7 +1122,14 @@ def main():
         waypoints = _farthest_point_sample(component, n_wp, config["seed"],
                                            fixed_first=camera_seed)
         tour      = _greedy_tsp_tour(waypoints)
-        path_points = _build_smooth_path(tour, walkable, config, bounds_for_path)
+        # Pass the local BVH so _build_smooth_path can reject smooth moves
+        # and upsample segments that would cut through walls.  In global mode
+        # bvh_for_los is the depsgraph (no ray_cast method), so only pass it
+        # when it has a ray_cast attribute (i.e. it is a BVHTree).
+        _path_bvh = bvh_for_los if hasattr(bvh_for_los, "ray_cast") else None
+        config["_unit_scale"] = unit_scale
+        path_points = _build_smooth_path(tour, walkable, config, bounds_for_path,
+                                         bvh=_path_bvh)
         timing["path_s"] = round(time.time() - t0, 1)
         print(f"[Timing] path planning: {timing['path_s']}s")
 
@@ -1114,17 +1159,36 @@ def main():
                       f"actual={actual_floor_z:.1f}  correction={z_correction:.1f} BU")
 
             # Step 2: prepend camera start.
-            cam_floor_start = Vector((center.x, center.y, center.z - cam_h_bu))
+            # Use actual_floor_z (BVH ray hit) as the floor Z so the first path
+            # point is on the real floor surface.  Falling back to center.z - cam_h_bu
+            # only when actual_floor_z is unavailable.  This prevents the camera from
+            # diving through geometry when the original scene camera is elevated
+            # (e.g. on a loft or mezzanine looking down).
+            if actual_floor_z is not None:
+                cam_floor_start_z = actual_floor_z
+            else:
+                cam_floor_start_z = center.z - cam_h_bu
+            cam_floor_start = Vector((center.x, center.y, cam_floor_start_z))
             path_points = [cam_floor_start] + path_points
             print(f"[Walkthrough] Prepended camera floor start: "
                   f"({cam_floor_start.x:.1f}, {cam_floor_start.y:.1f}, {cam_floor_start.z:.1f})  "
-                  f"→ cam z = {center.z:.1f} BU ({center.z * unit_scale:.3f}m)")
+                  f"→ cam z = {cam_floor_start_z + cam_h_bu:.1f} BU "
+                  f"({(cam_floor_start_z + cam_h_bu) * unit_scale:.3f}m)")
 
-            # Step 3: original camera rotation for frame 1.
+            # Step 3: original camera rotation for frame 1 — only when the original
+            # camera is at roughly floor level (within 50 % of camera_height above
+            # the actual floor).  If it is elevated (loft, drone, security cam) the
+            # drop from its Z to walk height causes the camera to dive through
+            # geometry; in that case just start walking from actual floor level.
             orig_cam = bpy.context.scene.camera
             if orig_cam is not None:
-                initial_rotation_quat = orig_cam.matrix_world.to_quaternion()
-                print(f"[Walkthrough] Original camera quat: {initial_rotation_quat}")
+                elev = abs((center.z - cam_h_bu) - cam_floor_start_z)
+                if elev < cam_h_bu * 0.5:
+                    initial_rotation_quat = orig_cam.matrix_world.to_quaternion()
+                    print(f"[Walkthrough] Original camera quat applied (elev={elev:.1f} BU < threshold)")
+                else:
+                    print(f"[Walkthrough] Original camera elevated {elev:.1f} BU above floor "
+                          f"(threshold={cam_h_bu * 0.5:.1f}) — skipping frame-1 original view")
 
         # Auto-calculate duration from path length.
         if not config.get("duration_seconds"):
@@ -1158,6 +1222,7 @@ def main():
 
         # ---- Step 8: Save ----
         output_blend.parent.mkdir(parents=True, exist_ok=True)
+        bpy.data.use_autopack = False  # skip packing missing external textures
         bpy.ops.wm.save_as_mainfile(filepath=str(output_blend))
 
         frames_dir = None
