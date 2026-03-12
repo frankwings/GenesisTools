@@ -1767,13 +1767,10 @@ def main():
                 print(f"[Walkthrough] Path {path_length:.1f}m / {walk_speed}m/s "
                       f"= {config['duration_seconds']:.1f}s")
 
-        # ---- Step 5: Interesting objects ----
-        interesting_objects = _find_interesting_objects()
-
         # ---- Steps 6 & 7: Camera animation ----
         t0 = time.time()
         cam_obj, total_frames = _setup_and_animate_camera(
-            path_points, interesting_objects, config, bvh_for_los,
+            path_points, [], config, bvh_for_los,
             initial_rotation_quat=initial_rotation_quat,
         )
         timing["camera_anim_s"] = round(time.time() - t0, 1)
@@ -1826,7 +1823,7 @@ def main():
             "path_points_count":         len(path_points),
             "walkable_voxels_count":     len(walkable),
             "solid_voxels_count":        len(solid),
-            "interesting_objects_count": len(interesting_objects),
+            "interesting_objects_count": 0,  # replaced by density-based gaze
             "timing":                    timing,
             "mode":                      "local" if local_area_ratio else "global",
         }))
