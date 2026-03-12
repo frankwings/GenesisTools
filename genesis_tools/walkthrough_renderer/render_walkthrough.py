@@ -1318,9 +1318,9 @@ def _find_density_look_target(cam_pos, depsgraph_or_bvh, look_range, n_samples=6
             best_dir   = d_i
 
     if best_dir is None or best_score < 2:
-        return None
+        return None, None
 
-    return cam_pos + best_dir * (look_range * 0.6)
+    return cam_pos + best_dir * (look_range * 0.6), best_dir
 
 
 # ---------------------------------------------------------------------------
@@ -1391,10 +1391,13 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
     # Seed prev_quat from the original scene camera so frame 0 shows the
     # exact original camera view and then smoothly SLERPs into the path-based
     # walk-through orientation over the next few seconds.
-    prev_quat       = initial_rotation_quat  # None → no override
-    gaze_target     = None
-    gaze_remaining  = 0
-    glance_cooldown = {}
+    prev_quat            = initial_rotation_quat  # None → no override
+    gaze_target          = None
+    gaze_remaining       = 0
+    forced_forward_frames = 0          # C: forced forward look after gaze ends
+    gaze_cooldown_dir    = None        # A: direction of last gaze (Vector or None)
+    gaze_cooldown_frames = 0           # A: frames remaining on direction cooldown
+    glance_cooldown      = {}          # kept for backward compat (unused)
 
     rotation_tau  = config.get("rotation_smooth_seconds", 2.0)
     slerp_alpha   = 1.0 - math.exp(-1.0 / max(1, fps * rotation_tau))
@@ -1413,25 +1416,43 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
                   f"  cam_pos=({cam_pos.x:.1f},{cam_pos.y:.1f},{cam_pos.z:.1f})"
                   f"  t={t:.4f}  path_idx≈{t*(len(path_points)-1):.1f}")
 
-        for name in list(glance_cooldown):
-            glance_cooldown[name] -= 1
-            if glance_cooldown[name] <= 0:
-                del glance_cooldown[name]
+        # Tick direction cooldown (A)
+        if gaze_cooldown_frames > 0:
+            gaze_cooldown_frames -= 1
+            if gaze_cooldown_frames == 0:
+                gaze_cooldown_dir = None
 
+        # Tick forced-forward counter (C)
+        if forced_forward_frames > 0:
+            forced_forward_frames -= 1
+
+        # Tick active gaze
         if gaze_remaining > 0:
             gaze_remaining -= 1
             if gaze_remaining == 0:
-                gaze_target = None
+                # C: record direction we were gazing, force forward look for 2s
+                if gaze_target is not None:
+                    raw_dir = (gaze_target - cam_pos)
+                    if raw_dir.length > 0:
+                        gaze_cooldown_dir    = raw_dir.normalized()
+                        gaze_cooldown_frames = int(fps * 6)   # A: 6s direction cooldown
+                gaze_target           = None
+                forced_forward_frames = int(fps * 2)          # C: 2s forced forward
 
-        # Density-based gaze: every density_update_interval frames, cast 360°
-        # Fibonacci sphere rays and pick the direction with the most distinct
-        # objects in a 45° cone.  Only fires when no active gaze target.
-        if gaze_target is None and frame_idx % density_update_interval == 0:
-            density_target = _find_density_look_target(
+        # Density-based gaze: only when no active gaze, not forced forward,
+        # and direction cooldown allows it.
+        if (gaze_target is None
+                and forced_forward_frames == 0
+                and frame_idx % density_update_interval == 0):
+            density_target, density_dir = _find_density_look_target(
                 cam_pos, depsgraph_or_bvh, glance_range)
+            # A: skip if new direction is too close to the cooldown direction
             if density_target is not None:
-                gaze_target    = density_target
-                gaze_remaining = glance_duration
+                blocked = (gaze_cooldown_dir is not None
+                           and density_dir.dot(gaze_cooldown_dir) > 0.8)
+                if not blocked:
+                    gaze_target    = density_target
+                    gaze_remaining = glance_duration
 
         if gaze_target is not None:
             look_target = gaze_target
