@@ -966,6 +966,253 @@ def _build_smooth_path(tour, walkable, config, bounds, bvh=None):
     return [Vector((p[0], p[1], p[2])) for p in upsampled]
 
 
+# ---------------------------------------------------------------------------
+# Fine-level path adjustment (Level 2 of coarse-to-fine voxelisation)
+# ---------------------------------------------------------------------------
+
+def _fine_adjust_path(coarse_path, bvh, config):
+    """Refine a coarse path using small, high-resolution local voxel patches.
+
+    The coarse grid (Level 1) produces a globally-planned path, but its
+    resolution (~0.4 m) can miss thin walls (<1 voxel wide).  This function
+    walks the coarse path step-by-step and, at each step, builds a tiny
+    fine-resolution voxel patch centred on the current position.  If the next
+    step is blocked in the fine grid, it finds the nearest fine-walkable cell
+    that still makes progress toward the coarse target.
+
+    This is Level 2 of the two-level coarse-to-fine approach:
+      Level 1: coarse grid → global coverage path (unchanged)
+      Level 2: fine local patches → wall avoidance during path execution
+
+    Parameters
+    ----------
+    coarse_path : list[Vector]
+        Floor-level path points from ``_build_smooth_path``.
+    bvh : BVHTree
+        Local BVH built from nearby objects (same one used for coarse grid).
+    config : dict
+        Walkthrough configuration; uses grid_resolution, camera_height,
+        _unit_scale, _effective_grid_resolution.
+
+    Returns
+    -------
+    list[Vector]
+        Adjusted path with wall-avoiding positions.
+    """
+    if bvh is None or len(coarse_path) < 2:
+        return coarse_path
+
+    unit_scale = config.get("_unit_scale", 1.0)
+    coarse_res = config.get("_effective_grid_resolution",
+                            config["grid_resolution"] / unit_scale)
+    fine_res = coarse_res / 4.0       # ~0.1 m at default settings
+    cam_h_bu = config["camera_height"] / unit_scale
+    patch_radius = coarse_res * 2.5   # patch covers 5×5 coarse voxels
+    cam_h_voxels = max(1, int(math.ceil(cam_h_bu / fine_res)))
+
+    # Fine-grid dimensions (fixed for every patch — same allocation each step)
+    fine_n = max(1, int(math.ceil(patch_radius * 2.0 / fine_res)))
+    fine_nz = max(1, int(math.ceil((cam_h_bu + 2.0) / fine_res)))
+
+    adjusted = [coarse_path[0]]
+    n_nudged = 0
+    t0 = time.time()
+
+    # Cache: avoid rebuilding the same patch when consecutive points fall
+    # within the same patch.
+    _cached_patch_center = None
+    _cached_walkable_world = None   # set of (world_x_snapped, world_y_snapped)
+    _cached_fine_floor_z = None
+    CACHE_REUSE_DIST = patch_radius * 0.4   # reuse patch if within 40 % of radius
+
+    def _build_fine_patch(cx, cy, floor_z):
+        """Build a fine-resolution 2D walkable set around (cx, cy).
+
+        Returns a dict mapping (fine_ix, fine_iy) → floor_z in BU, plus
+        the patch origin (min_x, min_y, min_z) for coordinate conversion.
+        """
+        p_min_x = cx - patch_radius
+        p_min_y = cy - patch_radius
+        p_min_z = floor_z - 0.5
+        p_max_z = floor_z + cam_h_bu + 2.0
+
+        solid = set()
+        ray_span_z = p_max_z - p_min_z + 2.0
+
+        # Z-axis rays — detect floor and ceiling surfaces
+        for ix in range(fine_n):
+            x = p_min_x + (ix + 0.5) * fine_res
+            for iy in range(fine_n):
+                y = p_min_y + (iy + 0.5) * fine_res
+                for loc in _cast_all_hits_bvh(bvh, (x, y, p_max_z + 1.0),
+                                              (0, 0, -1), ray_span_z):
+                    fix = min(fine_n - 1, max(0, int((loc.x - p_min_x) / fine_res)))
+                    fiy = min(fine_n - 1, max(0, int((loc.y - p_min_y) / fine_res)))
+                    fiz = min(fine_nz - 1, max(0, int((loc.z - p_min_z) / fine_res)))
+                    solid.add((fix, fiy, fiz))
+
+        # X-axis rays — catch vertical walls perpendicular to X
+        ray_span_x = patch_radius * 2.0 + 2.0
+        for iy in range(fine_n):
+            y = p_min_y + (iy + 0.5) * fine_res
+            for iz in range(fine_nz):
+                z = p_min_z + (iz + 0.5) * fine_res
+                for loc in _cast_all_hits_bvh(bvh, (p_min_x - 1.0, y, z),
+                                              (1, 0, 0), ray_span_x):
+                    fix = min(fine_n - 1, max(0, int((loc.x - p_min_x) / fine_res)))
+                    fiy = min(fine_n - 1, max(0, int((loc.y - p_min_y) / fine_res)))
+                    fiz = min(fine_nz - 1, max(0, int((loc.z - p_min_z) / fine_res)))
+                    solid.add((fix, fiy, fiz))
+
+        # Y-axis rays — catch vertical walls perpendicular to Y
+        ray_span_y = patch_radius * 2.0 + 2.0
+        for ix in range(fine_n):
+            x = p_min_x + (ix + 0.5) * fine_res
+            for iz in range(fine_nz):
+                z = p_min_z + (iz + 0.5) * fine_res
+                for loc in _cast_all_hits_bvh(bvh, (x, p_min_y - 1.0, z),
+                                              (0, 1, 0), ray_span_y):
+                    fix = min(fine_n - 1, max(0, int((loc.x - p_min_x) / fine_res)))
+                    fiy = min(fine_n - 1, max(0, int((loc.y - p_min_y) / fine_res)))
+                    fiz = min(fine_nz - 1, max(0, int((loc.z - p_min_z) / fine_res)))
+                    solid.add((fix, fiy, fiz))
+
+        # Find walkable fine cells: floor surface with cam_h clearance above
+        walkable_fine = {}
+        floor_surfaces = {(ix, iy, iz) for (ix, iy, iz) in solid
+                          if (ix, iy, iz + 1) not in solid}
+        for (ix, iy, iz_floor) in floor_surfaces:
+            iz_feet = iz_floor + 1
+            if all((ix, iy, iz_feet + k) not in solid and iz_feet + k < fine_nz
+                   for k in range(cam_h_voxels)):
+                # BVH clearance check: vertical ray from floor to eye
+                cell_x = p_min_x + (ix + 0.5) * fine_res
+                cell_y = p_min_y + (iy + 0.5) * fine_res
+                cell_floor_z = p_min_z + iz_feet * fine_res
+                origin = Vector((cell_x, cell_y, cell_floor_z + 0.05))
+                hit, _, _, _ = bvh.ray_cast(origin, Vector((0, 0, 1)), cam_h_bu - 0.05)
+                if hit is None:
+                    walkable_fine[(ix, iy)] = p_min_z + iz_feet * fine_res
+
+        return walkable_fine, (p_min_x, p_min_y, p_min_z)
+
+    def _world_to_fine(wx, wy, patch_origin):
+        """Convert world XY to fine grid indices."""
+        p_min_x, p_min_y, _ = patch_origin
+        return (int((wx - p_min_x) / fine_res),
+                int((wy - p_min_y) / fine_res))
+
+    def _fine_to_world(fix, fiy, patch_origin, walkable_fine):
+        """Convert fine grid indices to world XY + floor Z."""
+        p_min_x, p_min_y, _ = patch_origin
+        wx = p_min_x + (fix + 0.5) * fine_res
+        wy = p_min_y + (fiy + 0.5) * fine_res
+        wz = walkable_fine.get((fix, fiy), coarse_path[0].z)
+        return Vector((wx, wy, wz))
+
+    for i in range(1, len(coarse_path)):
+        cur = adjusted[-1]
+        target = coarse_path[i]
+
+        # Check if step is clear via BVH ray at camera height
+        origin = Vector((cur.x, cur.y, cur.z + cam_h_bu))
+        target_eye = Vector((target.x, target.y, target.z + cam_h_bu))
+        d = target_eye - origin
+        dist = d.length
+        if dist < 1e-6:
+            adjusted.append(target)
+            continue
+        d_norm = d / dist
+
+        hit_loc, _, _, _ = bvh.ray_cast(origin, d_norm, dist * 0.99)
+        if hit_loc is None:
+            # Clear path — keep coarse point
+            adjusted.append(target)
+            continue
+
+        # Blocked! Build or reuse fine patch around current position.
+        if (_cached_patch_center is not None and
+                abs(cur.x - _cached_patch_center[0]) < CACHE_REUSE_DIST and
+                abs(cur.y - _cached_patch_center[1]) < CACHE_REUSE_DIST):
+            walkable_fine = _cached_walkable_world
+            patch_origin = _cached_fine_floor_z
+        else:
+            walkable_fine, patch_origin = _build_fine_patch(cur.x, cur.y, cur.z)
+            _cached_patch_center = (cur.x, cur.y)
+            _cached_walkable_world = walkable_fine
+            _cached_fine_floor_z = patch_origin
+
+        if not walkable_fine:
+            # No walkable fine cells — fall back to coarse point
+            adjusted.append(target)
+            continue
+
+        # Find current and target positions in fine grid
+        cur_fi = _world_to_fine(cur.x, cur.y, patch_origin)
+        tgt_fi = _world_to_fine(target.x, target.y, patch_origin)
+
+        # Direction toward target in fine grid space
+        dx = target.x - cur.x
+        dy = target.y - cur.y
+        dlen = math.sqrt(dx * dx + dy * dy)
+        if dlen < 1e-6:
+            adjusted.append(target)
+            continue
+        dx /= dlen
+        dy /= dlen
+
+        # Search for best fine-walkable cell: maximises progress toward target
+        # while being reachable (BVH-clear from current position).
+        best_cell = None
+        best_progress = -1e9
+
+        for (fix, fiy), fz in walkable_fine.items():
+            # Must be within the fine patch
+            if fix < 0 or fix >= fine_n or fiy < 0 or fiy >= fine_n:
+                continue
+            cell_world = _fine_to_world(fix, fiy, patch_origin, walkable_fine)
+            # Progress = dot product of (cell - cur) with direction to target
+            cell_dx = cell_world.x - cur.x
+            cell_dy = cell_world.y - cur.y
+            progress = cell_dx * dx + cell_dy * dy
+            # Must make positive progress (or at least not go backward much)
+            if progress < -fine_res:
+                continue
+            # Cell must be within reasonable distance (don't jump too far)
+            cell_dist = math.sqrt(cell_dx * cell_dx + cell_dy * cell_dy)
+            if cell_dist > coarse_res * 2.0:
+                continue
+            # BVH clearance check: can we reach this cell from current pos?
+            c_origin = Vector((cur.x, cur.y, cur.z + cam_h_bu))
+            c_target = Vector((cell_world.x, cell_world.y, cell_world.z + cam_h_bu))
+            c_d = c_target - c_origin
+            c_dist = c_d.length
+            if c_dist > 1e-6:
+                c_hit, _, _, _ = bvh.ray_cast(c_origin, c_d / c_dist, c_dist * 0.99)
+                if c_hit is not None:
+                    continue
+            # Score: progress toward target, penalised by lateral deviation
+            lateral = abs(cell_dx * (-dy) + cell_dy * dx)  # perpendicular component
+            score = progress - lateral * 0.5
+            if score > best_progress:
+                best_progress = score
+                best_cell = cell_world
+
+        if best_cell is not None:
+            adjusted.append(best_cell)
+            n_nudged += 1
+        else:
+            # No viable fine cell found — keep coarse point anyway
+            adjusted.append(target)
+
+    elapsed = time.time() - t0
+    print(f"[Walkthrough] Fine path adjustment: {n_nudged}/{len(coarse_path)-1} "
+          f"points nudged, {elapsed:.2f}s  "
+          f"fine_res={fine_res:.3f} BU  patch={patch_radius:.1f} BU  "
+          f"fine_grid={fine_n}×{fine_n}×{fine_nz}")
+    return adjusted
+
+
 def _sample_path(path_points, t):
     """Sample a point along path_points at normalised t ∈ [0, 1]."""
     if not path_points:
@@ -1386,6 +1633,15 @@ def main():
 
         if not path_points:
             raise RuntimeError("Path planning produced no points.")
+
+        # ---- Level 2: Fine path adjustment ----
+        # Walk the coarse path step-by-step, building small high-res voxel
+        # patches to detect thin walls missed by the coarse grid.
+        if _path_bvh is not None:
+            t0_fine = time.time()
+            path_points = _fine_adjust_path(path_points, _path_bvh, config)
+            timing["fine_adjust_s"] = round(time.time() - t0_fine, 1)
+            print(f"[Timing] fine path adjustment: {timing['fine_adjust_s']}s")
 
         # In local mode:
         # 1. Correct path Z for voxel quantisation. The voxel grid uses
