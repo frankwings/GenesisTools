@@ -1,8 +1,8 @@
-# AI33_001 Walkthrough Dark Frame Fix — v1 to v17
+# AI33_001 Walkthrough Dark Frame Fix — v1 to v18
 
 **Date**: 2026-03-12
 **Scene**: `AI33_001_280.blend` (cm-scale scene, unit_scale=0.01, 1 BU = 1 cm)
-**Commits**: v14 `c7497e0`, v15 `05055e1`, v17 `5cd8916`
+**Commits**: v14 `c7497e0`, v15 `05055e1`, v17 `5cd8916`, v18 `87f3094`
 
 ## Problem
 
@@ -24,7 +24,8 @@ Cascade of failures:
 
 | Version | Resolution | Mode | Frames | Dark Frames | Render Time | Key Change | Fixed? |
 |---------|-----------|------|--------|-------------|-------------|------------|--------|
-| **v17** | **640×480** | **local** | **720** | **0** | **~559s** | **360° density look-at + remove forced eye-height** | **Yes** |
+| **v18** | **640×480** | **local** | **720** | **0** | **~626s** | **Direction cooldown + forced forward after gaze** | **Yes** |
+| v17 | 640×480 | local | 720 | 0 | ~559s | 360° density look-at + remove forced eye-height | Yes |
 | v16 | 640×480 | local | 720 | 0 | 616s | Fine adjustment triggered (0 nudges needed) | Yes |
 | v15 | 640×480 | global | 720 | 0 | 566s | Fine path adjustment added (not triggered) | Yes |
 | **v14** | **640×480** | **local** | **240** | **0** | **~570s** | **Floor anchor override** | **Yes** |
@@ -43,6 +44,23 @@ Cascade of failures:
 | v1 | 1280×720 | local | 240 | 23 | ~700s | Baseline | No |
 
 ## Version History (newest first)
+
+### v18 — Direction Cooldown + Forced Forward
+- **Resolution**: 640×480 | **Mode**: local (`local_area_ratio=0.3`) | **Frames**: 720
+- **Timing**: total ~626s (render ~616s)
+- **Commits**: `87f3094`
+- **Changes**:
+  1. **Direction cooldown (A)**: after gaze ends, block any new gaze within 37° of the previous direction for 6s. Prevents re-locking onto the same spot.
+  2. **Forced forward (C)**: after each gaze ends, force 2s of forward look before re-evaluating density. Camera looks where it's going between gazes.
+  3. **Bug fix**: `glance_range` was capped at 5 BU = 5cm in cm-scale. Fixed to `look_range / unit_scale` (15m → 1500 BU).
+  4. **Bug fix**: forward look was `floor_ahead` (floor-level point below eye) → always looked down. Fixed to `cam_pos + (floor_ahead - path_pt)` — looks in path direction from eye height.
+  5. **Bug fix**: density always uses `scene.ray_cast(depsgraph)` — BVH triangle index can't identify objects.
+  6. **Speed**: `walk_speed_mps` default raised 1.2 → 2.5 m/s.
+- **Gaze cycle**: gaze 3s → forced forward 2s → direction cooldown 6s → new gaze
+- **Dark frames**: **0**
+- **GIF**: ![v18](../results/ai33_001_walkthrough_v18/AI33_001_280_walkthrough.gif)
+
+---
 
 ### v17 — 360° Density Look-At + Natural Tilt
 - **Resolution**: 640×480 | **Mode**: local (`local_area_ratio=0.3`) | **Frames**: 720
