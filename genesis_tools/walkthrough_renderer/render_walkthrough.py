@@ -1232,34 +1232,91 @@ def _travel_direction_target(cam_pos, path_points, t, ahead=0.05):
 
 
 # ---------------------------------------------------------------------------
-# Step 5: Interesting objects
+# Step 5: Density-based look direction via 360° sphere ray sampling
 # ---------------------------------------------------------------------------
 
-EXCLUDE_KEYWORDS = {
-    "floor", "ground", "terrain", "sky", "plane", "landscape",
-    "ceiling", "wall", "room", "baseboard", "trim",
-}
+def _fibonacci_sphere_directions(n=64):
+    """Return n uniformly distributed directions on the unit sphere.
+
+    Uses the Fibonacci lattice (golden-angle spiral) for near-uniform coverage.
+    Excludes directions pointing mostly straight down (dz < -0.85) since
+    the camera rarely needs to look at the floor directly below it.
+    """
+    dirs = []
+    golden = (1.0 + math.sqrt(5.0)) / 2.0
+    for i in range(n * 2):   # oversample to allow downward exclusion
+        theta = 2.0 * math.pi * i / golden
+        phi   = math.acos(max(-1.0, min(1.0, 1.0 - 2.0 * (i + 0.5) / (n * 2))))
+        x = math.sin(phi) * math.cos(theta)
+        y = math.sin(phi) * math.sin(theta)
+        z = math.cos(phi)
+        if z > -0.85:   # exclude near-straight-down directions
+            dirs.append(Vector((x, y, z)).normalized())
+        if len(dirs) >= n:
+            break
+    return dirs
 
 
-def _find_interesting_objects():
-    """Return list of {name, center, clamped_volume} for scoreable objects."""
-    result = []
-    for obj in bpy.context.scene.objects:
-        if obj.type != "MESH":
+# Pre-compute once at module level — same directions reused every frame.
+_SPHERE_DIRS = None
+
+
+def _find_density_look_target(cam_pos, depsgraph_or_bvh, look_range, n_samples=64):
+    """Find the look direction with the highest density of distinct objects.
+
+    Shoots ``n_samples`` rays uniformly distributed over the sphere from
+    ``cam_pos``.  For each direction, records which object (if any) is hit
+    within ``look_range``.  Groups directions into angular clusters (45°
+    half-angle cone) and returns a point along the direction whose cone
+    contains the most distinct objects.
+
+    This replaces the old volume/keyword scoring with a purely spatial
+    density measure — the camera naturally looks toward crowded areas of
+    the scene (furniture clusters, architectural features) without needing
+    any object metadata.
+
+    Returns a world-space target point, or None if no objects are found.
+    """
+    global _SPHERE_DIRS
+    if _SPHERE_DIRS is None:
+        _SPHERE_DIRS = _fibonacci_sphere_directions(n_samples)
+
+    # Cast one ray per direction, record hit object name (or None).
+    hits = []   # list of (direction, object_name_or_None)
+    for d in _SPHERE_DIRS:
+        if isinstance(depsgraph_or_bvh, BVHTree):
+            loc, _, idx, _ = depsgraph_or_bvh.ray_cast(cam_pos, d, look_range)
+            obj_id = str(idx) if loc is not None else None
+        else:
+            result, _loc, _nrm, _idx, obj, _mat = bpy.context.scene.ray_cast(
+                depsgraph_or_bvh, cam_pos, d, distance=look_range,
+            )
+            obj_id = obj.name if result else None
+        hits.append((d, obj_id))
+
+    # For each direction that hits something, count distinct objects in its
+    # 45° cone — this is the "density score" for that direction.
+    COS_THRESHOLD = math.cos(math.pi / 4)   # cos(45°)
+    best_dir   = None
+    best_score = 0
+
+    for i, (d_i, obj_i) in enumerate(hits):
+        if obj_i is None:
             continue
-        name_lower = obj.name.lower()
-        if any(kw in name_lower for kw in EXCLUDE_KEYWORDS):
-            continue
-        dim = obj.dimensions
-        if any(d > 30.0 for d in (dim.x, dim.y, dim.z)):
-            continue
-        volume = dim.x * dim.y * dim.z
-        if volume < 0.001:
-            continue
-        clamped = min(volume, 50.0)
-        center = obj.matrix_world.translation.copy()
-        result.append({"name": obj.name, "center": center, "clamped_volume": clamped})
-    return result
+        nearby_objs = set()
+        for d_j, obj_j in hits:
+            if obj_j is None:
+                continue
+            if d_i.dot(d_j) >= COS_THRESHOLD:
+                nearby_objs.add(obj_j)
+        if len(nearby_objs) > best_score:
+            best_score = len(nearby_objs)
+            best_dir   = d_i
+
+    if best_dir is None or best_score < 2:
+        return None
+
+    return cam_pos + best_dir * (look_range * 0.6)
 
 
 # ---------------------------------------------------------------------------
@@ -1302,6 +1359,8 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
     total_frames  = max(1, int(config["duration_seconds"] * fps))
     glance_range  = min(config["look_range"], 5.0)
     glance_duration = fps * 3
+    # Re-evaluate density gaze every ~2 seconds (when no active gaze target)
+    density_update_interval = max(1, int(fps * 2))
 
     for obj in list(bpy.data.objects):
         if obj.name == "WalkthroughCamera":
@@ -1359,31 +1418,24 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
             if gaze_remaining == 0:
                 gaze_target = None
 
-        if gaze_target is None:
-            best_candidate = None
-            best_dist      = float("inf")
-            for obj_info in interesting_objects:
-                if obj_info["name"] in glance_cooldown:
-                    continue
-                dist = (obj_info["center"] - cam_pos).length
-                if 0.5 < dist < glance_range and dist < best_dist:
-                    if _has_line_of_sight(cam_pos, obj_info["center"],
-                                          depsgraph_or_bvh):
-                        best_candidate = obj_info
-                        best_dist      = dist
-            if best_candidate:
-                gaze_target    = best_candidate["center"]
+        # Density-based gaze: every density_update_interval frames, cast 360°
+        # Fibonacci sphere rays and pick the direction with the most distinct
+        # objects in a 45° cone.  Only fires when no active gaze target.
+        if gaze_target is None and frame_idx % density_update_interval == 0:
+            density_target = _find_density_look_target(
+                cam_pos, depsgraph_or_bvh, glance_range)
+            if density_target is not None:
+                gaze_target    = density_target
                 gaze_remaining = glance_duration
-                glance_cooldown[best_candidate["name"]] = glance_duration * 4
 
         if gaze_target is not None:
             look_target = gaze_target
         else:
-            # Lift the forward look-target to eye height so the camera looks
-            # horizontally ahead rather than down at the floor path point.
+            # Look toward the path ahead — no forced eye-height offset so the
+            # camera can naturally tilt up/down with terrain.
             floor_ahead = _travel_direction_target(cam_pos, path_points, t,
                                                    ahead=0.15)
-            look_target = floor_ahead + Vector((0.0, 0.0, cam_h))
+            look_target = floor_ahead
 
         if frame_idx == 0 and initial_rotation_quat is not None:
             # Frame 1 must exactly match the original scene camera view.
