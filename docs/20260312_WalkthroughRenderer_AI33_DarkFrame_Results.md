@@ -1,8 +1,8 @@
-# AI33_001 Walkthrough Dark Frame Fix — v1 to v16
+# AI33_001 Walkthrough Dark Frame Fix — v1 to v17
 
 **Date**: 2026-03-12
 **Scene**: `AI33_001_280.blend` (cm-scale scene, unit_scale=0.01, 1 BU = 1 cm)
-**Commits**: v14 `c7497e0`, v15 `05055e1`
+**Commits**: v14 `c7497e0`, v15 `05055e1`, v17 `5cd8916`
 
 ## Problem
 
@@ -24,7 +24,8 @@ Cascade of failures:
 
 | Version | Resolution | Mode | Frames | Dark Frames | Render Time | Key Change | Fixed? |
 |---------|-----------|------|--------|-------------|-------------|------------|--------|
-| **v16** | **640×480** | **local** | **720** | **0** | **616s** | **Fine adjustment triggered (0 nudges needed)** | **Yes** |
+| **v17** | **640×480** | **local** | **720** | **0** | **~559s** | **360° density look-at + remove forced eye-height** | **Yes** |
+| v16 | 640×480 | local | 720 | 0 | 616s | Fine adjustment triggered (0 nudges needed) | Yes |
 | v15 | 640×480 | global | 720 | 0 | 566s | Fine path adjustment added (not triggered) | Yes |
 | **v14** | **640×480** | **local** | **240** | **0** | **~570s** | **Floor anchor override** | **Yes** |
 | v13 | 640×480 | local | 240 | 23 | ~560s | Parity fill wall interiors | No |
@@ -42,6 +43,19 @@ Cascade of failures:
 | v1 | 1280×720 | local | 240 | 23 | ~700s | Baseline | No |
 
 ## Version History (newest first)
+
+### v17 — 360° Density Look-At + Natural Tilt
+- **Resolution**: 640×480 | **Mode**: local (`local_area_ratio=0.3`) | **Frames**: 720
+- **Timing**: total ~559s (render ~549s)
+- **Commits**: `5cd8916`, `92e8019`
+- **Changes**:
+  1. **Remove forced eye-height offset**: Forward look was `floor_ahead + Vector((0,0,cam_h))` — always horizontal. Now `floor_ahead` only — camera tilts naturally with terrain/stairs.
+  2. **360° density gaze**: Replace keyword/volume-filtered `interesting_objects` scan with `_find_density_look_target()`. Every ~2s, casts 64 Fibonacci-sphere rays from camera position, scores each direction by number of distinct objects within a 45° cone, gazes toward highest-density direction. No object metadata required.
+- **Walkable voxels**: 145 (solid: 874) — same floor-level grid as v16
+- **Dark frames**: **0**
+- **GIF**: ![v17](../results/ai33_001_walkthrough_v17/AI33_001_280_walkthrough.gif)
+
+---
 
 ### v16 — Fine Adjustment Triggered
 - **Resolution**: 640×480 | **Mode**: local (`local_area_ratio=0.3`) | **Frames**: 720
