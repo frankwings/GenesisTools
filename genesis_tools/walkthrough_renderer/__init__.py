@@ -52,7 +52,7 @@ def render_scene_walkthrough(
     fps: int = 12,
     duration_seconds: float = None,
     max_duration_seconds: float = 60.0,
-    walk_speed_mps: float = 1.2,
+    walk_speed_mps: float = 2.5,
     num_waypoints: int = 20,
     look_range: float = 15.0,
     rotation_smooth_seconds: float = 2.0,

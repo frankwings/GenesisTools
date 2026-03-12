@@ -1282,16 +1282,20 @@ def _find_density_look_target(cam_pos, depsgraph_or_bvh, look_range, n_samples=6
         _SPHERE_DIRS = _fibonacci_sphere_directions(n_samples)
 
     # Cast one ray per direction, record hit object name (or None).
+    # Always use scene.ray_cast (depsgraph) — BVHTree only has triangle indices,
+    # which can't distinguish objects (a flat wall gives 2 triangles = false score 2).
+    # If depsgraph_or_bvh is a BVHTree, fall back to scene depsgraph via context.
+    if isinstance(depsgraph_or_bvh, BVHTree):
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+    else:
+        depsgraph = depsgraph_or_bvh
+
     hits = []   # list of (direction, object_name_or_None)
     for d in _SPHERE_DIRS:
-        if isinstance(depsgraph_or_bvh, BVHTree):
-            loc, _, idx, _ = depsgraph_or_bvh.ray_cast(cam_pos, d, look_range)
-            obj_id = str(idx) if loc is not None else None
-        else:
-            result, _loc, _nrm, _idx, obj, _mat = bpy.context.scene.ray_cast(
-                depsgraph_or_bvh, cam_pos, d, distance=look_range,
-            )
-            obj_id = obj.name if result else None
+        result, _loc, _nrm, _idx, obj, _mat = bpy.context.scene.ray_cast(
+            depsgraph, cam_pos, d, distance=look_range,
+        )
+        obj_id = obj.name if result else None
         hits.append((d, obj_id))
 
     # For each direction that hits something, count distinct objects in its
@@ -1357,7 +1361,8 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
     cam_h         = config["camera_height"] / unit_scale   # metres → BU
     fps           = config["fps"]
     total_frames  = max(1, int(config["duration_seconds"] * fps))
-    glance_range  = min(config["look_range"], 5.0)
+    # look_range is in metres; convert to BU for ray casts
+    glance_range  = config["look_range"] / unit_scale
     glance_duration = fps * 3
     # Re-evaluate density gaze every ~2 seconds (when no active gaze target)
     density_update_interval = max(1, int(fps * 2))
@@ -1431,11 +1436,14 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
         if gaze_target is not None:
             look_target = gaze_target
         else:
-            # Look toward the path ahead — no forced eye-height offset so the
-            # camera can naturally tilt up/down with terrain.
+            # Look in the path-travel direction from eye height.
+            # floor_ahead is the path point ~0.15 ahead in t-space (floor level).
+            # path_pt is the current floor point under cam_pos.
+            # Direction = floor_ahead - path_pt preserves terrain slope (tilt
+            # up on stairs, horizontal on flat ground) without forcing eye-height.
             floor_ahead = _travel_direction_target(cam_pos, path_points, t,
                                                    ahead=0.15)
-            look_target = floor_ahead
+            look_target = cam_pos + (floor_ahead - path_pt)
 
         if frame_idx == 0 and initial_rotation_quat is not None:
             # Frame 1 must exactly match the original scene camera view.
