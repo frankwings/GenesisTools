@@ -61,6 +61,8 @@ def render_scene_walkthrough(
     seed: int = 42,
     local_area_ratio: float = None,
     local_height: float = 8.0,
+    render_width: int = 1280,
+    render_height: int = 720,
     blender_command: str = "blender",
 ) -> dict:
     """Render a patrol-style walkthrough GIF inside a Blender scene.
@@ -104,6 +106,8 @@ def render_scene_walkthrough(
         render_engine:       Blender render engine — ``"CYCLES"`` (GPU, default),
                              ``"EEVEE"``, or ``"WORKBENCH"``.
         seed:                RNG seed for reproducible path sampling (default 42).
+        render_width:        Rendered frame width in pixels (default 1280).
+        render_height:       Rendered frame height in pixels (default 720).
         blender_command:     Path to the Blender executable (default ``"blender"``).
 
     Returns:
@@ -143,6 +147,8 @@ def render_scene_walkthrough(
         "seed": seed,
         "local_area_ratio": local_area_ratio,  # None = global mode; float = ratio × min(span_x,span_y)
         "local_height": local_height,
+        "render_width": render_width,
+        "render_height": render_height,
     }
 
     # Windows fix: NamedTemporaryFile stays open until explicitly closed;

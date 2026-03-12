@@ -188,16 +188,25 @@ def _filter_nearby_objects(center, radius_xy_bu, height_above_bu, height_below_b
     return nearby
 
 
-def _build_bvh_from_objects(objects, depsgraph):
+def _build_bvh_from_objects(objects, depsgraph, local_bounds=None):
     """Build a combined BVHTree from the evaluated meshes of given objects.
 
     Each object is evaluated via depsgraph (applies modifiers/geometry nodes),
     transformed to world space, and merged into a single BVHTree.
+
+    If ``local_bounds`` is provided (min_x, min_y, max_x, max_y, min_z, max_z),
+    also iterates ``depsgraph.object_instances`` to include particle-system
+    instances and geometry-nodes instances that are invisible to
+    ``bpy.context.scene.objects`` but visible to the CYCLES/EEVEE renderer.
+    Without this, particle-scattered objects are present in the render but
+    absent from the BVH, so the walkability voxelisation misses them and the
+    camera can walk into solid-looking geometry.
     """
     verts_all = []
     polys_all = []
     vert_offset = 0
 
+    top_level_names = set()
     for obj in objects:
         try:
             eval_obj = obj.evaluated_get(depsgraph)
@@ -212,8 +221,43 @@ def _build_bvh_from_objects(objects, depsgraph):
                 polys_all.append(tuple(vert_offset + i for i in poly.vertices))
             vert_offset += len(mesh.vertices)
             eval_obj.to_mesh_clear()
+            top_level_names.add(obj.name)
         except Exception as exc:
             print(f"[Walkthrough] Skipping {obj.name}: {exc}")
+
+    # Include particle / geometry-nodes instances that are not in scene.objects.
+    # depsgraph.object_instances yields every renderable instance; is_instance=True
+    # means it was spawned by a particle system or geometry-nodes scatter, so it
+    # has its own matrix_world but is not a top-level scene object.
+    if local_bounds is not None:
+        min_x, min_y, max_x, max_y, min_z, max_z = local_bounds
+        n_inst = 0
+        for inst in depsgraph.object_instances:
+            if not inst.is_instance:
+                continue
+            obj = inst.object
+            if obj.type != "MESH":
+                continue
+            pos = inst.matrix_world.translation
+            if (pos.x < min_x or pos.x > max_x or
+                    pos.y < min_y or pos.y > max_y or
+                    pos.z < min_z or pos.z > max_z):
+                continue
+            try:
+                mesh = obj.data
+                if mesh is None or len(mesh.polygons) == 0:
+                    continue
+                imat = inst.matrix_world
+                for v in mesh.vertices:
+                    verts_all.append(imat @ v.co)
+                for poly in mesh.polygons:
+                    polys_all.append(tuple(vert_offset + i for i in poly.vertices))
+                vert_offset += len(mesh.vertices)
+                n_inst += 1
+            except Exception as exc:
+                print(f"[Walkthrough] Skipping instance {obj.name}: {exc}")
+        if n_inst:
+            print(f"[Walkthrough] Added {n_inst} particle/GN instances to BVH")
 
     if not verts_all:
         raise RuntimeError("No mesh data available for local BVHTree — no nearby objects?")
@@ -237,7 +281,12 @@ def _cast_all_hits_bvh(bvh, origin, direction, max_dist):
         origin = loc + direction * step_past
 
 
-def _build_local_voxel_grid(config, center, bvh):
+def _collect_hits_bvh(bvh, origin, direction, max_dist):
+    """Return list of hit locations along a ray (reifies _cast_all_hits_bvh)."""
+    return list(_cast_all_hits_bvh(bvh, origin, direction, max_dist))
+
+
+def _build_local_voxel_grid(config, center, bvh, floor_z_override=None):
     """Tri-axial voxelisation of a fixed local region using a local BVHTree.
 
     Unlike the global mode, the grid is anchored at `center` with a fixed
@@ -247,7 +296,11 @@ def _build_local_voxel_grid(config, center, bvh):
     All config distances are in real metres; they are converted to Blender
     units via _get_unit_scale() before use in ray_cast or coordinate maths.
 
-    The floor level is auto-detected by casting a ray down from `center`.
+    The floor level is auto-detected by casting a ray down from `center`,
+    unless ``floor_z_override`` is provided (in Blender units), in which case
+    that value is used directly.  The override is needed when the camera is
+    elevated above a mezzanine: the BVH detects the mezzanine surface first
+    and would anchor the voxel grid there instead of at the actual floor.
 
     Returns
     -------
@@ -266,15 +319,24 @@ def _build_local_voxel_grid(config, center, bvh):
     min_y = center.y - radius_xy
     max_y = center.y + radius_xy
 
-    # Auto-detect floor level from camera center.
-    floor_loc, _, _, _ = bvh.ray_cast(
-        Vector((center.x, center.y, center.z + height)),
-        Vector((0.0, 0.0, -1.0)),
-        height * 3.0,
-    )
-    if floor_loc is not None:
-        min_z = floor_loc.z - 0.5
-        max_z = floor_loc.z + height
+    # Determine floor Z for voxel grid anchoring.
+    # Priority: floor_z_override (from global scene.ray_cast, bypasses mezzanine
+    # interference) > BVH floor detection (fast but picks closest surface which
+    # may be a mezzanine rather than the ground floor).
+    if floor_z_override is not None:
+        actual_floor_z = floor_z_override
+        print(f"[Walkthrough] Voxel grid floor anchored to scene floor override: z={actual_floor_z:.1f} BU")
+    else:
+        floor_loc, _, _, _ = bvh.ray_cast(
+            Vector((center.x, center.y, center.z + height)),
+            Vector((0.0, 0.0, -1.0)),
+            height * 3.0,
+        )
+        actual_floor_z = floor_loc.z if floor_loc is not None else None
+
+    if actual_floor_z is not None:
+        min_z = actual_floor_z - 0.5
+        max_z = actual_floor_z + height
     else:
         min_z = center.z - 1.0
         max_z = center.z + height
@@ -307,29 +369,94 @@ def _build_local_voxel_grid(config, center, bvh):
     ray_span_x = span_x + 2.0
     ray_span_y = span_y + 2.0
 
+    # Sub-voxel ray sampling density.
+    # n=1 → 1 ray/voxel (original); n=3 → 9 rays/voxel face.
+    # Higher n catches thin walls and particle geometry smaller than one voxel
+    # without changing voxel resolution (and therefore path-planning cost).
+    n = config.get("voxel_ray_samples", 3)
+
+    def mark_parity(hits, axis):
+        """Parity (odd-even) fill: mark voxels between consecutive hit pairs.
+
+        For each pair of consecutive hits (entry, exit) on a horizontal ray,
+        fill every voxel between them as solid.  This correctly marks the
+        interior of walls: the X/Y ray enters the wall at the left/front face
+        and exits at the right/back face; both surfaces are hit, and voxels
+        between them are the wall body.
+
+        Without this fill, only the surface voxels (the face hit points) are
+        solid.  Voxels deep inside a thick wall are empty in the solid set,
+        so the walkable check incorrectly accepts them (floor below, clear
+        space above within cam_h), resulting in the camera walking inside walls.
+
+        axis: 0 = X, 1 = Y, 2 = Z
+        """
+        for i in range(0, len(hits) - 1, 2):
+            p0 = hits[i]
+            p1 = hits[i + 1]
+            # Mark every voxel along the ray axis between the two hit points.
+            if axis == 0:
+                ix0 = max(0, min(nx - 1, int((p0.x - min_x) / res)))
+                ix1 = max(0, min(nx - 1, int((p1.x - min_x) / res)))
+                iy  = max(0, min(ny - 1, int((p0.y - min_y) / res)))
+                iz  = max(0, min(nz - 1, int((p0.z - min_z) / res)))
+                for ixx in range(min(ix0, ix1), max(ix0, ix1) + 1):
+                    solid.add((ixx, iy, iz))
+            elif axis == 1:
+                iy0 = max(0, min(ny - 1, int((p0.y - min_y) / res)))
+                iy1 = max(0, min(ny - 1, int((p1.y - min_y) / res)))
+                ix  = max(0, min(nx - 1, int((p0.x - min_x) / res)))
+                iz  = max(0, min(nz - 1, int((p0.z - min_z) / res)))
+                for iyy in range(min(iy0, iy1), max(iy0, iy1) + 1):
+                    solid.add((ix, iyy, iz))
+            else:
+                iz0 = max(0, min(nz - 1, int((p0.z - min_z) / res)))
+                iz1 = max(0, min(nz - 1, int((p1.z - min_z) / res)))
+                ix  = max(0, min(nx - 1, int((p0.x - min_x) / res)))
+                iy  = max(0, min(ny - 1, int((p0.y - min_y) / res)))
+                for izz in range(min(iz0, iz1), max(iz0, iz1) + 1):
+                    solid.add((ix, iy, izz))
+
+    # Z-axis rays (one per XY sub-sample pair)
     for ix in range(nx):
-        x = min_x + (ix + 0.5) * res
         for iy in range(ny):
-            y = min_y + (iy + 0.5) * res
-            for loc_v in _cast_all_hits_bvh(bvh, (x, y, max_z + 1.0), (0, 0, -1), ray_span_z):
-                mark(loc_v)
+            for sx in range(n):
+                x = min_x + (ix + (sx + 0.5) / n) * res
+                for sy in range(n):
+                    y = min_y + (iy + (sy + 0.5) / n) * res
+                    for loc_v in _cast_all_hits_bvh(bvh, (x, y, max_z + 1.0),
+                                                    (0, 0, -1), ray_span_z):
+                        mark(loc_v)
 
+    # X-axis rays — parity fill between hit pairs marks wall interiors solid.
     for iy in range(ny):
-        y = min_y + (iy + 0.5) * res
         for iz in range(nz):
-            z = min_z + (iz + 0.5) * res
-            for loc_v in _cast_all_hits_bvh(bvh, (min_x - 1.0, y, z), (1, 0, 0), ray_span_x):
-                mark(loc_v)
+            for sy in range(n):
+                y = min_y + (iy + (sy + 0.5) / n) * res
+                for sz in range(n):
+                    z = min_z + (iz + (sz + 0.5) / n) * res
+                    hits = _collect_hits_bvh(bvh, (min_x - 1.0, y, z),
+                                             (1, 0, 0), ray_span_x)
+                    for loc_v in hits:
+                        mark(loc_v)
+                    mark_parity(hits, axis=0)
 
+    # Y-axis rays — parity fill between hit pairs marks wall interiors solid.
     for ix in range(nx):
-        x = min_x + (ix + 0.5) * res
         for iz in range(nz):
-            z = min_z + (iz + 0.5) * res
-            for loc_v in _cast_all_hits_bvh(bvh, (x, min_y - 1.0, z), (0, 1, 0), ray_span_y):
-                mark(loc_v)
+            for sx in range(n):
+                x = min_x + (ix + (sx + 0.5) / n) * res
+                for sz in range(n):
+                    z = min_z + (iz + (sz + 0.5) / n) * res
+                    hits = _collect_hits_bvh(bvh, (x, min_y - 1.0, z),
+                                             (0, 1, 0), ray_span_y)
+                    for loc_v in hits:
+                        mark(loc_v)
+                    mark_parity(hits, axis=1)
 
     print(f"[Walkthrough] Local voxel grid {nx}×{ny}×{nz} "
-          f"({nx * ny * nz} total), {len(solid)} solid voxels")
+          f"({nx * ny * nz} total), {len(solid)} solid voxels  "
+          f"ray_samples={n}×{n}={n*n}/face")
     return solid, nx, ny, nz, res, local_bounds
 
 
@@ -359,16 +486,63 @@ def _flood_fill_walkable(solid, config, local_bounds, nx, ny, nz, center, bvh):
     cam_h_voxels = max(1, int(math.ceil(cam_h / res)))
 
     # --- Step 1: walkable voxels ---
+    # Primary check: solid floor below + cam_h_voxels of empty space above.
     floor_surfaces = {(ix, iy, iz) for (ix, iy, iz) in solid
                       if (ix, iy, iz + 1) not in solid}
-    walkable = set()
+    candidates = set()
     for (ix, iy, iz_floor) in floor_surfaces:
         iz_feet = iz_floor + 1
         if all((ix, iy, iz_feet + k) not in solid and iz_feet + k < nz
                for k in range(cam_h_voxels)):
+            candidates.add((ix, iy, iz_feet))
+
+    # Secondary check: BVH clearance from floor to camera-eye height.
+    # Thin walls (< grid_resolution wide) are not captured as solid voxels but
+    # are in the BVH.  A voxel that passes the primary check may still have a
+    # wall bisecting it.  Cast a short ray straight up from voxel floor centre
+    # to camera-eye height; if it hits anything, the standing position is
+    # obstructed and the voxel is not walkable.
+    # Threshold for horizontal "inside-wall" check: quarter voxel size.
+    # Upward-only BVH check is blind to vertical walls.  A camera inside a
+    # thin vertical wall fires horizontal rays at eye height; if any hit within
+    # this threshold the voxel is rejected.  Legitimate near-wall cells are at
+    # least obstacle_radius away from solid-voxel walls, so they won't trigger.
+    horiz_threshold = res * 0.25
+    _HORIZ_DIRS = (
+        Vector((1.0, 0.0, 0.0)),
+        Vector((-1.0, 0.0, 0.0)),
+        Vector((0.0, 1.0, 0.0)),
+        Vector((0.0, -1.0, 0.0)),
+    )
+    walkable = set()
+    rejected_bvh = 0
+    rejected_horiz = 0
+    for (ix, iy, iz_feet) in candidates:
+        floor_z  = min_z + iz_feet * res
+        eye_z    = floor_z + cam_h
+        cx = min_x + (ix + 0.5) * res
+        cy = min_y + (iy + 0.5) * res
+        origin   = Vector((cx, cy, floor_z + 0.05))   # slight offset above floor surface
+        hit, _, _, _ = bvh.ray_cast(origin, Vector((0.0, 0.0, 1.0)), cam_h - 0.05)
+        if hit is not None:
+            rejected_bvh += 1
+            continue
+        # Horizontal check at eye height: reject if camera is inside a thin wall.
+        eye_origin = Vector((cx, cy, eye_z))
+        inside_wall = False
+        for d in _HORIZ_DIRS:
+            h, _, _, _ = bvh.ray_cast(eye_origin, d, horiz_threshold)
+            if h is not None:
+                inside_wall = True
+                break
+        if inside_wall:
+            rejected_horiz += 1
+        else:
             walkable.add((ix, iy, iz_feet))
 
-    print(f"[Walkthrough] Walkable voxels: {len(walkable)}")
+    print(f"[Walkthrough] Walkable voxels: {len(walkable)}  "
+          f"(rejected by BVH clearance: {rejected_bvh}, "
+          f"rejected by horizontal wall check: {rejected_horiz})")
     if not walkable:
         return walkable, None
 
@@ -706,17 +880,46 @@ def _build_smooth_path(tour, walkable, config, bounds, bvh=None):
         ]
 
     def _los_clear(p0, p1):
-        """Return True if the segment p0→p1 at camera height is unobstructed."""
-        if bvh is None:
-            return True
+        """Return True if the segment p0→p1 at camera height is unobstructed.
+
+        Checks in order:
+        1. Local BVH (fast; detects both front/back faces for nearby geometry).
+        2. Forward global scene.ray_cast (front-face only).
+        3. Reverse global scene.ray_cast (target→origin) — catches walls whose
+           normals face away from origin (back-face from origin's perspective).
+           This is the common case when the camera is in a corridor and the
+           wall normal points INTO the adjacent room rather than the corridor.
+        """
         origin = _V((p0[0], p0[1], p0[2] + cam_h_bu))
         target = _V((p1[0], p1[1], p1[2] + cam_h_bu))
         d = target - origin
         dist = d.length
         if dist < 1e-6:
             return True
-        hit_loc, _, _, _ = bvh.ray_cast(origin, d / dist, dist * 0.99)
-        return hit_loc is None
+        d_norm = d / dist
+
+        # Local BVH check (fast; BVHTree detects backfaces unlike scene.ray_cast)
+        if bvh is not None:
+            hit_loc, _, _, _ = bvh.ray_cast(origin, d_norm, dist * 0.99)
+            if hit_loc is not None:
+                return False
+
+        # Global scene.ray_cast — front-face only, covers full scene.
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        hit_fwd, *_ = bpy.context.scene.ray_cast(
+            depsgraph, origin, d_norm, distance=dist * 0.99,
+        )
+        if hit_fwd:
+            return False
+
+        # Reverse ray: catches walls whose normals face away from origin.
+        # scene.ray_cast only detects front faces; a wall separating two spaces
+        # whose normal faces the destination side is invisible to the forward ray
+        # but detectable from the reverse direction.
+        hit_rev, *_ = bpy.context.scene.ray_cast(
+            depsgraph, target, -d_norm, distance=dist * 0.99,
+        )
+        return not hit_rev
 
     points = [c2w(c) for c in cell_path]
 
@@ -885,10 +1088,19 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
     rotation_tau  = config.get("rotation_smooth_seconds", 2.0)
     slerp_alpha   = 1.0 - math.exp(-1.0 / max(1, fps * rotation_tau))
 
+    # Debug: identify which path-point indices correspond to each frame.
+    # Print camera positions for frames in the "known dark" clusters so we can
+    # examine exactly where in world space the dark frames occur.
+    _DEBUG_FRAMES = {88, 89, 90, 95, 96, 97}  # just before/during/after first dark cluster
+
     for frame_idx in range(total_frames):
         t        = frame_idx / max(1, total_frames - 1)
         path_pt  = _sample_path(path_points, t)
         cam_pos  = path_pt + Vector((0, 0, cam_h))
+        if frame_idx + 1 in _DEBUG_FRAMES:
+            print(f"[DEBUG] frame {frame_idx+1:03d}  path_pt=({path_pt.x:.1f},{path_pt.y:.1f},{path_pt.z:.1f})"
+                  f"  cam_pos=({cam_pos.x:.1f},{cam_pos.y:.1f},{cam_pos.z:.1f})"
+                  f"  t={t:.4f}  path_idx≈{t*(len(path_points)-1):.1f}")
 
         for name in list(glance_cooldown):
             glance_cooldown[name] -= 1
@@ -1056,21 +1268,60 @@ def main():
 
             t0 = time.time()
             center = _find_local_center(config)
+
+            # When the original scene camera is elevated (loft, mezzanine, drone
+            # view), the actual walkable floor is far below center.z.
+            # _filter_nearby_objects uses height_below = height_bu * 0.5 relative
+            # to center.z, which may cut off ground-level walls entirely, leaving
+            # an incomplete BVH that misses the very geometry we need to avoid.
+            #
+            # Fix: cast a preliminary downward ray using the global depsgraph to
+            # find the real floor Z, then extend height_below to cover the gap
+            # from center down to the floor plus one extra height_bu of margin.
+            _rc_hit, prelim_floor_hit, *_ = bpy.context.scene.ray_cast(
+                depsgraph,
+                center,
+                Vector((0.0, 0.0, -1.0)),
+                distance=height_bu * 10.0,
+            )
+            if not _rc_hit:
+                prelim_floor_hit = None
+            if prelim_floor_hit is not None:
+                elev = center.z - prelim_floor_hit.z   # camera elevation above floor
+                height_below_bu = max(height_bu * 0.5, elev + height_bu)
+                if elev > height_bu * 0.5:
+                    print(f"[Walkthrough] Camera elevated {elev * unit_scale:.1f}m above floor — "
+                          f"extending height_below to {height_below_bu * unit_scale:.1f}m "
+                          f"to include ground-level geometry in BVH")
+            else:
+                height_below_bu = height_bu * 0.5
+
             nearby = _filter_nearby_objects(
-                center, radius_bu, height_bu, height_bu * 0.5
+                center, radius_bu, height_bu, height_below_bu
             )
             timing["object_filter_s"] = round(time.time() - t0, 1)
             print(f"[Walkthrough] Centre=({center.x:.1f},{center.y:.1f},{center.z:.1f})  "
                   f"nearby={len(nearby)}/{len(bpy.context.scene.objects)} objects")
 
             t0 = time.time()
-            local_bvh = _build_bvh_from_objects(nearby, depsgraph)
+            # Approximate local bounds for particle-instance filtering.
+            approx_inst_bounds = (
+                center.x - radius_bu, center.y - radius_bu,
+                center.x + radius_bu, center.y + radius_bu,
+                center.z - height_below_bu, center.z + height_bu,
+            )
+            local_bvh = _build_bvh_from_objects(nearby, depsgraph,
+                                                 local_bounds=approx_inst_bounds)
             timing["bvh_build_s"] = round(time.time() - t0, 1)
             print(f"[Timing] local BVH build: {timing['bvh_build_s']}s")
 
             t0 = time.time()
+            # Pass the actual floor Z (from global scene.ray_cast) so the
+            # voxel grid anchors to the real floor, not a mezzanine surface
+            # that the BVH might detect first when the camera is elevated.
+            _prelim_floor_z = prelim_floor_hit.z if prelim_floor_hit is not None else None
             solid, nx, ny, nz, _res, local_bounds = _build_local_voxel_grid(
-                config, center, local_bvh
+                config, center, local_bvh, floor_z_override=_prelim_floor_z
             )
             timing["voxel_grid_s"] = round(time.time() - t0, 1)
             print(f"[Timing] local voxel grid: {timing['voxel_grid_s']}s")
@@ -1247,8 +1498,8 @@ def main():
                 scene.view_layers[0].cycles.use_denoising = True
                 _enable_cycles_gpu(scene)
 
-            scene.render.resolution_x = 1280
-            scene.render.resolution_y = 720
+            scene.render.resolution_x = config.get("render_width",  1280)
+            scene.render.resolution_y = config.get("render_height", 720)
             scene.render.filepath     = str(frames_dir / "frame_")
             scene.render.image_settings.file_format = "PNG"
             scene.render.use_persistent_data = True
