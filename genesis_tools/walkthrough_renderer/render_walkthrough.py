@@ -1166,52 +1166,48 @@ def _travel_direction_target(cam_pos, path_points, t, ahead=0.05):
 
 
 # ---------------------------------------------------------------------------
-# Step 5: Density-based look direction via 360° sphere ray sampling
+# Step 5: Three-feature gaze scoring via equirectangular sphere sampling
 # ---------------------------------------------------------------------------
+#
+# Equirectangular grid (n_az × n_el) gives natural adjacency for edge
+# detection.  Three features per block (no color, no object name):
+#   1. Depth CV       — coefficient of variation of hit distances
+#   2. Normal entropy — Shannon entropy of quantised surface normals
+#   3. Edge density   — fraction of adjacent ray pairs with normal discontinuity
+#
+# Block score = weighted sum of features.
+# Final PoI  = block whose score differs most from its 8 neighbours (context
+# contrast), so the camera looks at the locally most distinctive direction.
 
-def _fibonacci_sphere_directions(n=64):
-    """Return n uniformly distributed directions on the unit sphere.
+_EQUIRECT_GRID = None   # cached (direction, az_idx, el_idx) tuples
+_EQUIRECT_SHAPE = None  # (n_az, n_el)
 
-    Uses the Fibonacci lattice (golden-angle spiral) for near-uniform coverage.
-    Excludes directions pointing mostly straight down (dz < -0.85) since
-    the camera rarely needs to look at the floor directly below it.
+
+def _build_equirect_grid(n_az=32, n_el=16):
+    """Build an equirectangular direction grid.
+
+    Returns list of (Vector direction, az_idx, el_idx) and shape (n_az, n_el).
+    Excludes elevations below -60° (floor staring).
     """
     dirs = []
-    golden = (1.0 + math.sqrt(5.0)) / 2.0
-    for i in range(n * 2):   # oversample to allow downward exclusion
-        theta = 2.0 * math.pi * i / golden
-        phi   = math.acos(max(-1.0, min(1.0, 1.0 - 2.0 * (i + 0.5) / (n * 2))))
-        x = math.sin(phi) * math.cos(theta)
-        y = math.sin(phi) * math.sin(theta)
-        z = math.cos(phi)
-        if z > -0.85:   # exclude near-straight-down directions
-            dirs.append(Vector((x, y, z)).normalized())
-        if len(dirs) >= n:
-            break
-    return dirs
-
-
-# Pre-compute once at module level — same directions reused every frame.
-_SPHERE_DIRS = None
+    for ei in range(n_el):
+        # Elevation from +80° to -60° (exclude straight-down)
+        el = math.radians(80.0 - 140.0 * ei / (n_el - 1))
+        for ai in range(n_az):
+            az = 2.0 * math.pi * ai / n_az
+            x = math.cos(el) * math.cos(az)
+            y = math.cos(el) * math.sin(az)
+            z = math.sin(el)
+            dirs.append((Vector((x, y, z)).normalized(), ai, ei))
+    return dirs, (n_az, n_el)
 
 
 def _normal_entropy(normals, n_bins=8):
-    """Shannon entropy of quantized surface normals.
-
-    Each normal component (nx, ny, nz) is quantized to ``n_bins`` levels,
-    giving n_bins³ possible buckets.  The entropy of the resulting histogram
-    measures geometric complexity: a flat wall (all normals identical) yields
-    entropy ≈ 0, while a furniture cluster (normals pointing everywhere)
-    yields high entropy.
-
-    Returns entropy in bits.  Max possible = log2(len(normals)) when every
-    normal falls in a unique bin.
-    """
+    """Shannon entropy of quantized surface normals."""
     if len(normals) < 2:
         return 0.0
     buckets = {}
     for nx, ny, nz in normals:
-        # Components in [-1, 1] → bin index in [0, n_bins-1]
         key = (int((nx + 1.0) * 0.5 * n_bins),
                int((ny + 1.0) * 0.5 * n_bins),
                int((nz + 1.0) * 0.5 * n_bins))
@@ -1224,60 +1220,164 @@ def _normal_entropy(normals, n_bins=8):
     return entropy
 
 
-def _find_normal_entropy_target(cam_pos, depsgraph, look_range,
-                                n_samples=64):
-    """Find the look direction with the highest normal entropy in a 45° cone.
+def _find_gaze_target(cam_pos, depsgraph, look_range,
+                      n_az=32, n_el=16, cone_radius=2,
+                      w_depth=0.3, w_normal=0.4, w_edge=0.3):
+    """Three-feature gaze scoring with context contrast.
 
-    Shoots ``n_samples`` rays from ``cam_pos`` over a Fibonacci sphere.
-    For each ray that hits geometry, records the surface normal.  For each
-    hit direction, collects all normals within a 45° cone and computes
-    Shannon entropy of the quantized normals.  The direction with the
-    highest normal entropy is the most geometrically complex — furniture
-    clusters, architectural features, etc.
+    Casts n_az × n_el rays in an equirectangular grid.  For each block
+    (cone of radius ``cone_radius`` grid cells), computes:
+      - depth_cv:      std(depths) / mean(depths)   — spatial layering
+      - normal_entropy: Shannon entropy of normals  — geometric complexity
+      - edge_density:   normal discontinuities / adjacencies — silhouettes
 
-    Returns (target_point, best_direction, entropy_score) or (None, None, 0).
-    ``entropy_score`` is normalised to [0, 1].
+    The final Point-of-Interest is the block whose weighted score differs
+    most from its 8 neighbours (context contrast = local saliency).
+
+    Returns (target_point, best_direction, score) or (None, None, 0).
+    Score is in [0, 1].
     """
-    global _SPHERE_DIRS
-    if _SPHERE_DIRS is None:
-        _SPHERE_DIRS = _fibonacci_sphere_directions(n_samples)
+    global _EQUIRECT_GRID, _EQUIRECT_SHAPE
+    if _EQUIRECT_GRID is None or _EQUIRECT_SHAPE != (n_az, n_el):
+        _EQUIRECT_GRID, _EQUIRECT_SHAPE = _build_equirect_grid(n_az, n_el)
 
-    # depsgraph is passed directly — no BVHTree fallback needed
+    scene = bpy.context.scene
 
-    hits = []   # list of (direction, normal_tuple_or_None)
-    for d in _SPHERE_DIRS:
-        result, _loc, nrm, _idx, _obj, _mat = bpy.context.scene.ray_cast(
+    # Cast all rays, store per-cell results
+    # grid[ei][ai] = (depth, normal_tuple) or None
+    grid = [[None] * n_az for _ in range(n_el)]
+    any_hit = False
+
+    for d, ai, ei in _EQUIRECT_GRID:
+        result, loc, nrm, _idx, _obj, _mat = scene.ray_cast(
             depsgraph, cam_pos, d, distance=look_range,
         )
         if result:
-            hits.append((d, (nrm.x, nrm.y, nrm.z)))
-        else:
-            hits.append((d, None))
+            depth = (loc - cam_pos).length
+            grid[ei][ai] = (depth, (nrm.x, nrm.y, nrm.z))
+            any_hit = True
 
-    if not any(h[1] is not None for h in hits):
+    if not any_hit:
         return None, None, 0.0
 
-    COS_THRESHOLD = math.cos(math.pi / 4)   # 45° half-angle cone
-    best_dir     = None
-    best_entropy = 0.0
-    max_possible = math.log2(max(1, n_samples))  # for normalisation
+    # Compute per-block scores on equirect grid
+    # Block = cone_radius cells around each cell
+    block_scores = [[0.0] * n_az for _ in range(n_el)]
+    block_features = [[None] * n_az for _ in range(n_el)]
 
-    for d_i, nrm_i in hits:
-        if nrm_i is None:
-            continue
-        cone_normals = [nrm_j for d_j, nrm_j in hits
-                        if nrm_j is not None and d_i.dot(d_j) >= COS_THRESHOLD]
-        if len(cone_normals) < 2:
-            continue
-        ent = _normal_entropy(cone_normals)
-        if ent > best_entropy:
-            best_entropy = ent
-            best_dir     = d_i
+    for ei in range(n_el):
+        for ai in range(n_az):
+            # Gather neighbours within cone_radius
+            depths = []
+            normals = []
+            for dei in range(-cone_radius, cone_radius + 1):
+                nei = ei + dei
+                if nei < 0 or nei >= n_el:
+                    continue
+                for dai in range(-cone_radius, cone_radius + 1):
+                    nai = (ai + dai) % n_az  # wrap azimuth
+                    cell = grid[nei][nai]
+                    if cell is not None:
+                        depths.append(cell[0])
+                        normals.append(cell[1])
 
-    if best_dir is None or best_entropy < 0.3:
+            if len(depths) < 3:
+                block_features[ei][ai] = (0.0, 0.0, 0.0)
+                continue
+
+            # Feature 1: Depth coefficient of variation
+            mean_d = sum(depths) / len(depths)
+            if mean_d > 1e-6:
+                var_d = sum((d - mean_d) ** 2 for d in depths) / len(depths)
+                depth_cv = math.sqrt(var_d) / mean_d
+            else:
+                depth_cv = 0.0
+            depth_cv = min(1.0, depth_cv)  # cap at 1.0
+
+            # Feature 2: Normal entropy
+            n_ent = _normal_entropy(normals)
+            max_ent = math.log2(max(1, len(normals)))
+            norm_ent = n_ent / max_ent if max_ent > 0 else 0.0
+
+            # Feature 3: Edge density — normal discontinuities between
+            # adjacent grid cells (4-connected neighbours)
+            edge_count = 0
+            edge_total = 0
+            NRM_THRESHOLD = 0.7  # cos(45°) — normals differ by >45°
+            for dei in range(-cone_radius, cone_radius + 1):
+                nei = ei + dei
+                if nei < 0 or nei >= n_el:
+                    continue
+                for dai in range(-cone_radius, cone_radius + 1):
+                    nai = (ai + dai) % n_az
+                    cell = grid[nei][nai]
+                    if cell is None:
+                        continue
+                    n0 = cell[1]
+                    # Check right neighbour
+                    r_cell = grid[nei][(nai + 1) % n_az]
+                    if r_cell is not None:
+                        edge_total += 1
+                        dot = n0[0]*r_cell[1][0] + n0[1]*r_cell[1][1] + n0[2]*r_cell[1][2]
+                        if dot < NRM_THRESHOLD:
+                            edge_count += 1
+                    # Check bottom neighbour
+                    if nei + 1 < n_el:
+                        b_cell = grid[nei + 1][nai]
+                        if b_cell is not None:
+                            edge_total += 1
+                            dot = n0[0]*b_cell[1][0] + n0[1]*b_cell[1][1] + n0[2]*b_cell[1][2]
+                            if dot < NRM_THRESHOLD:
+                                edge_count += 1
+
+            edge_density = edge_count / max(1, edge_total)
+
+            block_features[ei][ai] = (depth_cv, norm_ent, edge_density)
+            block_scores[ei][ai] = (w_depth * depth_cv +
+                                    w_normal * norm_ent +
+                                    w_edge * edge_density)
+
+    # Context contrast: score minus mean of 8 neighbours
+    best_contrast = -1.0
+    best_ai, best_ei = 0, 0
+
+    for ei in range(n_el):
+        for ai in range(n_az):
+            if block_features[ei][ai] is None:
+                continue
+            my_score = block_scores[ei][ai]
+            if my_score < 0.05:
+                continue
+            # Mean of 8 neighbours
+            nb_scores = []
+            for dei in (-1, 0, 1):
+                for dai in (-1, 0, 1):
+                    if dei == 0 and dai == 0:
+                        continue
+                    nei = ei + dei
+                    nai = (ai + dai) % n_az
+                    if 0 <= nei < n_el:
+                        nb_scores.append(block_scores[nei][nai])
+            if not nb_scores:
+                continue
+            contrast = my_score - sum(nb_scores) / len(nb_scores)
+            if contrast > best_contrast:
+                best_contrast = contrast
+                best_ai = ai
+                best_ei = ei
+
+    if best_contrast < 0.02:
         return None, None, 0.0
 
-    score = min(1.0, best_entropy / max_possible)
+    # Reconstruct direction from grid indices
+    el = math.radians(80.0 - 140.0 * best_ei / (n_el - 1))
+    az = 2.0 * math.pi * best_ai / n_az
+    best_dir = Vector((math.cos(el) * math.cos(az),
+                        math.cos(el) * math.sin(az),
+                        math.sin(el))).normalized()
+
+    # Normalise score to [0, 1]
+    score = min(1.0, max(0.0, best_contrast * 5.0))
     return cam_pos + best_dir * (look_range * 0.6), best_dir, score
 
 
@@ -1404,12 +1504,12 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
                 gaze_target           = None
                 forced_forward_frames = int(fps * 2)          # C: 2s forced forward
 
-        # Normal-entropy gaze: only when no active gaze, not forced forward,
+        # Three-feature gaze: only when no active gaze, not forced forward,
         # and direction cooldown allows it.
         if (gaze_target is None
                 and forced_forward_frames == 0
                 and frame_idx % density_update_interval == 0):
-            ent_target, ent_dir, ent_score = _find_normal_entropy_target(
+            ent_target, ent_dir, ent_score = _find_gaze_target(
                 cam_pos, bpy.context.evaluated_depsgraph_get(), glance_range)
             # A: skip if new direction is too close to the cooldown direction
             if ent_target is not None:
