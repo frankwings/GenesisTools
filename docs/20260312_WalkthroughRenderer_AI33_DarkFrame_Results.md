@@ -1,8 +1,8 @@
-# AI33_001 Walkthrough Dark Frame Fix — v1 to v19
+# AI33_001 Walkthrough Dark Frame Fix — v1 to v20
 
 **Date**: 2026-03-12
 **Scene**: `AI33_001_280.blend` (cm-scale scene, unit_scale=0.01, 1 BU = 1 cm)
-**Commits**: v14 `c7497e0`, v15 `05055e1`, v17 `5cd8916`, v18 `87f3094`, v19 `8c9739b`
+**Commits**: v14 `c7497e0`, v15 `05055e1`, v17 `5cd8916`, v18 `87f3094`, v19 `8c9739b`, v20 `c0918ce`
 
 ## Problem
 
@@ -24,7 +24,8 @@ Cascade of failures:
 
 | Version | Resolution | Mode | Frames | Dark Frames | Render Time | Key Change | Fixed? |
 |---------|-----------|------|--------|-------------|-------------|------------|--------|
-| **v19** | **640×480** | **local** | **720** | **0** | **~594s** | **Normal entropy gaze + slower rotation** | **Yes** |
+| **v20** | **640×480** | **local** | **720** | **0** | **~598s** | **Remove custom BVH → bidirectional scene.ray_cast** | **Yes** |
+| v19 | 640×480 | local | 720 | 0 | ~594s | Normal entropy gaze + slower rotation | Yes |
 | v18 | 640×480 | local | 720 | 0 | ~626s | Direction cooldown + forced forward after gaze | Yes |
 | v17 | 640×480 | local | 720 | 0 | ~559s | 360° density look-at + remove forced eye-height | Yes |
 | v16 | 640×480 | local | 720 | 0 | 616s | Fine adjustment triggered (0 nudges needed) | Yes |
@@ -45,6 +46,20 @@ Cascade of failures:
 | v1 | 1280×720 | local | 240 | 23 | ~700s | Baseline | No |
 
 ## Version History (newest first)
+
+### v20 — Remove Custom BVH → Bidirectional scene.ray_cast
+- **Resolution**: 640×480 | **Mode**: local (`local_area_ratio=0.3`) | **Frames**: 720
+- **Timing**: total ~598s (render ~589s)
+- **Commits**: `c0918ce`
+- **Changes**:
+  1. **Deleted custom BVHTree entirely** — removed `_build_bvh_from_objects`, `_filter_nearby_objects`, `_cast_all_hits_bvh`, `_collect_hits_bvh` (~150 lines, net -106 lines).
+  2. **All ray casting now uses bidirectional `scene.ray_cast`** (forward + reverse). Blender's internal BVH is built during depsgraph eval at zero cost. Reverse rays catch back-faces that single-direction `scene.ray_cast` misses.
+  3. **Why cheaper**: custom BVH cost ~1.2s to build from extracted mesh data. With ~8,400 rays total, bidirectional `scene.ray_cast` (0.05ms/ray × 2) = 0.84s vs BVH build (1.2s) + BVH rays (0.02ms × 8,400 = 0.17s) = 1.37s.
+  4. **Additional benefit**: `scene.ray_cast` includes particles and GN instances automatically (custom BVH required manual extraction).
+- **Dark frames**: **0**
+- **GIF**: ![v20](../results/ai33_001_walkthrough_v20/AI33_001_280_walkthrough.gif)
+
+---
 
 ### v19 — Normal Entropy Gaze + Slower Rotation
 - **Resolution**: 640×480 | **Mode**: local (`local_area_ratio=0.3`) | **Frames**: 720
