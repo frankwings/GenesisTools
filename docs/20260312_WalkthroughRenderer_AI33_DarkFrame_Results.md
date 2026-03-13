@@ -1,8 +1,8 @@
-# AI33_001 Walkthrough Dark Frame Fix — v1 to v20
+# AI33_001 Walkthrough Dark Frame Fix — v1 to v21
 
 **Date**: 2026-03-12
 **Scene**: `AI33_001_280.blend` (cm-scale scene, unit_scale=0.01, 1 BU = 1 cm)
-**Commits**: v14 `c7497e0`, v15 `05055e1`, v17 `5cd8916`, v18 `87f3094`, v19 `8c9739b`, v20 `c0918ce`
+**Commits**: v14 `c7497e0`, v15 `05055e1`, v17 `5cd8916`, v18 `87f3094`, v19 `8c9739b`, v20 `c0918ce`, v21 `ef06c71`
 
 ## Problem
 
@@ -24,7 +24,8 @@ Cascade of failures:
 
 | Version | Resolution | Mode | Frames | Dark Frames | Render Time | Key Change | Fixed? |
 |---------|-----------|------|--------|-------------|-------------|------------|--------|
-| **v20** | **640×480** | **local** | **720** | **0** | **~598s** | **Remove custom BVH → bidirectional scene.ray_cast** | **Yes** |
+| **v21** | **640×480** | **local** | **720** | **0** | **~593s** | **Three-feature gaze (depth CV + normal entropy + edge density) + context contrast** | **Yes** |
+| v20 | 640×480 | local | 720 | 0 | ~598s | Remove custom BVH → bidirectional scene.ray_cast | Yes |
 | v19 | 640×480 | local | 720 | 0 | ~594s | Normal entropy gaze + slower rotation | Yes |
 | v18 | 640×480 | local | 720 | 0 | ~626s | Direction cooldown + forced forward after gaze | Yes |
 | v17 | 640×480 | local | 720 | 0 | ~559s | 360° density look-at + remove forced eye-height | Yes |
@@ -46,6 +47,28 @@ Cascade of failures:
 | v1 | 1280×720 | local | 240 | 23 | ~700s | Baseline | No |
 
 ## Version History (newest first)
+
+### v21 — Three-Feature Gaze with Context Contrast
+- **Resolution**: 640×480 | **Mode**: local (`local_area_ratio=0.3`) | **Frames**: 720
+- **Timing**: total ~593s (render ~584s)
+- **Commits**: `ef06c71`
+- **Changes**:
+  1. **Equirectangular grid**: replaced Fibonacci sphere (64 rays) with 32×16 equirectangular grid (512 rays). Natural 4-connected adjacency enables edge detection without Delaunay triangulation.
+  2. **Three features** (no color, no object name — both unreliable):
+     - **Depth CV** (w=0.3): `std(depths) / mean(depths)` — captures spatial layering without the floor/horizon false-positive of raw depth variance.
+     - **Normal entropy** (w=0.4): Shannon entropy of quantised normals — geometric complexity.
+     - **Edge density** (w=0.3): fraction of adjacent ray pairs where normals differ by >45° — silhouette/contour detection.
+  3. **Context contrast**: each block's score minus mean of 8 neighbours. Camera looks at the locally most distinctive direction (saliency), not just the globally highest score.
+  4. **512 rays ≈ 25ms** per evaluation (every 2s) — negligible overhead.
+- **Why this over alternatives**:
+  - Color entropy: `diffuse_color` unreliable with texture maps
+  - Object count: fails when scene is one joined mesh
+  - Raw depth variance: inflated by floor/horizon gradients
+  - Semantic weight from obj.name: fragile naming conventions
+- **Dark frames**: **0**
+- **GIF**: ![v21](../results/ai33_001_walkthrough_v21/AI33_001_280_walkthrough.gif)
+
+---
 
 ### v20 — Remove Custom BVH → Bidirectional scene.ray_cast
 - **Resolution**: 640×480 | **Mode**: local (`local_area_ratio=0.3`) | **Frames**: 720
