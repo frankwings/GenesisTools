@@ -170,7 +170,12 @@ def render_scene_walkthrough(
             "--output-dir", str(output_dir),
             "--render-engine", render_engine.upper(),
         ]
-        proc = subprocess.run(cmd, stdout=PIPE, stderr=STDOUT)
+        env = os.environ.copy()
+        # Ensure libSM.so.6 (and friends) are found when running Blender
+        _extra_lib = "/tmp/deb_extract/usr/lib/x86_64-linux-gnu"
+        if os.path.isdir(_extra_lib):
+            env["LD_LIBRARY_PATH"] = _extra_lib + ":" + env.get("LD_LIBRARY_PATH", "")
+        proc = subprocess.run(cmd, stdout=PIPE, stderr=STDOUT, env=env)
         stdout = proc.stdout.decode(errors="replace")
     finally:
         os.unlink(config_path)

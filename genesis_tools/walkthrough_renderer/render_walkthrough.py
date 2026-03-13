@@ -1261,66 +1261,93 @@ def _fibonacci_sphere_directions(n=64):
 _SPHERE_DIRS = None
 
 
-def _find_density_look_target(cam_pos, depsgraph_or_bvh, look_range, n_samples=64):
-    """Find the look direction with the highest density of distinct objects.
+def _normal_entropy(normals, n_bins=8):
+    """Shannon entropy of quantized surface normals.
 
-    Shoots ``n_samples`` rays uniformly distributed over the sphere from
-    ``cam_pos``.  For each direction, records which object (if any) is hit
-    within ``look_range``.  Groups directions into angular clusters (45°
-    half-angle cone) and returns a point along the direction whose cone
-    contains the most distinct objects.
+    Each normal component (nx, ny, nz) is quantized to ``n_bins`` levels,
+    giving n_bins³ possible buckets.  The entropy of the resulting histogram
+    measures geometric complexity: a flat wall (all normals identical) yields
+    entropy ≈ 0, while a furniture cluster (normals pointing everywhere)
+    yields high entropy.
 
-    This replaces the old volume/keyword scoring with a purely spatial
-    density measure — the camera naturally looks toward crowded areas of
-    the scene (furniture clusters, architectural features) without needing
-    any object metadata.
+    Returns entropy in bits.  Max possible = log2(len(normals)) when every
+    normal falls in a unique bin.
+    """
+    if len(normals) < 2:
+        return 0.0
+    buckets = {}
+    for nx, ny, nz in normals:
+        # Components in [-1, 1] → bin index in [0, n_bins-1]
+        key = (int((nx + 1.0) * 0.5 * n_bins),
+               int((ny + 1.0) * 0.5 * n_bins),
+               int((nz + 1.0) * 0.5 * n_bins))
+        buckets[key] = buckets.get(key, 0) + 1
+    total = len(normals)
+    entropy = 0.0
+    for count in buckets.values():
+        p = count / total
+        entropy -= p * math.log2(p)
+    return entropy
 
-    Returns a world-space target point, or None if no objects are found.
+
+def _find_normal_entropy_target(cam_pos, depsgraph_or_bvh, look_range,
+                                n_samples=64):
+    """Find the look direction with the highest normal entropy in a 45° cone.
+
+    Shoots ``n_samples`` rays from ``cam_pos`` over a Fibonacci sphere.
+    For each ray that hits geometry, records the surface normal.  For each
+    hit direction, collects all normals within a 45° cone and computes
+    Shannon entropy of the quantized normals.  The direction with the
+    highest normal entropy is the most geometrically complex — furniture
+    clusters, architectural features, etc.
+
+    Returns (target_point, best_direction, entropy_score) or (None, None, 0).
+    ``entropy_score`` is normalised to [0, 1].
     """
     global _SPHERE_DIRS
     if _SPHERE_DIRS is None:
         _SPHERE_DIRS = _fibonacci_sphere_directions(n_samples)
 
-    # Cast one ray per direction, record hit object name (or None).
-    # Always use scene.ray_cast (depsgraph) — BVHTree only has triangle indices,
-    # which can't distinguish objects (a flat wall gives 2 triangles = false score 2).
-    # If depsgraph_or_bvh is a BVHTree, fall back to scene depsgraph via context.
     if isinstance(depsgraph_or_bvh, BVHTree):
         depsgraph = bpy.context.evaluated_depsgraph_get()
     else:
         depsgraph = depsgraph_or_bvh
 
-    hits = []   # list of (direction, object_name_or_None)
+    hits = []   # list of (direction, normal_tuple_or_None)
     for d in _SPHERE_DIRS:
-        result, _loc, _nrm, _idx, obj, _mat = bpy.context.scene.ray_cast(
+        result, _loc, nrm, _idx, _obj, _mat = bpy.context.scene.ray_cast(
             depsgraph, cam_pos, d, distance=look_range,
         )
-        obj_id = obj.name if result else None
-        hits.append((d, obj_id))
+        if result:
+            hits.append((d, (nrm.x, nrm.y, nrm.z)))
+        else:
+            hits.append((d, None))
 
-    # For each direction that hits something, count distinct objects in its
-    # 45° cone — this is the "density score" for that direction.
-    COS_THRESHOLD = math.cos(math.pi / 4)   # cos(45°)
-    best_dir   = None
-    best_score = 0
+    if not any(h[1] is not None for h in hits):
+        return None, None, 0.0
 
-    for i, (d_i, obj_i) in enumerate(hits):
-        if obj_i is None:
+    COS_THRESHOLD = math.cos(math.pi / 4)   # 45° half-angle cone
+    best_dir     = None
+    best_entropy = 0.0
+    max_possible = math.log2(max(1, n_samples))  # for normalisation
+
+    for d_i, nrm_i in hits:
+        if nrm_i is None:
             continue
-        nearby_objs = set()
-        for d_j, obj_j in hits:
-            if obj_j is None:
-                continue
-            if d_i.dot(d_j) >= COS_THRESHOLD:
-                nearby_objs.add(obj_j)
-        if len(nearby_objs) > best_score:
-            best_score = len(nearby_objs)
-            best_dir   = d_i
+        cone_normals = [nrm_j for d_j, nrm_j in hits
+                        if nrm_j is not None and d_i.dot(d_j) >= COS_THRESHOLD]
+        if len(cone_normals) < 2:
+            continue
+        ent = _normal_entropy(cone_normals)
+        if ent > best_entropy:
+            best_entropy = ent
+            best_dir     = d_i
 
-    if best_dir is None or best_score < 2:
-        return None, None
+    if best_dir is None or best_entropy < 0.3:
+        return None, None, 0.0
 
-    return cam_pos + best_dir * (look_range * 0.6), best_dir
+    score = min(1.0, best_entropy / max_possible)
+    return cam_pos + best_dir * (look_range * 0.6), best_dir, score
 
 
 # ---------------------------------------------------------------------------
@@ -1399,7 +1426,7 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
     gaze_cooldown_frames = 0           # A: frames remaining on direction cooldown
     glance_cooldown      = {}          # kept for backward compat (unused)
 
-    rotation_tau  = config.get("rotation_smooth_seconds", 2.0)
+    rotation_tau  = config.get("rotation_smooth_seconds", 3.5)
     slerp_alpha   = 1.0 - math.exp(-1.0 / max(1, fps * rotation_tau))
 
     # Debug: identify which path-point indices correspond to each frame.
@@ -1439,20 +1466,21 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
                 gaze_target           = None
                 forced_forward_frames = int(fps * 2)          # C: 2s forced forward
 
-        # Density-based gaze: only when no active gaze, not forced forward,
+        # Normal-entropy gaze: only when no active gaze, not forced forward,
         # and direction cooldown allows it.
         if (gaze_target is None
                 and forced_forward_frames == 0
                 and frame_idx % density_update_interval == 0):
-            density_target, density_dir = _find_density_look_target(
+            ent_target, ent_dir, ent_score = _find_normal_entropy_target(
                 cam_pos, depsgraph_or_bvh, glance_range)
             # A: skip if new direction is too close to the cooldown direction
-            if density_target is not None:
+            if ent_target is not None:
                 blocked = (gaze_cooldown_dir is not None
-                           and density_dir.dot(gaze_cooldown_dir) > 0.8)
+                           and ent_dir.dot(gaze_cooldown_dir) > 0.8)
                 if not blocked:
-                    gaze_target    = density_target
-                    gaze_remaining = glance_duration
+                    gaze_target    = ent_target
+                    # Gaze duration scales with entropy: low → 1s, high → 5s
+                    gaze_remaining = int(fps * (1.0 + 4.0 * ent_score))
 
         if gaze_target is not None:
             look_target = gaze_target
