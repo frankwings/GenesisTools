@@ -1,8 +1,8 @@
-# AI33_001 Walkthrough Dark Frame Fix — v1 to v18
+# AI33_001 Walkthrough Dark Frame Fix — v1 to v19
 
 **Date**: 2026-03-12
 **Scene**: `AI33_001_280.blend` (cm-scale scene, unit_scale=0.01, 1 BU = 1 cm)
-**Commits**: v14 `c7497e0`, v15 `05055e1`, v17 `5cd8916`, v18 `87f3094`
+**Commits**: v14 `c7497e0`, v15 `05055e1`, v17 `5cd8916`, v18 `87f3094`, v19 `8c9739b`
 
 ## Problem
 
@@ -24,7 +24,8 @@ Cascade of failures:
 
 | Version | Resolution | Mode | Frames | Dark Frames | Render Time | Key Change | Fixed? |
 |---------|-----------|------|--------|-------------|-------------|------------|--------|
-| **v18** | **640×480** | **local** | **720** | **0** | **~626s** | **Direction cooldown + forced forward after gaze** | **Yes** |
+| **v19** | **640×480** | **local** | **720** | **0** | **~594s** | **Normal entropy gaze + slower rotation** | **Yes** |
+| v18 | 640×480 | local | 720 | 0 | ~626s | Direction cooldown + forced forward after gaze | Yes |
 | v17 | 640×480 | local | 720 | 0 | ~559s | 360° density look-at + remove forced eye-height | Yes |
 | v16 | 640×480 | local | 720 | 0 | 616s | Fine adjustment triggered (0 nudges needed) | Yes |
 | v15 | 640×480 | global | 720 | 0 | 566s | Fine path adjustment added (not triggered) | Yes |
@@ -44,6 +45,25 @@ Cascade of failures:
 | v1 | 1280×720 | local | 240 | 23 | ~700s | Baseline | No |
 
 ## Version History (newest first)
+
+### v19 — Normal Entropy Gaze + Slower Rotation
+- **Resolution**: 640×480 | **Mode**: local (`local_area_ratio=0.3`) | **Frames**: 720
+- **Timing**: total ~594s (render ~584s)
+- **Commits**: `8c9739b`
+- **Changes**:
+  1. **Normal entropy scoring**: replaced object-density gaze with surface-normal Shannon entropy. 64 Fibonacci sphere rays → quantize hit normals to 8³ bins → entropy per 45° cone. Flat wall (uniform normals) → entropy ≈ 0 → skip. Furniture cluster (diverse normals) → high entropy → gaze.
+  2. **Entropy-scaled gaze duration**: low entropy → 1s glance, high entropy → 5s gaze. More complex geometry gets longer attention.
+  3. **Slower rotation**: `rotation_smooth_seconds` 2.0 → 3.5 (tau for SLERP exponential smoothing). Head turns are more natural and less jerky.
+  4. **LD_LIBRARY_PATH fix**: `__init__.py` now injects `/tmp/deb_extract/usr/lib/x86_64-linux-gnu` into subprocess env so Blender finds libSM.so.6 without parent shell setup.
+- **Why normal entropy over alternatives**:
+  - Color entropy: `diffuse_color` unreliable with texture maps (returns white)
+  - Object count: fails when scene is one joined mesh
+  - Depth variance: inflated by floor/horizon gradients (half near, half far ≠ interesting)
+  - Normal entropy: unit-free, robust to all above cases, captures geometric complexity
+- **Dark frames**: **0**
+- **GIF**: ![v19](../results/ai33_001_walkthrough_v19/AI33_001_280_walkthrough.gif)
+
+---
 
 ### v18 — Direction Cooldown + Forced Forward
 - **Resolution**: 640×480 | **Mode**: local (`local_area_ratio=0.3`) | **Frames**: 720
