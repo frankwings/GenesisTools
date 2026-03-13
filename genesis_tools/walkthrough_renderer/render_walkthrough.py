@@ -13,7 +13,7 @@ Algorithm
 ---------
 1. Parse CLI args
 2. Build voxel grid — two modes:
-   a. LOCAL  (local_radius_xy set): build BVHTree only from nearby objects,
+   a. LOCAL  (local_radius_xy set): bidirectional scene.ray_cast to
       voxelise a fixed-size region around the camera, flood-fill reachable cells.
    b. GLOBAL (legacy): tri-axial sweep over the full scene using scene.ray_cast.
 3. Find walkable voxels  (floor surface + camera-height clearance above)
@@ -37,7 +37,6 @@ from pathlib import Path
 
 import bpy
 from mathutils import Vector
-from mathutils.bvhtree import BVHTree
 
 
 # ---------------------------------------------------------------------------
@@ -154,140 +153,74 @@ def _find_local_center(config):
     return Vector((0.0, 0.0, 1.7))
 
 
-def _filter_nearby_objects(center, radius_xy_bu, height_above_bu, height_below_bu):
-    """Return mesh objects whose world AABB overlaps the local region.
 
-    All distance arguments are in Blender units (caller is responsible for
-    converting from real-world distances).
 
-    The local region is a box:
-      X: [cx - radius_xy, cx + radius_xy]
-      Y: [cy - radius_xy, cy + radius_xy]
-      Z: [cz - height_below, cz + height_above]
+def _cast_all_hits_bidir(origin, direction, max_dist):
+    """Yield every surface hit along a ray using bidirectional scene.ray_cast.
+
+    scene.ray_cast is front-face only, so we cast both forward and reverse
+    to detect back-faces (equivalent to BVHTree double-sided detection).
     """
-    radius_xy   = radius_xy_bu
-    height_above = height_above_bu
-    height_below = height_below_bu
-    cx, cy, cz = center.x, center.y, center.z
-    nearby = []
-    for obj in bpy.context.scene.objects:
-        if obj.type != "MESH":
-            continue
-        corners = [obj.matrix_world @ Vector(c) for c in obj.bound_box]
-        ox_min = min(c.x for c in corners)
-        ox_max = max(c.x for c in corners)
-        oy_min = min(c.y for c in corners)
-        oy_max = max(c.y for c in corners)
-        oz_min = min(c.z for c in corners)
-        oz_max = max(c.z for c in corners)
-        if (ox_max < cx - radius_xy or ox_min > cx + radius_xy or
-                oy_max < cy - radius_xy or oy_min > cy + radius_xy or
-                oz_max < cz - height_below or oz_min > cz + height_above):
-            continue
-        nearby.append(obj)
-    return nearby
-
-
-def _build_bvh_from_objects(objects, depsgraph, local_bounds=None):
-    """Build a combined BVHTree from the evaluated meshes of given objects.
-
-    Each object is evaluated via depsgraph (applies modifiers/geometry nodes),
-    transformed to world space, and merged into a single BVHTree.
-
-    If ``local_bounds`` is provided (min_x, min_y, max_x, max_y, min_z, max_z),
-    also iterates ``depsgraph.object_instances`` to include particle-system
-    instances and geometry-nodes instances that are invisible to
-    ``bpy.context.scene.objects`` but visible to the CYCLES/EEVEE renderer.
-    Without this, particle-scattered objects are present in the render but
-    absent from the BVH, so the walkability voxelisation misses them and the
-    camera can walk into solid-looking geometry.
-    """
-    verts_all = []
-    polys_all = []
-    vert_offset = 0
-
-    top_level_names = set()
-    for obj in objects:
-        try:
-            eval_obj = obj.evaluated_get(depsgraph)
-            mesh = eval_obj.to_mesh()
-            if mesh is None or len(mesh.polygons) == 0:
-                eval_obj.to_mesh_clear()
-                continue
-            mat = obj.matrix_world
-            for v in mesh.vertices:
-                verts_all.append(mat @ v.co)
-            for poly in mesh.polygons:
-                polys_all.append(tuple(vert_offset + i for i in poly.vertices))
-            vert_offset += len(mesh.vertices)
-            eval_obj.to_mesh_clear()
-            top_level_names.add(obj.name)
-        except Exception as exc:
-            print(f"[Walkthrough] Skipping {obj.name}: {exc}")
-
-    # Include particle / geometry-nodes instances that are not in scene.objects.
-    # depsgraph.object_instances yields every renderable instance; is_instance=True
-    # means it was spawned by a particle system or geometry-nodes scatter, so it
-    # has its own matrix_world but is not a top-level scene object.
-    if local_bounds is not None:
-        min_x, min_y, max_x, max_y, min_z, max_z = local_bounds
-        n_inst = 0
-        for inst in depsgraph.object_instances:
-            if not inst.is_instance:
-                continue
-            obj = inst.object
-            if obj.type != "MESH":
-                continue
-            pos = inst.matrix_world.translation
-            if (pos.x < min_x or pos.x > max_x or
-                    pos.y < min_y or pos.y > max_y or
-                    pos.z < min_z or pos.z > max_z):
-                continue
-            try:
-                mesh = obj.data
-                if mesh is None or len(mesh.polygons) == 0:
-                    continue
-                imat = inst.matrix_world
-                for v in mesh.vertices:
-                    verts_all.append(imat @ v.co)
-                for poly in mesh.polygons:
-                    polys_all.append(tuple(vert_offset + i for i in poly.vertices))
-                vert_offset += len(mesh.vertices)
-                n_inst += 1
-            except Exception as exc:
-                print(f"[Walkthrough] Skipping instance {obj.name}: {exc}")
-        if n_inst:
-            print(f"[Walkthrough] Added {n_inst} particle/GN instances to BVH")
-
-    if not verts_all:
-        raise RuntimeError("No mesh data available for local BVHTree — no nearby objects?")
-
-    return BVHTree.FromPolygons(verts_all, polys_all, all_triangles=False)
-
-
-def _cast_all_hits_bvh(bvh, origin, direction, max_dist):
-    """Yield every surface hit along a ray using a local BVHTree."""
+    scene = bpy.context.scene
+    depsgraph = bpy.context.evaluated_depsgraph_get()
     origin = Vector(origin)
     direction = Vector(direction).normalized()
+
+    # Forward pass
+    cur_origin = Vector(origin)
     remaining = max_dist
     step_past = 0.05
+    fwd_hits = []
     while remaining > step_past:
-        loc, _normal, _index, _dist = bvh.ray_cast(origin, direction, remaining)
-        if loc is None:
+        hit, loc, _nrm, *_ = scene.ray_cast(depsgraph, cur_origin, direction,
+                                              distance=remaining)
+        if not hit:
             break
-        yield loc
-        traveled = (loc - origin).length
+        fwd_hits.append(loc)
+        traveled = (loc - cur_origin).length
         remaining -= traveled + step_past
-        origin = loc + direction * step_past
+        cur_origin = loc + direction * step_past
+
+    # Reverse pass — catches back-faces missed by forward
+    end_pt = origin + direction * max_dist
+    cur_origin = Vector(end_pt)
+    rev_dir = -direction
+    remaining = max_dist
+    rev_hits = []
+    while remaining > step_past:
+        hit, loc, _nrm, *_ = scene.ray_cast(depsgraph, cur_origin, rev_dir,
+                                              distance=remaining)
+        if not hit:
+            break
+        rev_hits.append(loc)
+        traveled = (loc - cur_origin).length
+        remaining -= traveled + step_past
+        cur_origin = loc + rev_dir * step_past
+
+    # Merge and deduplicate (hits within step_past are considered same)
+    all_hits = list(fwd_hits)
+    for rh in rev_hits:
+        is_dup = False
+        for fh in all_hits:
+            if (rh - fh).length < step_past * 2:
+                is_dup = True
+                break
+        if not is_dup:
+            all_hits.append(rh)
+
+    # Sort by distance from origin along ray direction
+    all_hits.sort(key=lambda h: (h - origin).dot(direction))
+    for h in all_hits:
+        yield h
 
 
-def _collect_hits_bvh(bvh, origin, direction, max_dist):
-    """Return list of hit locations along a ray (reifies _cast_all_hits_bvh)."""
-    return list(_cast_all_hits_bvh(bvh, origin, direction, max_dist))
+def _collect_hits_bidir(origin, direction, max_dist):
+    """Return list of hit locations along a ray (reifies _cast_all_hits_bidir)."""
+    return list(_cast_all_hits_bidir(origin, direction, max_dist))
 
 
-def _build_local_voxel_grid(config, center, bvh, floor_z_override=None):
-    """Tri-axial voxelisation of a fixed local region using a local BVHTree.
+def _build_local_voxel_grid(config, center, floor_z_override=None):
+    """Tri-axial voxelisation of a fixed local region using scene.ray_cast.
 
     Unlike the global mode, the grid is anchored at `center` with a fixed
     physical size (local_radius_xy × local_radius_xy × local_height metres),
@@ -299,8 +232,10 @@ def _build_local_voxel_grid(config, center, bvh, floor_z_override=None):
     The floor level is auto-detected by casting a ray down from `center`,
     unless ``floor_z_override`` is provided (in Blender units), in which case
     that value is used directly.  The override is needed when the camera is
-    elevated above a mezzanine: the BVH detects the mezzanine surface first
-    and would anchor the voxel grid there instead of at the actual floor.
+    elevated above a mezzanine.
+
+    Uses bidirectional scene.ray_cast (forward + reverse) to detect both
+    front and back faces, replacing the old custom BVHTree approach.
 
     Returns
     -------
@@ -327,12 +262,15 @@ def _build_local_voxel_grid(config, center, bvh, floor_z_override=None):
         actual_floor_z = floor_z_override
         print(f"[Walkthrough] Voxel grid floor anchored to scene floor override: z={actual_floor_z:.1f} BU")
     else:
-        floor_loc, _, _, _ = bvh.ray_cast(
+        # Use scene.ray_cast for floor detection (normal-aware).
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        _hit, floor_loc, floor_nrm, *_ = bpy.context.scene.ray_cast(
+            depsgraph,
             Vector((center.x, center.y, center.z + height)),
             Vector((0.0, 0.0, -1.0)),
-            height * 3.0,
+            distance=height * 3.0,
         )
-        actual_floor_z = floor_loc.z if floor_loc is not None else None
+        actual_floor_z = floor_loc.z if _hit else None
 
     if actual_floor_z is not None:
         min_z = actual_floor_z - 0.5
@@ -424,7 +362,7 @@ def _build_local_voxel_grid(config, center, bvh, floor_z_override=None):
                 x = min_x + (ix + (sx + 0.5) / n) * res
                 for sy in range(n):
                     y = min_y + (iy + (sy + 0.5) / n) * res
-                    for loc_v in _cast_all_hits_bvh(bvh, (x, y, max_z + 1.0),
+                    for loc_v in _cast_all_hits_bidir((x, y, max_z + 1.0),
                                                     (0, 0, -1), ray_span_z):
                         mark(loc_v)
 
@@ -435,7 +373,7 @@ def _build_local_voxel_grid(config, center, bvh, floor_z_override=None):
                 y = min_y + (iy + (sy + 0.5) / n) * res
                 for sz in range(n):
                     z = min_z + (iz + (sz + 0.5) / n) * res
-                    hits = _collect_hits_bvh(bvh, (min_x - 1.0, y, z),
+                    hits = _collect_hits_bidir((min_x - 1.0, y, z),
                                              (1, 0, 0), ray_span_x)
                     for loc_v in hits:
                         mark(loc_v)
@@ -448,7 +386,7 @@ def _build_local_voxel_grid(config, center, bvh, floor_z_override=None):
                 x = min_x + (ix + (sx + 0.5) / n) * res
                 for sz in range(n):
                     z = min_z + (iz + (sz + 0.5) / n) * res
-                    hits = _collect_hits_bvh(bvh, (x, min_y - 1.0, z),
+                    hits = _collect_hits_bidir((x, min_y - 1.0, z),
                                              (0, 1, 0), ray_span_y)
                     for loc_v in hits:
                         mark(loc_v)
@@ -460,22 +398,17 @@ def _build_local_voxel_grid(config, center, bvh, floor_z_override=None):
     return solid, nx, ny, nz, res, local_bounds
 
 
-def _flood_fill_walkable(solid, config, local_bounds, nx, ny, nz, center, bvh):
+def _flood_fill_walkable(solid, config, local_bounds, nx, ny, nz, center):
     """Find walkable voxels and flood-fill reachable cells from camera seed.
 
     Step 1 — Find walkable voxels: same as global mode (solid voxel with
     empty space above for camera_height clearance).
 
-    Step 2 — Find seed via downward ray cast from camera.
-    The camera voxel may be solid simply because the voxel is large enough to
-    straddle both the camera position and the floor surface beneath it — the
-    camera is not literally inside geometry. Casting a ray straight down from
-    the camera finds the exact floor hit point, and the walkable voxel
-    immediately above that hit is the correct standing position directly under
-    the camera. Falls back to nearest walkable by 3D voxel distance if the ray
-    misses (camera above an open void, etc.).
+    Step 2 — Find seed via downward ray cast from camera (scene.ray_cast).
 
     Step 3 — Flood fill BFS outward from seed.
+
+    Uses bidirectional scene.ray_cast for clearance checks (replaces BVHTree).
 
     Returns (reachable, seed) where seed is the voxel index to start the path.
     """
@@ -496,17 +429,11 @@ def _flood_fill_walkable(solid, config, local_bounds, nx, ny, nz, center, bvh):
                for k in range(cam_h_voxels)):
             candidates.add((ix, iy, iz_feet))
 
-    # Secondary check: BVH clearance from floor to camera-eye height.
-    # Thin walls (< grid_resolution wide) are not captured as solid voxels but
-    # are in the BVH.  A voxel that passes the primary check may still have a
-    # wall bisecting it.  Cast a short ray straight up from voxel floor centre
-    # to camera-eye height; if it hits anything, the standing position is
-    # obstructed and the voxel is not walkable.
-    # Threshold for horizontal "inside-wall" check: quarter voxel size.
-    # Upward-only BVH check is blind to vertical walls.  A camera inside a
-    # thin vertical wall fires horizontal rays at eye height; if any hit within
-    # this threshold the voxel is rejected.  Legitimate near-wall cells are at
-    # least obstacle_radius away from solid-voxel walls, so they won't trigger.
+    # Secondary check: scene.ray_cast clearance from floor to camera-eye height.
+    # Thin walls (< grid_resolution wide) are not captured as solid voxels.
+    # Cast a ray straight up from voxel floor to eye height; if hit, obstructed.
+    # Also cast horizontal rays at eye height to detect thin vertical walls.
+    # Uses bidirectional scene.ray_cast (forward + reverse) for both-face detection.
     horiz_threshold = res * 0.25
     _HORIZ_DIRS = (
         Vector((1.0, 0.0, 0.0)),
@@ -514,6 +441,8 @@ def _flood_fill_walkable(solid, config, local_bounds, nx, ny, nz, center, bvh):
         Vector((0.0, 1.0, 0.0)),
         Vector((0.0, -1.0, 0.0)),
     )
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    scene = bpy.context.scene
     walkable = set()
     rejected_bvh = 0
     rejected_horiz = 0
@@ -522,17 +451,35 @@ def _flood_fill_walkable(solid, config, local_bounds, nx, ny, nz, center, bvh):
         eye_z    = floor_z + cam_h
         cx = min_x + (ix + 0.5) * res
         cy = min_y + (iy + 0.5) * res
-        origin   = Vector((cx, cy, floor_z + 0.05))   # slight offset above floor surface
-        hit, _, _, _ = bvh.ray_cast(origin, Vector((0.0, 0.0, 1.0)), cam_h - 0.05)
-        if hit is not None:
+        origin   = Vector((cx, cy, floor_z + 0.05))
+        # Upward ray: check clearance to eye height
+        hit_up, *_ = scene.ray_cast(depsgraph, origin,
+                                     Vector((0.0, 0.0, 1.0)),
+                                     distance=cam_h - 0.05)
+        if hit_up:
             rejected_bvh += 1
             continue
-        # Horizontal check at eye height: reject if camera is inside a thin wall.
+        # Reverse (downward from eye): catches back-faces
         eye_origin = Vector((cx, cy, eye_z))
+        hit_dn, *_ = scene.ray_cast(depsgraph, eye_origin,
+                                     Vector((0.0, 0.0, -1.0)),
+                                     distance=cam_h - 0.05)
+        if hit_dn:
+            rejected_bvh += 1
+            continue
+        # Horizontal check at eye height: reject if inside a thin wall.
         inside_wall = False
         for d in _HORIZ_DIRS:
-            h, _, _, _ = bvh.ray_cast(eye_origin, d, horiz_threshold)
-            if h is not None:
+            h_fwd, *_ = scene.ray_cast(depsgraph, eye_origin, d,
+                                        distance=horiz_threshold)
+            if h_fwd:
+                inside_wall = True
+                break
+            # Reverse horizontal
+            h_rev, *_ = scene.ray_cast(depsgraph,
+                                        eye_origin + d * horiz_threshold,
+                                        -d, distance=horiz_threshold)
+            if h_rev:
                 inside_wall = True
                 break
         if inside_wall:
@@ -550,12 +497,13 @@ def _flood_fill_walkable(solid, config, local_bounds, nx, ny, nz, center, bvh):
     # Cast straight down from camera; the first floor hit gives the precise
     # floor position regardless of voxel size.
     seed = None
-    floor_hit, _, _, _ = bvh.ray_cast(
+    _seed_hit, floor_hit, *_ = scene.ray_cast(
+        depsgraph,
         Vector((center.x, center.y, center.z)),
         Vector((0.0, 0.0, -1.0)),
-        cam_h * 10.0,       # search up to 10× camera height below
+        distance=cam_h * 10.0,
     )
-    if floor_hit is not None:
+    if _seed_hit:
         fx = int((floor_hit.x - min_x) / res)
         fy = int((floor_hit.y - min_y) / res)
         fz = int((floor_hit.z - min_z) / res) + 1   # +1: stand on top of floor voxel
@@ -830,19 +778,16 @@ def _bfs_path(start, goal, walkable):
     return [start, goal]
 
 
-def _build_smooth_path(tour, walkable, config, bounds, bvh=None):
+def _build_smooth_path(tour, walkable, config, bounds):
     """BFS corridor + constrained Laplacian smoothing + 4× upsample.
 
     1. BFS between consecutive waypoints — guaranteed wall-free path.
     2. Laplacian smoothing in XY only; Z is re-resolved from the walkable
        voxel at each XY so the camera follows terrain correctly.
-       If ``bvh`` is supplied, each candidate smooth step is rejected when a
-       ray at camera height from the previous accepted point to the candidate
-       hits geometry — preventing the path from cutting through thin walls.
+       Each candidate smooth step is rejected when a bidirectional
+       scene.ray_cast at camera height is blocked.
     3. 4× linear upsampling for dense per-frame path sampling.
-       If ``bvh`` is supplied, each interpolated segment is checked; blocked
-       segments fall back to the straight voxel-centre connection so the
-       camera never teleports through walls.
+       Blocked segments fall back to the straight voxel-centre connection.
 
     `bounds` must be (min_x, min_y, max_x, max_y, min_z, max_z).
     """
@@ -882,13 +827,8 @@ def _build_smooth_path(tour, walkable, config, bounds, bvh=None):
     def _los_clear(p0, p1):
         """Return True if the segment p0→p1 at camera height is unobstructed.
 
-        Checks in order:
-        1. Local BVH (fast; detects both front/back faces for nearby geometry).
-        2. Forward global scene.ray_cast (front-face only).
-        3. Reverse global scene.ray_cast (target→origin) — catches walls whose
-           normals face away from origin (back-face from origin's perspective).
-           This is the common case when the camera is in a corridor and the
-           wall normal points INTO the adjacent room rather than the corridor.
+        Uses bidirectional scene.ray_cast (forward + reverse) to detect
+        both front and back faces without needing a custom BVHTree.
         """
         origin = _V((p0[0], p0[1], p0[2] + cam_h_bu))
         target = _V((p1[0], p1[1], p1[2] + cam_h_bu))
@@ -898,24 +838,14 @@ def _build_smooth_path(tour, walkable, config, bounds, bvh=None):
             return True
         d_norm = d / dist
 
-        # Local BVH check (fast; BVHTree detects backfaces unlike scene.ray_cast)
-        if bvh is not None:
-            hit_loc, _, _, _ = bvh.ray_cast(origin, d_norm, dist * 0.99)
-            if hit_loc is not None:
-                return False
-
-        # Global scene.ray_cast — front-face only, covers full scene.
         depsgraph = bpy.context.evaluated_depsgraph_get()
+        # Forward ray
         hit_fwd, *_ = bpy.context.scene.ray_cast(
             depsgraph, origin, d_norm, distance=dist * 0.99,
         )
         if hit_fwd:
             return False
-
-        # Reverse ray: catches walls whose normals face away from origin.
-        # scene.ray_cast only detects front faces; a wall separating two spaces
-        # whose normal faces the destination side is invisible to the forward ray
-        # but detectable from the reverse direction.
+        # Reverse ray — catches back-faces
         hit_rev, *_ = bpy.context.scene.ray_cast(
             depsgraph, target, -d_norm, distance=dist * 0.99,
         )
@@ -970,7 +900,7 @@ def _build_smooth_path(tour, walkable, config, bounds, bvh=None):
 # Fine-level path adjustment (Level 2 of coarse-to-fine voxelisation)
 # ---------------------------------------------------------------------------
 
-def _fine_adjust_path(coarse_path, bvh, config):
+def _fine_adjust_path(coarse_path, config):
     """Refine a coarse path using small, high-resolution local voxel patches.
 
     The coarse grid (Level 1) produces a globally-planned path, but its
@@ -980,26 +910,14 @@ def _fine_adjust_path(coarse_path, bvh, config):
     step is blocked in the fine grid, it finds the nearest fine-walkable cell
     that still makes progress toward the coarse target.
 
-    This is Level 2 of the two-level coarse-to-fine approach:
-      Level 1: coarse grid → global coverage path (unchanged)
-      Level 2: fine local patches → wall avoidance during path execution
-
-    Parameters
-    ----------
-    coarse_path : list[Vector]
-        Floor-level path points from ``_build_smooth_path``.
-    bvh : BVHTree
-        Local BVH built from nearby objects (same one used for coarse grid).
-    config : dict
-        Walkthrough configuration; uses grid_resolution, camera_height,
-        _unit_scale, _effective_grid_resolution.
+    Uses bidirectional scene.ray_cast instead of custom BVHTree.
 
     Returns
     -------
     list[Vector]
         Adjusted path with wall-avoiding positions.
     """
-    if bvh is None or len(coarse_path) < 2:
+    if len(coarse_path) < 2:
         return coarse_path
 
     unit_scale = config.get("_unit_scale", 1.0)
@@ -1044,7 +962,7 @@ def _fine_adjust_path(coarse_path, bvh, config):
             x = p_min_x + (ix + 0.5) * fine_res
             for iy in range(fine_n):
                 y = p_min_y + (iy + 0.5) * fine_res
-                for loc in _cast_all_hits_bvh(bvh, (x, y, p_max_z + 1.0),
+                for loc in _cast_all_hits_bidir((x, y, p_max_z + 1.0),
                                               (0, 0, -1), ray_span_z):
                     fix = min(fine_n - 1, max(0, int((loc.x - p_min_x) / fine_res)))
                     fiy = min(fine_n - 1, max(0, int((loc.y - p_min_y) / fine_res)))
@@ -1057,7 +975,7 @@ def _fine_adjust_path(coarse_path, bvh, config):
             y = p_min_y + (iy + 0.5) * fine_res
             for iz in range(fine_nz):
                 z = p_min_z + (iz + 0.5) * fine_res
-                for loc in _cast_all_hits_bvh(bvh, (p_min_x - 1.0, y, z),
+                for loc in _cast_all_hits_bidir((p_min_x - 1.0, y, z),
                                               (1, 0, 0), ray_span_x):
                     fix = min(fine_n - 1, max(0, int((loc.x - p_min_x) / fine_res)))
                     fiy = min(fine_n - 1, max(0, int((loc.y - p_min_y) / fine_res)))
@@ -1070,7 +988,7 @@ def _fine_adjust_path(coarse_path, bvh, config):
             x = p_min_x + (ix + 0.5) * fine_res
             for iz in range(fine_nz):
                 z = p_min_z + (iz + 0.5) * fine_res
-                for loc in _cast_all_hits_bvh(bvh, (x, p_min_y - 1.0, z),
+                for loc in _cast_all_hits_bidir((x, p_min_y - 1.0, z),
                                               (0, 1, 0), ray_span_y):
                     fix = min(fine_n - 1, max(0, int((loc.x - p_min_x) / fine_res)))
                     fiy = min(fine_n - 1, max(0, int((loc.y - p_min_y) / fine_res)))
@@ -1085,14 +1003,22 @@ def _fine_adjust_path(coarse_path, bvh, config):
             iz_feet = iz_floor + 1
             if all((ix, iy, iz_feet + k) not in solid and iz_feet + k < fine_nz
                    for k in range(cam_h_voxels)):
-                # BVH clearance check: vertical ray from floor to eye
+                # Bidirectional scene.ray_cast clearance: floor to eye
                 cell_x = p_min_x + (ix + 0.5) * fine_res
                 cell_y = p_min_y + (iy + 0.5) * fine_res
                 cell_floor_z = p_min_z + iz_feet * fine_res
-                origin = Vector((cell_x, cell_y, cell_floor_z + 0.05))
-                hit, _, _, _ = bvh.ray_cast(origin, Vector((0, 0, 1)), cam_h_bu - 0.05)
-                if hit is None:
-                    walkable_fine[(ix, iy)] = p_min_z + iz_feet * fine_res
+                _o = Vector((cell_x, cell_y, cell_floor_z + 0.05))
+                _sc = bpy.context.scene
+                _dg = bpy.context.evaluated_depsgraph_get()
+                h_up, *_ = _sc.ray_cast(_dg, _o, Vector((0, 0, 1)),
+                                         distance=cam_h_bu - 0.05)
+                if not h_up:
+                    # Reverse check
+                    _o2 = Vector((cell_x, cell_y, cell_floor_z + cam_h_bu))
+                    h_dn, *_ = _sc.ray_cast(_dg, _o2, Vector((0, 0, -1)),
+                                             distance=cam_h_bu - 0.05)
+                    if not h_dn:
+                        walkable_fine[(ix, iy)] = p_min_z + iz_feet * fine_res
 
         return walkable_fine, (p_min_x, p_min_y, p_min_z)
 
@@ -1114,7 +1040,7 @@ def _fine_adjust_path(coarse_path, bvh, config):
         cur = adjusted[-1]
         target = coarse_path[i]
 
-        # Check if step is clear via BVH ray at camera height
+        # Check if step is clear via bidirectional scene.ray_cast at camera height
         origin = Vector((cur.x, cur.y, cur.z + cam_h_bu))
         target_eye = Vector((target.x, target.y, target.z + cam_h_bu))
         d = target_eye - origin
@@ -1124,8 +1050,11 @@ def _fine_adjust_path(coarse_path, bvh, config):
             continue
         d_norm = d / dist
 
-        hit_loc, _, _, _ = bvh.ray_cast(origin, d_norm, dist * 0.99)
-        if hit_loc is None:
+        _sc = bpy.context.scene
+        _dg = bpy.context.evaluated_depsgraph_get()
+        hit_fwd, *_ = _sc.ray_cast(_dg, origin, d_norm, distance=dist * 0.99)
+        hit_rev, *_ = _sc.ray_cast(_dg, target_eye, -d_norm, distance=dist * 0.99)
+        if not hit_fwd and not hit_rev:
             # Clear path — keep coarse point
             adjusted.append(target)
             continue
@@ -1182,14 +1111,19 @@ def _fine_adjust_path(coarse_path, bvh, config):
             cell_dist = math.sqrt(cell_dx * cell_dx + cell_dy * cell_dy)
             if cell_dist > coarse_res * 2.0:
                 continue
-            # BVH clearance check: can we reach this cell from current pos?
+            # Bidirectional scene.ray_cast: can we reach this cell?
             c_origin = Vector((cur.x, cur.y, cur.z + cam_h_bu))
             c_target = Vector((cell_world.x, cell_world.y, cell_world.z + cam_h_bu))
             c_d = c_target - c_origin
             c_dist = c_d.length
             if c_dist > 1e-6:
-                c_hit, _, _, _ = bvh.ray_cast(c_origin, c_d / c_dist, c_dist * 0.99)
-                if c_hit is not None:
+                c_fwd, *_ = _sc.ray_cast(_dg, c_origin, c_d / c_dist,
+                                          distance=c_dist * 0.99)
+                if c_fwd:
+                    continue
+                c_rev, *_ = _sc.ray_cast(_dg, c_target, -c_d / c_dist,
+                                          distance=c_dist * 0.99)
+                if c_rev:
                     continue
             # Score: progress toward target, penalised by lateral deviation
             lateral = abs(cell_dx * (-dy) + cell_dy * dx)  # perpendicular component
@@ -1290,7 +1224,7 @@ def _normal_entropy(normals, n_bins=8):
     return entropy
 
 
-def _find_normal_entropy_target(cam_pos, depsgraph_or_bvh, look_range,
+def _find_normal_entropy_target(cam_pos, depsgraph, look_range,
                                 n_samples=64):
     """Find the look direction with the highest normal entropy in a 45° cone.
 
@@ -1308,10 +1242,7 @@ def _find_normal_entropy_target(cam_pos, depsgraph_or_bvh, look_range,
     if _SPHERE_DIRS is None:
         _SPHERE_DIRS = _fibonacci_sphere_directions(n_samples)
 
-    if isinstance(depsgraph_or_bvh, BVHTree):
-        depsgraph = bpy.context.evaluated_depsgraph_get()
-    else:
-        depsgraph = depsgraph_or_bvh
+    # depsgraph is passed directly — no BVHTree fallback needed
 
     hits = []   # list of (direction, normal_tuple_or_None)
     for d in _SPHERE_DIRS:
@@ -1351,23 +1282,30 @@ def _find_normal_entropy_target(cam_pos, depsgraph_or_bvh, look_range,
 
 
 # ---------------------------------------------------------------------------
-# Step 5b: Line-of-sight  (accepts BVHTree for local mode, depsgraph for global)
+# Step 5b: Line-of-sight  (bidirectional scene.ray_cast)
 # ---------------------------------------------------------------------------
 
-def _has_line_of_sight(cam_pos, target_center, depsgraph_or_bvh):
-    """Return True if no geometry blocks cam_pos → target_center."""
+def _has_line_of_sight(cam_pos, target_center):
+    """Return True if no geometry blocks cam_pos → target_center.
+
+    Uses bidirectional scene.ray_cast for both-face detection.
+    """
     direction = (target_center - cam_pos).normalized()
     distance = (target_center - cam_pos).length
     if distance < 0.1:
         return True
-    if isinstance(depsgraph_or_bvh, BVHTree):
-        loc, _, _, _ = depsgraph_or_bvh.ray_cast(cam_pos, direction, distance - 0.1)
-        return loc is None
-    else:
-        hit, *_ = bpy.context.scene.ray_cast(
-            depsgraph_or_bvh, cam_pos, direction, distance=distance - 0.1
-        )
-        return not hit
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    # Forward
+    hit_fwd, *_ = bpy.context.scene.ray_cast(
+        depsgraph, cam_pos, direction, distance=distance - 0.1
+    )
+    if hit_fwd:
+        return False
+    # Reverse — catches back-faces
+    hit_rev, *_ = bpy.context.scene.ray_cast(
+        depsgraph, target_center, -direction, distance=distance - 0.1
+    )
+    return not hit_rev
 
 
 # ---------------------------------------------------------------------------
@@ -1383,7 +1321,7 @@ def _compute_look_at_quaternion(from_pos, to_pos):
 
 
 def _setup_and_animate_camera(path_points, interesting_objects, config,
-                               depsgraph_or_bvh, initial_rotation_quat=None):
+                               initial_rotation_quat=None):
     unit_scale = config.get("_unit_scale", 1.0)
     cam_h         = config["camera_height"] / unit_scale   # metres → BU
     fps           = config["fps"]
@@ -1472,7 +1410,7 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
                 and forced_forward_frames == 0
                 and frame_idx % density_update_interval == 0):
             ent_target, ent_dir, ent_score = _find_normal_entropy_target(
-                cam_pos, depsgraph_or_bvh, glance_range)
+                cam_pos, bpy.context.evaluated_depsgraph_get(), glance_range)
             # A: skip if new direction is too close to the cooldown direction
             if ent_target is not None:
                 blocked = (gaze_cooldown_dir is not None
@@ -1625,71 +1563,34 @@ def main():
             t0 = time.time()
             center = _find_local_center(config)
 
-            # When the original scene camera is elevated (loft, mezzanine, drone
-            # view), the actual walkable floor is far below center.z.
-            # _filter_nearby_objects uses height_below = height_bu * 0.5 relative
-            # to center.z, which may cut off ground-level walls entirely, leaving
-            # an incomplete BVH that misses the very geometry we need to avoid.
-            #
-            # Fix: cast a preliminary downward ray using the global depsgraph to
-            # find the real floor Z, then extend height_below to cover the gap
-            # from center down to the floor plus one extra height_bu of margin.
+            # Preliminary downward ray to find real floor Z (for voxel grid anchoring).
             _rc_hit, prelim_floor_hit, *_ = bpy.context.scene.ray_cast(
                 depsgraph,
                 center,
                 Vector((0.0, 0.0, -1.0)),
-                distance=height_bu * 10.0,
+                distance=(config.get("local_height", 8.0) / unit_scale) * 10.0,
             )
             if not _rc_hit:
                 prelim_floor_hit = None
-            if prelim_floor_hit is not None:
-                elev = center.z - prelim_floor_hit.z   # camera elevation above floor
-                height_below_bu = max(height_bu * 0.5, elev + height_bu)
-                if elev > height_bu * 0.5:
-                    print(f"[Walkthrough] Camera elevated {elev * unit_scale:.1f}m above floor — "
-                          f"extending height_below to {height_below_bu * unit_scale:.1f}m "
-                          f"to include ground-level geometry in BVH")
-            else:
-                height_below_bu = height_bu * 0.5
-
-            nearby = _filter_nearby_objects(
-                center, radius_bu, height_bu, height_below_bu
-            )
             timing["object_filter_s"] = round(time.time() - t0, 1)
-            print(f"[Walkthrough] Centre=({center.x:.1f},{center.y:.1f},{center.z:.1f})  "
-                  f"nearby={len(nearby)}/{len(bpy.context.scene.objects)} objects")
+            print(f"[Walkthrough] Centre=({center.x:.1f},{center.y:.1f},{center.z:.1f})")
 
             t0 = time.time()
-            # Approximate local bounds for particle-instance filtering.
-            approx_inst_bounds = (
-                center.x - radius_bu, center.y - radius_bu,
-                center.x + radius_bu, center.y + radius_bu,
-                center.z - height_below_bu, center.z + height_bu,
-            )
-            local_bvh = _build_bvh_from_objects(nearby, depsgraph,
-                                                 local_bounds=approx_inst_bounds)
-            timing["bvh_build_s"] = round(time.time() - t0, 1)
-            print(f"[Timing] local BVH build: {timing['bvh_build_s']}s")
-
-            t0 = time.time()
-            # Pass the actual floor Z (from global scene.ray_cast) so the
-            # voxel grid anchors to the real floor, not a mezzanine surface
-            # that the BVH might detect first when the camera is elevated.
+            # Voxel grid uses bidirectional scene.ray_cast (no custom BVH needed).
             _prelim_floor_z = prelim_floor_hit.z if prelim_floor_hit is not None else None
             solid, nx, ny, nz, _res, local_bounds = _build_local_voxel_grid(
-                config, center, local_bvh, floor_z_override=_prelim_floor_z
+                config, center, floor_z_override=_prelim_floor_z
             )
             timing["voxel_grid_s"] = round(time.time() - t0, 1)
             print(f"[Timing] local voxel grid: {timing['voxel_grid_s']}s")
 
             t0 = time.time()
             walkable, camera_seed, actual_floor_z = _flood_fill_walkable(
-                solid, config, local_bounds, nx, ny, nz, center, local_bvh
+                solid, config, local_bounds, nx, ny, nz, center
             )
             timing["walkable_s"] = round(time.time() - t0, 1)
 
             bounds_for_path = local_bounds
-            bvh_for_los     = local_bvh
 
         # ================================================================
         # GLOBAL MODE  (legacy: full scene.ray_cast)
@@ -1705,7 +1606,6 @@ def main():
             timing["walkable_s"] = round(time.time() - t0, 1)
 
             bounds_for_path = scene_bounds
-            bvh_for_los     = depsgraph
 
         # ================================================================
         # Shared: path planning, camera, render
@@ -1729,14 +1629,8 @@ def main():
         waypoints = _farthest_point_sample(component, n_wp, config["seed"],
                                            fixed_first=camera_seed)
         tour      = _greedy_tsp_tour(waypoints)
-        # Pass the local BVH so _build_smooth_path can reject smooth moves
-        # and upsample segments that would cut through walls.  In global mode
-        # bvh_for_los is the depsgraph (no ray_cast method), so only pass it
-        # when it has a ray_cast attribute (i.e. it is a BVHTree).
-        _path_bvh = bvh_for_los if hasattr(bvh_for_los, "ray_cast") else None
         config["_unit_scale"] = unit_scale
-        path_points = _build_smooth_path(tour, walkable, config, bounds_for_path,
-                                         bvh=_path_bvh)
+        path_points = _build_smooth_path(tour, walkable, config, bounds_for_path)
         timing["path_s"] = round(time.time() - t0, 1)
         print(f"[Timing] path planning: {timing['path_s']}s")
 
@@ -1746,9 +1640,9 @@ def main():
         # ---- Level 2: Fine path adjustment ----
         # Walk the coarse path step-by-step, building small high-res voxel
         # patches to detect thin walls missed by the coarse grid.
-        if _path_bvh is not None:
+        if local_area_ratio:
             t0_fine = time.time()
-            path_points = _fine_adjust_path(path_points, _path_bvh, config)
+            path_points = _fine_adjust_path(path_points, config)
             timing["fine_adjust_s"] = round(time.time() - t0_fine, 1)
             print(f"[Timing] fine path adjustment: {timing['fine_adjust_s']}s")
 
@@ -1827,7 +1721,7 @@ def main():
         # ---- Steps 6 & 7: Camera animation ----
         t0 = time.time()
         cam_obj, total_frames = _setup_and_animate_camera(
-            path_points, [], config, bvh_for_los,
+            path_points, [], config,
             initial_rotation_quat=initial_rotation_quat,
         )
         timing["camera_anim_s"] = round(time.time() - t0, 1)
