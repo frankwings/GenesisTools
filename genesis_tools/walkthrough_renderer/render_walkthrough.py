@@ -1792,18 +1792,43 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
 # Debug visualisation helpers
 # ---------------------------------------------------------------------------
 
-_DEBUG_COL = None
+_DEBUG_COL      = None   # parent: "DebugViz"
+_SPHERES_COL    = None   # child:  "DebugViz_Spheres"
+_WIREFRAMES_COL = None   # child:  "DebugViz_Wireframes"
+
 
 def _debug_collection():
-    """Get or create a 'DebugViz' collection hidden from render."""
-    global _DEBUG_COL
+    """Return (creating if needed) the parent 'DebugViz' collection.
+
+    Also creates 'DebugViz_Spheres' and 'DebugViz_Wireframes' as children
+    so they can be toggled independently in the Blender Outliner.
+    """
+    global _DEBUG_COL, _SPHERES_COL, _WIREFRAMES_COL
     if _DEBUG_COL is not None:
         return _DEBUG_COL
-    col = bpy.data.collections.new("DebugViz")
-    bpy.context.scene.collection.children.link(col)
-    # Debug objects stay visible everywhere; clip_start on camera hides nearby ones.
-    _DEBUG_COL = col
-    return col
+
+    parent = bpy.data.collections.new("DebugViz")
+    bpy.context.scene.collection.children.link(parent)
+
+    spheres = bpy.data.collections.new("DebugViz_Spheres")
+    wires   = bpy.data.collections.new("DebugViz_Wireframes")
+    parent.children.link(spheres)
+    parent.children.link(wires)
+
+    _DEBUG_COL      = parent
+    _SPHERES_COL    = spheres
+    _WIREFRAMES_COL = wires
+    return _DEBUG_COL
+
+
+def _spheres_col():
+    _debug_collection()   # ensure hierarchy is created
+    return _SPHERES_COL
+
+
+def _wireframes_col():
+    _debug_collection()   # ensure hierarchy is created
+    return _WIREFRAMES_COL
 
 
 def _flat_material(name, color):
@@ -1817,7 +1842,7 @@ def _flat_material(name, color):
 
 
 def _make_sphere(name, location, radius, color):
-    """Create a small solid-color sphere at *location*."""
+    """Create a small solid-color sphere at *location* (parent DebugViz col)."""
     mesh = bpy.data.meshes.new(name)
     import bmesh as _bm
     tmp = _bm.new()
@@ -1828,6 +1853,39 @@ def _make_sphere(name, location, radius, color):
     obj = bpy.data.objects.new(name, mesh)
     _debug_collection().objects.link(obj)
     obj.location = location
+    obj.data.materials.append(_flat_material(name + "_mat", color))
+    return obj
+
+
+def _make_voxel_spheres(name, cells, bounds, res, color):
+    """Create ONE merged mesh containing low-poly spheres at every voxel centre.
+
+    All cells of the same type are batched into a single object so Blender
+    stays fast even with thousands of voxels.  Placed in DebugViz_Spheres.
+    """
+    if not cells:
+        return None
+    import bmesh as _bm
+    min_x, min_y = bounds[0], bounds[1]
+    min_z = bounds[4]
+    radius = res * 0.10   # same proportion as _make_sphere
+
+    mesh = bpy.data.meshes.new(name)
+    bm = _bm.new()
+    for (ix, iy, iz) in cells:
+        cx = min_x + (ix + 0.5) * res
+        cy = min_y + (iy + 0.5) * res
+        cz = min_z + (iz + 0.5) * res
+        result = _bm.ops.create_uvsphere(bm, u_segments=6, v_segments=3,
+                                         radius=radius)
+        for v in result["verts"]:
+            v.co.x += cx
+            v.co.y += cy
+            v.co.z += cz
+    bm.to_mesh(mesh)
+    bm.free()
+    obj = bpy.data.objects.new(name, mesh)
+    _spheres_col().objects.link(obj)
     obj.data.materials.append(_flat_material(name + "_mat", color))
     return obj
 
@@ -1871,7 +1929,7 @@ def _make_voxel_wireframes(name, cells, bounds, res, color):
             sp.points[1].co = (*corners[b], 1.0)
 
     obj = bpy.data.objects.new(name, curve)
-    _debug_collection().objects.link(obj)
+    _wireframes_col().objects.link(obj)
     obj.data.materials.append(_flat_material(name + "_mat", color))
     return obj
 
@@ -2008,10 +2066,24 @@ def _add_debug_viz(walkable, waypoints, path_points, cam_obj,
               f"walkable={len(walkable_set)} blue, "
               f"waypoints={len(waypoint_set)} green")
 
-    # Collect voxel sets per category
+    # -----------------------------------------------------------------------
+    # Helpers
+    # -----------------------------------------------------------------------
+    def _voxel_center(ix, iy, iz):
+        return Vector((min_x + (ix + 0.5) * res,
+                       min_y + (iy + 0.5) * res,
+                       min_z + (iz + 0.5) * res))
+
+    def _add_voxel_type(tag, cells, color):
+        """Add both spheres (DebugViz_Spheres) and wireframes (DebugViz_Wireframes)."""
+        _make_voxel_spheres(f"dbg_{tag}_sph", cells, bounds, res, color)
+        _make_voxel_wireframes(f"dbg_{tag}_wire", cells, bounds, res, color)
+
+    # -----------------------------------------------------------------------
+    # Voxel categories
+    # -----------------------------------------------------------------------
     # 0. Red — solid
-    _make_voxel_wireframes("dbg_solid", list(solid_set), bounds, res,
-                           color=(1.0, 0.1, 0.1))
+    _add_voxel_type("solid", list(solid_set), color=(1.0, 0.1, 0.1))
 
     # 1. Yellow — free voxels not reachable from camera
     if nx and ny and nz:
@@ -2028,33 +2100,31 @@ def _add_debug_viz(walkable, waypoints, path_points, cam_obj,
                     else:
                         if cell not in walkable_set:
                             yellow_cells.append(cell)
-        _make_voxel_wireframes("dbg_free", yellow_cells, bounds, res,
-                               color=(1.0, 0.85, 0.0))
+        _add_voxel_type("free", yellow_cells, color=(1.0, 0.85, 0.0))
 
     # 2. Blue — candidates NOT walkable (V2) OR walkable (standard)
     if cand_set is not None:
         blue_cells = [c for c in cand_set if c not in walkable_set]
     else:
         blue_cells = [c for c in walkable_set if tuple(c) not in waypoint_set]
-    _make_voxel_wireframes("dbg_candidate", blue_cells, bounds, res,
-                           color=(0.2, 0.4, 1.0))
+    _add_voxel_type("candidate", blue_cells, color=(0.2, 0.4, 1.0))
 
     # 3. Cyan — walkable (V2 only, excluding waypoints)
     if cand_set is not None:
         cyan_cells = [c for c in walkable_set if tuple(c) not in waypoint_set]
-        _make_voxel_wireframes("dbg_walkable", cyan_cells, bounds, res,
-                               color=(0.0, 0.9, 0.9))
+        _add_voxel_type("walkable", cyan_cells, color=(0.0, 0.9, 0.9))
 
-    # 4. Green — waypoints (sphere so they stand out)
-    def _voxel_center(ix, iy, iz):
-        return Vector((min_x + (ix + 0.5) * res,
-                       min_y + (iy + 0.5) * res,
-                       min_z + (iz + 0.5) * res))
-
+    # 4. Green — waypoints (larger sphere in Spheres group + wireframe box)
+    wp_cells = [tuple(wp) for wp in waypoints]
+    _add_voxel_type("waypoint", wp_cells, color=(0.1, 1.0, 0.2))
+    # Oversized waypoint spheres on top (stand-alone, also in Spheres group)
     for i, wp in enumerate(waypoints):
         ix, iy, iz = wp
-        _make_sphere(f"dbg_waypoint_{i:02d}", _voxel_center(ix, iy, iz),
-                     wp_r, color=(0.1, 1.0, 0.2))
+        obj = _make_sphere(f"dbg_waypoint_{i:02d}", _voxel_center(ix, iy, iz),
+                           wp_r, color=(0.1, 1.0, 0.2))
+        # Move to spheres sub-collection (not parent)
+        _debug_collection().objects.unlink(obj)
+        _spheres_col().objects.link(obj)
 
     # 3. Pink path line at camera height (path_points already snapped to floor)
     cam_up = Vector((0, 0, cam_h))
