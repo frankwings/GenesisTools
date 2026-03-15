@@ -1,4 +1,4 @@
-# AI33_001 Walkthrough Dark Frame Fix — v1 to v21
+# AI33_001 Walkthrough Dark Frame Fix — v1 to v26
 
 **Date**: 2026-03-12
 **Scene**: `AI33_001_280.blend` (cm-scale scene, unit_scale=0.01, 1 BU = 1 cm)
@@ -24,7 +24,13 @@ Cascade of failures:
 
 | Version | Resolution | Mode | Frames | Dark Frames | Render Time | Key Change | Fixed? |
 |---------|-----------|------|--------|-------------|-------------|------------|--------|
-| **v21** | **640×480** | **local** | **720** | **0** | **~593s** | **Three-feature gaze (depth CV + normal entropy + edge density) + context contrast** | **Yes** |
+| v26 | 640×480 | local | 720 | 0 | ~624s | No-loop tour (visit each waypoint once) + 8wp constrained | Yes |
+| **v25** | **640×480** | **local** | **720** | **0** | **~680s** | **8 waypoints + constrained gaze (min frame 417KB)** | **Yes** |
+| v24a | 640×480 | local | 720 | 0 | ~606s | Waypoint mutual-visibility orientations (force_only, 20 wp) | Yes |
+| v24b | 640×480 | local | 720 | 0 | ~631s | Waypoint orientations + constrained gaze ±60° (20 wp) | Yes |
+| v23 | 640×480 | local | 720 | 0 | ~608s | Blended raw+contrast scoring, infinite rays, short-arc SLERP | Yes |
+| v22 | 640×480 | local | 720 | 0 | ~552s | Void punishment + EMA gaze smoothing (anti-ping-pong) | Yes |
+| v21 | 640×480 | local | 720 | 0 | ~593s | Three-feature gaze (depth CV + normal entropy + edge density) + context contrast | Yes |
 | v20 | 640×480 | local | 720 | 0 | ~598s | Remove custom BVH → bidirectional scene.ray_cast | Yes |
 | v19 | 640×480 | local | 720 | 0 | ~594s | Normal entropy gaze + slower rotation | Yes |
 | v18 | 640×480 | local | 720 | 0 | ~626s | Direction cooldown + forced forward after gaze | Yes |
@@ -47,6 +53,87 @@ Cascade of failures:
 | v1 | 1280×720 | local | 240 | 23 | ~700s | Baseline | No |
 
 ## Version History (newest first)
+
+### v26 — No-Loop Tour (Visit Each Waypoint Once)
+- **Resolution**: 640×480 | **Mode**: local (`local_area_ratio=0.3`) | **Frames**: 720
+- **Timing**: TBD
+- **Changes**:
+  1. **Removed tour loop closure**: `_greedy_tsp_tour()` no longer appends `tour[0]` at the end. Camera visits each of the 8 farthest-point waypoints exactly once without returning to start.
+  2. **Path continuity**: BFS still connects consecutive waypoints, so the path is smooth. The final waypoint is the last destination — no jump back to origin.
+  3. **Same constrained gaze as v25**: Three-feature gaze restricted to ±60° of lerped waypoint base direction.
+- **Motivation**: User observed a "jump" in v25 where the camera teleported between distant waypoints due to loop closure. With only 8 waypoints, the greedy TSP tour's return segment often connected distant endpoints, causing a discontinuous path.
+- **Dark frames**: 0
+- **GIF**: TBD
+
+---
+
+### v25 — 8 Waypoints + Constrained Gaze
+- **Resolution**: 640×480 | **Mode**: local (`local_area_ratio=0.3`) | **Frames**: 720
+- **Timing**: total ~680s (render ~676s)
+- **Changes**:
+  1. **Reduced waypoints from 20 → 8**: Fewer farthest-point samples = longer path segments between waypoints. Each waypoint covers a larger area of the room, leading to more varied orientations.
+  2. **Constrained mode** (same as v24b): Three-feature gaze restricted to ±60° of lerped base direction.
+  3. **Path points**: 322 (vs 418 with 20 waypoints) — shorter, more focused path.
+- **Min frame size**: **417KB** — best so far (v24b: 288KB, v24a: 301KB, v23: 207KB). Indicates significantly less wall staring.
+- **Dark frames**: **0**
+- **GIF**: ![v25](../results/ai33_001_walkthrough_v25/AI33_001_280_walkthrough.gif)
+
+---
+
+### v24a — Waypoint Mutual-Visibility Orientations (force_only)
+- **Resolution**: 640×480 | **Mode**: local (`local_area_ratio=0.3`) | **Frames**: 720
+- **Timing**: total ~606s (render ~602s)
+- **Changes**:
+  1. **Waypoint orientation system**: After farthest-point sampling 20 waypoints, compute mutual visibility (ray_cast between all pairs at eye height). For each waypoint, sample 32 azimuth directions and pick the one where the ±90° cone contains the most visible waypoints. This naturally points toward open room space, not walls.
+  2. **Orientation schedule**: Map each waypoint to its closest path_point index. Build a sorted (path_fraction, direction) schedule. At any frame, lerp the two surrounding waypoint orientations → smooth base direction along the entire path.
+  3. **force_only mode**: When no active three-feature gaze target, camera follows the lerped waypoint base direction. Three-feature gaze can still override with interesting local targets (free gaze between waypoints).
+- **Min frame size**: 300KB (vs 207KB in v23) — less wall content per frame
+- **Dark frames**: **0**
+- **GIF**: ![v24a](../results/ai33_001_walkthrough_v24a/AI33_001_280_walkthrough.gif)
+
+### v24b — Waypoint Orientations + Constrained Gaze
+- **Resolution**: 640×480 | **Mode**: local (`local_area_ratio=0.3`) | **Frames**: 720
+- **Timing**: total ~631s (render ~627s)
+- **Changes**:
+  - Same waypoint orientation system as v24a
+  - **constrained mode**: Three-feature gaze targets must fall within ±60° (cos>0.5) of the lerped base direction. Targets outside the cone are blocked. When no gaze target found, camera follows the base direction.
+- **Min frame size**: 288KB
+- **Dark frames**: **0**
+- **GIF**: ![v24b](../results/ai33_001_walkthrough_v24b/AI33_001_280_walkthrough.gif)
+
+---
+
+### v23 — Blended Scoring + Infinite Rays + Short-Arc SLERP
+- **Resolution**: 640×480 | **Mode**: local (`local_area_ratio=0.3`) | **Frames**: 720
+- **Timing**: total ~608s (render ~605s, camera anim 0.6s)
+- **Changes**:
+  1. **Blended scoring** (`0.6 × raw_score + 0.4 × contrast`): Pure context contrast rewarded boundaries (wall→object edge) not the objects themselves. A table surrounded by furniture had high raw score but zero contrast — walls won. Now raw score (absolute interest) dominates, with contrast as a saliency bonus.
+  2. **Infinite ray range**: Removed `distance=look_range` (15m cap) from `scene.ray_cast`. Rays now reach all geometry regardless of distance, so distant objects are properly scored.
+  3. **Actual hit depth for gaze target**: Target point is at the average hit depth of the winning block, not an arbitrary `look_range × 0.6`. Camera looks AT the object, not past or short of it.
+  4. **Short-arc SLERP**: Added `dot(prev, target) < 0 → negate` check before SLERP. Ensures rotation always takes the shorter path (<180°), preventing unnecessary full turns.
+- **v22 problems fixed**:
+  - Wall staring: blended scoring prioritises high-complexity objects (tables, computers) over wall boundaries
+  - Ray range: all objects visible regardless of distance
+  - >180° rotation: short-arc SLERP eliminates unnecessary spins
+- **Dark frames**: **0**
+- **GIF**: ![v23](../results/ai33_001_walkthrough_v23/AI33_001_280_walkthrough.gif)
+
+---
+
+### v22 — Void Punishment + EMA Gaze Smoothing
+- **Resolution**: 640×480 | **Mode**: local (`local_area_ratio=0.3`) | **Frames**: 720
+- **Timing**: total ~552s (render ~548s, camera anim 0.6s)
+- **Changes**:
+  1. **Void punishment**: Tracks hit rate per equirectangular block (hits / checked cells). Applies penalty `0.3 × void_rate` — blocks where many rays miss (windows, gaps) get their score actively reduced, potentially below zero. Indoor cameras now avoid staring through openings.
+  2. **EMA gaze smoothing** (`alpha=0.4`): When a new gaze direction is selected, it's blended with the previous smoothed direction via `lerp(prev, new, 0.4)`. Prevents ping-pong head turning when two directions score similarly — the EMA settles toward whichever direction has more consistent support across evaluations.
+  3. **Wall-floor boundaries**: Normal entropy already scores LOW for 2-cluster junctions (~0.2 normalized for wall+floor = 1 bit / log2(N)). Void punishment further suppresses wall areas near windows/gaps. No explicit wall detection needed.
+- **v21 problems fixed**:
+  - White wall staring: void punishment penalises directions with ray misses near wall openings
+  - Ping-pong turning: EMA dampens alternating direction selections
+- **Dark frames**: **0**
+- **GIF**: ![v22](../results/ai33_001_walkthrough_v22/AI33_001_280_walkthrough.gif)
+
+---
 
 ### v21 — Three-Feature Gaze with Context Contrast
 - **Resolution**: 640×480 | **Mode**: local (`local_area_ratio=0.3`) | **Frames**: 720

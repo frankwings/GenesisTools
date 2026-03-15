@@ -63,6 +63,10 @@ def render_scene_walkthrough(
     local_height: float = 8.0,
     render_width: int = 1280,
     render_height: int = 720,
+    waypoint_gaze_mode: str = "free",
+    debug_viz: bool = False,
+    panoramic: bool = False,
+    render_samples: int = 32,
     blender_command: str = "blender",
 ) -> dict:
     """Render a patrol-style walkthrough GIF inside a Blender scene.
@@ -108,6 +112,10 @@ def render_scene_walkthrough(
         seed:                RNG seed for reproducible path sampling (default 42).
         render_width:        Rendered frame width in pixels (default 1280).
         render_height:       Rendered frame height in pixels (default 720).
+        panoramic:           If True, render with a 360° equirectangular camera (Cycles only).
+                             Use render_width=2048, render_height=1024 for standard 360° output.
+        render_samples:      Cycles sample count per frame (default 32). Higher = less noise,
+                             longer render. Ignored for EEVEE/WORKBENCH engines.
         blender_command:     Path to the Blender executable (default ``"blender"``).
 
     Returns:
@@ -149,6 +157,10 @@ def render_scene_walkthrough(
         "local_height": local_height,
         "render_width": render_width,
         "render_height": render_height,
+        "waypoint_gaze_mode": waypoint_gaze_mode,
+        "debug_viz": debug_viz,
+        "panoramic": panoramic,
+        "render_samples": render_samples,
     }
 
     # Windows fix: NamedTemporaryFile stays open until explicitly closed;

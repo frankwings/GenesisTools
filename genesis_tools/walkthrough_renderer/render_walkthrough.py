@@ -219,7 +219,7 @@ def _collect_hits_bidir(origin, direction, max_dist):
     return list(_cast_all_hits_bidir(origin, direction, max_dist))
 
 
-def _build_local_voxel_grid(config, center, floor_z_override=None):
+def _build_local_voxel_grid(config, center, floor_z_override=None, hit_collector=None):
     """Tri-axial voxelisation of a fixed local region using scene.ray_cast.
 
     Unlike the global mode, the grid is anchored at `center` with a fixed
@@ -302,6 +302,8 @@ def _build_local_voxel_grid(config, center, floor_z_override=None):
         iy = min(ny - 1, max(0, int((loc_v.y - min_y) / res)))
         iz = min(nz - 1, max(0, int((loc_v.z - min_z) / res)))
         solid.add((ix, iy, iz))
+        if hit_collector is not None:
+            hit_collector.append((loc_v.x, loc_v.y, loc_v.z))
 
     ray_span_z = span_z + 2.0
     ray_span_x = span_x + 2.0
@@ -366,31 +368,27 @@ def _build_local_voxel_grid(config, center, floor_z_override=None):
                                                     (0, 0, -1), ray_span_z):
                         mark(loc_v)
 
-    # X-axis rays — parity fill between hit pairs marks wall interiors solid.
+    # X-axis rays — mark only actual hit surfaces (no parity fill).
     for iy in range(ny):
         for iz in range(nz):
             for sy in range(n):
                 y = min_y + (iy + (sy + 0.5) / n) * res
                 for sz in range(n):
                     z = min_z + (iz + (sz + 0.5) / n) * res
-                    hits = _collect_hits_bidir((min_x - 1.0, y, z),
-                                             (1, 0, 0), ray_span_x)
-                    for loc_v in hits:
+                    for loc_v in _collect_hits_bidir((min_x - 1.0, y, z),
+                                                     (1, 0, 0), ray_span_x):
                         mark(loc_v)
-                    mark_parity(hits, axis=0)
 
-    # Y-axis rays — parity fill between hit pairs marks wall interiors solid.
+    # Y-axis rays — mark only actual hit surfaces (no parity fill).
     for ix in range(nx):
         for iz in range(nz):
             for sx in range(n):
                 x = min_x + (ix + (sx + 0.5) / n) * res
                 for sz in range(n):
                     z = min_z + (iz + (sz + 0.5) / n) * res
-                    hits = _collect_hits_bidir((x, min_y - 1.0, z),
-                                             (0, 1, 0), ray_span_y)
-                    for loc_v in hits:
+                    for loc_v in _collect_hits_bidir((x, min_y - 1.0, z),
+                                                     (0, 1, 0), ray_span_y):
                         mark(loc_v)
-                    mark_parity(hits, axis=1)
 
     print(f"[Walkthrough] Local voxel grid {nx}×{ny}×{nz} "
           f"({nx * ny * nz} total), {len(solid)} solid voxels  "
@@ -544,6 +542,72 @@ def _flood_fill_walkable(solid, config, local_bounds, nx, ny, nz, center):
     print(f"[Walkthrough] Reachable from seed: {len(reachable)} / {len(walkable)} walkable voxels")
     actual_floor_z = floor_hit.z if floor_hit is not None else None
     return reachable, seed, actual_floor_z
+
+
+def _flood_fill_free_from_camera(solid, camera_ijk, nx, ny, nz):
+    """BFS flood fill through free (non-solid) voxels starting from camera_ijk.
+
+    Returns the set of all free voxels reachable from the camera's voxel
+    (candidates). Voxels outside [0,nx)×[0,ny)×[0,nz) are ignored.
+    """
+    cx, cy, cz = camera_ijk
+    if (cx, cy, cz) in solid:
+        # Camera voxel is solid — snap to nearest free voxel
+        best, best_d = None, float("inf")
+        for ix in range(nx):
+            for iy in range(ny):
+                for iz in range(nz):
+                    if (ix, iy, iz) not in solid:
+                        d = (ix-cx)**2 + (iy-cy)**2 + (iz-cz)**2
+                        if d < best_d:
+                            best_d, best = d, (ix, iy, iz)
+        if best is None:
+            return set()
+        cx, cy, cz = best
+        print(f"[WalkableV2] Camera voxel was solid; snapped to {(cx,cy,cz)}")
+
+    visited = {(cx, cy, cz)}
+    queue = deque([(cx, cy, cz)])
+    while queue:
+        ix, iy, iz = queue.popleft()
+        for dx, dy, dz in [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)]:
+            ni, nj, nk = ix+dx, iy+dy, iz+dz
+            if 0 <= ni < nx and 0 <= nj < ny and 0 <= nk < nz:
+                cell = (ni, nj, nk)
+                if cell not in visited and cell not in solid:
+                    visited.add(cell)
+                    queue.append(cell)
+    print(f"[WalkableV2] Flood fill from camera: {len(visited)} candidate voxels")
+    return visited
+
+
+def _check_walkable_v2(candidates, bounds, config):
+    """For each candidate voxel, cast a ray straight down.
+
+    Walkable condition: ray hits an upward-facing surface AND
+    the voxel center is at least cam_h above the hit point.
+    """
+    unit_scale = config.get("_unit_scale", 1.0)
+    cam_h = config["camera_height"] / unit_scale
+    res   = config.get("_effective_grid_resolution", config["grid_resolution"])
+    min_x, min_y = bounds[0], bounds[1]
+    min_z = bounds[4]
+
+    scene = bpy.context.scene
+    dg    = bpy.context.evaluated_depsgraph_get()
+
+    walkable = set()
+    for (ix, iy, iz) in candidates:
+        vx = min_x + (ix + 0.5) * res
+        vy = min_y + (iy + 0.5) * res
+        vz = min_z + (iz + 0.5) * res
+        hit, loc, normal, *_ = scene.ray_cast(dg, Vector((vx, vy, vz)),
+                                               Vector((0, 0, -1)))
+        if hit and normal.z > 0.5:
+            walkable.add((ix, iy, iz))
+
+    print(f"[WalkableV2] Walkable voxels: {len(walkable)} / {len(candidates)} candidates")
+    return walkable
 
 
 # ---------------------------------------------------------------------------
@@ -737,7 +801,7 @@ def _farthest_point_sample(cells, n, rng_seed, fixed_first=None):
 
 
 def _greedy_tsp_tour(waypoints):
-    """Nearest-neighbour greedy tour (XY distance); closes the loop."""
+    """Nearest-neighbour greedy path (XY distance); visits each waypoint once."""
     if not waypoints:
         return []
     remaining = list(waypoints)
@@ -748,7 +812,6 @@ def _greedy_tsp_tour(waypoints):
                       key=lambda c: (c[0] - last[0]) ** 2 + (c[1] - last[1]) ** 2)
         remaining.remove(nearest)
         tour.append(nearest)
-    tour.append(tour[0])
     return tour
 
 
@@ -894,6 +957,40 @@ def _build_smooth_path(tour, walkable, config, bounds):
     upsampled.append(points[-1])
 
     return [Vector((p[0], p[1], p[2])) for p in upsampled]
+
+
+# ---------------------------------------------------------------------------
+# Snap path to actual floor surface via per-point ray_cast
+# ---------------------------------------------------------------------------
+
+def _snap_path_to_floor(path_points, config):
+    """Replace each path point's Z with the actual floor Z from a downward ray.
+
+    The coarse voxel grid gives approximate Z values (voxel centres).  This
+    function casts a ray straight down from slightly above each path point to
+    find the real floor surface.  Only hits with upward-facing normals
+    (nz > 0.5) are accepted as floor.  Points where no floor is found keep
+    their original Z.
+
+    Returns (snapped_path, n_snapped).
+    """
+    scene = bpy.context.scene
+    dg = bpy.context.evaluated_depsgraph_get()
+    unit_scale = config.get("_unit_scale", 1.0)
+    probe_height = config["camera_height"] / unit_scale  # cast from eye height
+
+    snapped = []
+    n_hit = 0
+    for pt in path_points:
+        origin = Vector((pt.x, pt.y, pt.z + probe_height))
+        direction = Vector((0, 0, -1))
+        hit, loc, normal, *_ = scene.ray_cast(dg, origin, direction)
+        if hit and normal.z > 0.5:
+            snapped.append(Vector((pt.x, pt.y, loc.z)))
+            n_hit += 1
+        else:
+            snapped.append(Vector((pt.x, pt.y, pt.z)))
+    return snapped, n_hit
 
 
 # ---------------------------------------------------------------------------
@@ -1220,6 +1317,104 @@ def _normal_entropy(normals, n_bins=8):
     return entropy
 
 
+def _compute_waypoint_orientations(tour, cam_height, scene, depsgraph):
+    """For each waypoint, find the horizontal direction that sees the most
+    other waypoints (mutual visibility maximisation).
+
+    Returns list of normalised Vector for each tour waypoint.
+    """
+    n = len(tour)
+    if n < 2:
+        return [Vector((1, 0, 0))] * n
+
+    eyes = [Vector(w) + Vector((0, 0, cam_height)) for w in tour]
+
+    # Mutual visibility matrix
+    vis = [[False] * n for _ in range(n)]
+    for i in range(n):
+        for j in range(i + 1, n):
+            d = eyes[j] - eyes[i]
+            dist = d.length
+            if dist < 0.1:
+                vis[i][j] = vis[j][i] = True
+                continue
+            hit, *_ = scene.ray_cast(depsgraph, eyes[i], d.normalized(),
+                                     distance=dist - 0.1)
+            if not hit:
+                vis[i][j] = vis[j][i] = True
+
+    n_vis = [sum(vis[i]) for i in range(n)]
+    print(f"[Waypoint orientations] {n} waypoints, "
+          f"visibility: min={min(n_vis)} max={max(n_vis)} avg={sum(n_vis)/n:.1f}")
+
+    orientations = []
+    n_samples = 32
+    for i in range(n):
+        visible_eyes = [eyes[j] for j in range(n) if j != i and vis[i][j]]
+        if not visible_eyes:
+            nxt = (i + 1) % n
+            fwd = eyes[nxt] - eyes[i]
+            fwd.z = 0
+            orientations.append(fwd.normalized() if fwd.length > 0.01
+                                else Vector((1, 0, 0)))
+            continue
+
+        best_count = -1
+        best_dir = Vector((1, 0, 0))
+        for s in range(n_samples):
+            az = 2.0 * math.pi * s / n_samples
+            cand = Vector((math.cos(az), math.sin(az), 0))
+            count = 0
+            for vp in visible_eyes:
+                to_vp = vp - eyes[i]
+                to_vp.z = 0
+                if to_vp.length > 0.01 and cand.dot(to_vp.normalized()) > 0:
+                    count += 1
+            if count > best_count:
+                best_count = count
+                best_dir = cand
+        orientations.append(best_dir)
+
+    return orientations
+
+
+def _map_tour_to_path(tour, path_points):
+    """Find the path_point index closest to each tour waypoint."""
+    indices = []
+    for wp in tour:
+        wp_v = Vector(wp)
+        best_idx = 0
+        best_d2 = float('inf')
+        for idx, pp in enumerate(path_points):
+            d2 = (pp - wp_v).length_squared
+            if d2 < best_d2:
+                best_d2 = d2
+                best_idx = idx
+        indices.append(best_idx)
+    return indices
+
+
+def _get_base_direction(t, wp_schedule):
+    """Interpolate waypoint orientations for a given path fraction t ∈ [0,1].
+
+    wp_schedule: sorted list of (path_fraction, orientation_Vector).
+    Returns normalised Vector or None if schedule is empty.
+    """
+    if not wp_schedule:
+        return None
+    if t <= wp_schedule[0][0]:
+        return wp_schedule[0][1]
+    if t >= wp_schedule[-1][0]:
+        return wp_schedule[-1][1]
+    for k in range(len(wp_schedule) - 1):
+        if wp_schedule[k][0] <= t <= wp_schedule[k + 1][0]:
+            span = wp_schedule[k + 1][0] - wp_schedule[k][0]
+            frac = (t - wp_schedule[k][0]) / max(1e-6, span)
+            d = wp_schedule[k][1].lerp(wp_schedule[k + 1][1], frac)
+            return d.normalized() if d.length > 0.01 else wp_schedule[k][1]
+    return wp_schedule[-1][1]
+
+
 def _find_gaze_target(cam_pos, depsgraph, look_range,
                       n_az=32, n_el=16, cone_radius=2,
                       w_depth=0.3, w_normal=0.4, w_edge=0.3):
@@ -1250,7 +1445,7 @@ def _find_gaze_target(cam_pos, depsgraph, look_range,
 
     for d, ai, ei in _EQUIRECT_GRID:
         result, loc, nrm, _idx, _obj, _mat = scene.ray_cast(
-            depsgraph, cam_pos, d, distance=look_range,
+            depsgraph, cam_pos, d,
         )
         if result:
             depth = (loc - cam_pos).length
@@ -1264,18 +1459,21 @@ def _find_gaze_target(cam_pos, depsgraph, look_range,
     # Block = cone_radius cells around each cell
     block_scores = [[0.0] * n_az for _ in range(n_el)]
     block_features = [[None] * n_az for _ in range(n_el)]
+    block_avg_depth = [[0.0] * n_az for _ in range(n_el)]
 
     for ei in range(n_el):
         for ai in range(n_az):
             # Gather neighbours within cone_radius
             depths = []
             normals = []
+            n_checked = 0
             for dei in range(-cone_radius, cone_radius + 1):
                 nei = ei + dei
                 if nei < 0 or nei >= n_el:
                     continue
                 for dai in range(-cone_radius, cone_radius + 1):
                     nai = (ai + dai) % n_az  # wrap azimuth
+                    n_checked += 1
                     cell = grid[nei][nai]
                     if cell is not None:
                         depths.append(cell[0])
@@ -1333,12 +1531,19 @@ def _find_gaze_target(cam_pos, depsgraph, look_range,
             edge_density = edge_count / max(1, edge_total)
 
             block_features[ei][ai] = (depth_cv, norm_ent, edge_density)
-            block_scores[ei][ai] = (w_depth * depth_cv +
-                                    w_normal * norm_ent +
-                                    w_edge * edge_density)
+            block_avg_depth[ei][ai] = sum(depths) / len(depths)
+            raw_score = (w_depth * depth_cv +
+                         w_normal * norm_ent +
+                         w_edge * edge_density)
+            # Void punishment: penalise directions with many ray misses
+            # (looking through windows / gaps in indoor scenes)
+            void_rate = 1.0 - len(depths) / max(1, n_checked)
+            block_scores[ei][ai] = raw_score - 0.3 * void_rate
 
-    # Context contrast: score minus mean of 8 neighbours
-    best_contrast = -1.0
+    # Blended scoring: raw score (absolute interest) + context contrast (saliency).
+    # Pure contrast rewards boundaries (wall→object edge) not objects themselves.
+    # A table surrounded by furniture has high raw score but zero contrast.
+    best_final = -1.0
     best_ai, best_ei = 0, 0
 
     for ei in range(n_el):
@@ -1346,7 +1551,7 @@ def _find_gaze_target(cam_pos, depsgraph, look_range,
             if block_features[ei][ai] is None:
                 continue
             my_score = block_scores[ei][ai]
-            if my_score < 0.05:
+            if my_score < 0.01:
                 continue
             # Mean of 8 neighbours
             nb_scores = []
@@ -1361,12 +1566,13 @@ def _find_gaze_target(cam_pos, depsgraph, look_range,
             if not nb_scores:
                 continue
             contrast = my_score - sum(nb_scores) / len(nb_scores)
-            if contrast > best_contrast:
-                best_contrast = contrast
+            final = 0.6 * my_score + 0.4 * max(0.0, contrast)
+            if final > best_final:
+                best_final = final
                 best_ai = ai
                 best_ei = ei
 
-    if best_contrast < 0.02:
+    if best_final < 0.02:
         return None, None, 0.0
 
     # Reconstruct direction from grid indices
@@ -1376,9 +1582,14 @@ def _find_gaze_target(cam_pos, depsgraph, look_range,
                         math.cos(el) * math.sin(az),
                         math.sin(el))).normalized()
 
+    # Use actual hit depth for gaze target (not arbitrary look_range * 0.6)
+    depth = block_avg_depth[best_ei][best_ai]
+    if depth < 0.1:
+        depth = 10.0  # fallback
+
     # Normalise score to [0, 1]
-    score = min(1.0, max(0.0, best_contrast * 5.0))
-    return cam_pos + best_dir * (look_range * 0.6), best_dir, score
+    score = min(1.0, max(0.0, best_final * 2.0))
+    return cam_pos + best_dir * depth, best_dir, score
 
 
 # ---------------------------------------------------------------------------
@@ -1421,7 +1632,8 @@ def _compute_look_at_quaternion(from_pos, to_pos):
 
 
 def _setup_and_animate_camera(path_points, interesting_objects, config,
-                               initial_rotation_quat=None):
+                               initial_rotation_quat=None,
+                               wp_schedule=None):
     unit_scale = config.get("_unit_scale", 1.0)
     cam_h         = config["camera_height"] / unit_scale   # metres → BU
     fps           = config["fps"]
@@ -1462,7 +1674,10 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
     forced_forward_frames = 0          # C: forced forward look after gaze ends
     gaze_cooldown_dir    = None        # A: direction of last gaze (Vector or None)
     gaze_cooldown_frames = 0           # A: frames remaining on direction cooldown
+    ema_gaze_dir         = None        # EMA smoothed gaze direction (Vector)
+    ema_alpha            = 0.4         # EMA weight for new direction (lower = smoother)
     glance_cooldown      = {}          # kept for backward compat (unused)
+    wp_gaze_mode         = config.get("waypoint_gaze_mode", "free")
 
     rotation_tau  = config.get("rotation_smooth_seconds", 3.5)
     slerp_alpha   = 1.0 - math.exp(-1.0 / max(1, fps * rotation_tau))
@@ -1504,6 +1719,10 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
                 gaze_target           = None
                 forced_forward_frames = int(fps * 2)          # C: 2s forced forward
 
+        # Waypoint base direction (lerped between surrounding waypoints)
+        base_dir = (_get_base_direction(t, wp_schedule)
+                    if wp_schedule else None)
+
         # Three-feature gaze: only when no active gaze, not forced forward,
         # and direction cooldown allows it.
         if (gaze_target is None
@@ -1515,13 +1734,30 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
             if ent_target is not None:
                 blocked = (gaze_cooldown_dir is not None
                            and ent_dir.dot(gaze_cooldown_dir) > 0.8)
+                # "constrained" mode: also reject if outside ±60° of base_dir
+                if not blocked and wp_gaze_mode == "constrained" and base_dir is not None:
+                    horiz_ent = Vector((ent_dir.x, ent_dir.y, 0))
+                    if horiz_ent.length > 0.01:
+                        if horiz_ent.normalized().dot(base_dir) < 0.5:  # cos(60°)
+                            blocked = True
                 if not blocked:
-                    gaze_target    = ent_target
+                    # EMA smooth gaze direction to prevent ping-pong
+                    if ema_gaze_dir is not None:
+                        smoothed = ema_gaze_dir.lerp(ent_dir, ema_alpha)
+                        smoothed.normalize()
+                    else:
+                        smoothed = ent_dir
+                    ema_gaze_dir   = smoothed
+                    ent_dist       = (ent_target - cam_pos).length
+                    gaze_target    = cam_pos + smoothed * ent_dist
                     # Gaze duration scales with entropy: low → 1s, high → 5s
                     gaze_remaining = int(fps * (1.0 + 4.0 * ent_score))
 
         if gaze_target is not None:
             look_target = gaze_target
+        elif base_dir is not None and wp_gaze_mode in ("force_only", "constrained"):
+            # No active gaze — follow the waypoint base direction
+            look_target = cam_pos + base_dir * 10.0
         else:
             # Look in the path-travel direction from eye height.
             # floor_ahead is the path point ~0.15 ahead in t-space (floor level).
@@ -1538,6 +1774,9 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
         else:
             target_quat = _compute_look_at_quaternion(cam_pos, look_target)
             if prev_quat is not None:
+                # Always take the shorter arc (<180°)
+                if prev_quat.dot(target_quat) < 0:
+                    target_quat.negate()
                 target_quat = prev_quat.slerp(target_quat, slerp_alpha)
         prev_quat = target_quat
 
@@ -1552,6 +1791,322 @@ def _setup_and_animate_camera(path_points, interesting_objects, config,
                 kp.interpolation = "LINEAR"
 
     return cam_obj, total_frames
+
+
+# ---------------------------------------------------------------------------
+# Debug visualisation helpers
+# ---------------------------------------------------------------------------
+
+_DEBUG_COL = None
+
+def _debug_collection():
+    """Get or create a 'DebugViz' collection hidden from render."""
+    global _DEBUG_COL
+    if _DEBUG_COL is not None:
+        return _DEBUG_COL
+    col = bpy.data.collections.new("DebugViz")
+    bpy.context.scene.collection.children.link(col)
+    # Debug objects stay visible everywhere; clip_start on camera hides nearby ones.
+    _DEBUG_COL = col
+    return col
+
+
+def _flat_material(name, color):
+    """Create a flat solid-color material (no emission, no specular)."""
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = False          # no node tree — simple flat color
+    mat.diffuse_color = (*color, 1.0)
+    mat.roughness = 1.0
+    mat.specular_intensity = 0.0
+    return mat
+
+
+def _make_sphere(name, location, radius, color):
+    """Create a small solid-color sphere at *location*."""
+    mesh = bpy.data.meshes.new(name)
+    import bmesh as _bm
+    tmp = _bm.new()
+    _bm.ops.create_uvsphere(tmp, u_segments=8, v_segments=4,
+                             radius=radius)
+    tmp.to_mesh(mesh)
+    tmp.free()
+    obj = bpy.data.objects.new(name, mesh)
+    _debug_collection().objects.link(obj)
+    obj.location = location
+    obj.data.materials.append(_flat_material(name + "_mat", color))
+    return obj
+
+
+def _make_voxel_wireframes(name, cells, bounds, res, color):
+    """Create ONE curve object containing wireframe boxes for all given voxels.
+
+    Uses CURVE with bevel_depth so lines have visible thickness and color.
+    Each voxel gets 12 POLY splines (one per edge). All voxels of the same
+    type are batched into a single curve object for performance.
+    """
+    if not cells:
+        return None
+    min_x, min_y = bounds[0], bounds[1]
+    min_z = bounds[4]
+
+    _EDGE_PAIRS = [
+        (0,1),(1,2),(2,3),(3,0),   # bottom face
+        (4,5),(5,6),(6,7),(7,4),   # top face
+        (0,4),(1,5),(2,6),(3,7),   # verticals
+    ]
+
+    curve = bpy.data.curves.new(name, type='CURVE')
+    curve.dimensions = '3D'
+    curve.bevel_depth = res * 0.015   # line thickness ≈ 1.5% of voxel size
+    curve.bevel_resolution = 0        # square cross-section (fast)
+    curve.use_fill_caps = False
+
+    for (ix, iy, iz) in cells:
+        x0, x1 = min_x + ix * res, min_x + (ix + 1) * res
+        y0, y1 = min_y + iy * res, min_y + (iy + 1) * res
+        z0, z1 = min_z + iz * res, min_z + (iz + 1) * res
+        corners = [
+            (x0,y0,z0),(x1,y0,z0),(x1,y1,z0),(x0,y1,z0),
+            (x0,y0,z1),(x1,y0,z1),(x1,y1,z1),(x0,y1,z1),
+        ]
+        for (a, b) in _EDGE_PAIRS:
+            sp = curve.splines.new('POLY')
+            sp.points.add(1)            # starts with 1, add 1 more = 2 total
+            sp.points[0].co = (*corners[a], 1.0)
+            sp.points[1].co = (*corners[b], 1.0)
+
+    obj = bpy.data.objects.new(name, curve)
+    _debug_collection().objects.link(obj)
+    obj.data.materials.append(_flat_material(name + "_mat", color))
+    return obj
+
+
+def _make_hit_markers(name, positions, s, color):
+    """Draw a small 3-axis cross at each ray hit position.
+
+    All crosses are batched into ONE curve object for performance.
+    s = half-length of each arm of the cross.
+    """
+    if not positions:
+        return None
+    curve = bpy.data.curves.new(name, type='CURVE')
+    curve.dimensions = '3D'
+    curve.bevel_depth = s * 0.3
+    curve.bevel_resolution = 0
+    curve.use_fill_caps = False
+    for (px, py, pz) in positions:
+        for axis in range(3):
+            sp = curve.splines.new('POLY')
+            sp.points.add(1)
+            a, b = [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
+            a[axis] = -s
+            b[axis] =  s
+            sp.points[0].co = (px+a[0], py+a[1], pz+a[2], 1.0)
+            sp.points[1].co = (px+b[0], py+b[1], pz+b[2], 1.0)
+    obj = bpy.data.objects.new(name, curve)
+    _debug_collection().objects.link(obj)
+    obj.data.materials.append(_flat_material(name + "_mat", color))
+    return obj
+
+
+def _make_line(name, points, color, thickness=0.02):
+    """Create a curve object through *points* with flat solid color."""
+    curve = bpy.data.curves.new(name, type="CURVE")
+    curve.dimensions = "3D"
+    curve.bevel_depth = thickness
+    spline = curve.splines.new("POLY")
+    spline.points.add(len(points) - 1)
+    for i, p in enumerate(points):
+        spline.points[i].co = (p.x, p.y, p.z, 1.0)
+    obj = bpy.data.objects.new(name, curve)
+    _debug_collection().objects.link(obj)
+    obj.data.materials.append(_flat_material(name + "_mat", color))
+    return obj
+
+
+def _make_arrow(name, origin, direction, length, color, shaft_r, head_r):
+    """Create an arrow (shaft line + cone head) from *origin* along *direction*."""
+    shaft_end = origin + direction * (length * 0.75)
+    tip = origin + direction * length
+    # Shaft
+    _make_line(f"{name}_shaft", [origin, shaft_end], color, thickness=shaft_r)
+    # Cone head
+    mesh = bpy.data.meshes.new(f"{name}_cone")
+    import bmesh as _bm
+    tmp = _bm.new()
+    _bm.ops.create_cone(tmp, segments=8, radius1=head_r, radius2=0.0,
+                         depth=length * 0.25)
+    tmp.to_mesh(mesh)
+    tmp.free()
+    obj = bpy.data.objects.new(f"{name}_cone", mesh)
+    _debug_collection().objects.link(obj)
+    obj.data.materials.append(_flat_material(f"{name}_cone_mat", color))
+    # Position cone at midpoint between shaft_end and tip
+    obj.location = (shaft_end + tip) / 2.0
+    # Orient cone to point along direction
+    obj.rotation_mode = "QUATERNION"
+    # Default cone points along +Z; rotate to match direction
+    from mathutils import Vector as _Vec
+    up = _Vec((0, 0, 1))
+    rot_axis = up.cross(direction)
+    if rot_axis.length > 1e-6:
+        rot_axis.normalize()
+        import math
+        angle = math.acos(max(-1, min(1, up.dot(direction))))
+        from mathutils import Quaternion
+        obj.rotation_quaternion = Quaternion(rot_axis, angle)
+    elif direction.dot(up) < 0:
+        from mathutils import Quaternion
+        obj.rotation_quaternion = Quaternion((1, 0, 0), 3.14159)
+    return obj
+
+
+def _add_debug_viz(walkable, waypoints, path_points, cam_obj,
+                   total_frames, config, bounds, solid=None,
+                   nx=0, ny=0, nz=0, candidates_v2=None):
+    """Add debug geometry: voxel spheres, waypoint markers, path line, camera axes.
+
+    Each voxel is placed at its actual voxel center (no cam_h offset).
+
+    Standard mode colors (solid/free/walkable/waypoint):
+      Red    — solid voxels (contain geometry)
+      Yellow — free voxels (empty, not walkable)
+      Blue   — walkable voxels (free + floor below + clearance)
+      Green  — waypoints (N farthest-point walkable voxels)
+
+    V2 mode colors (when candidates_v2 is provided):
+      Red    — solid voxels
+      Yellow — free voxels not reachable from camera
+      Blue   — candidate voxels (free + reachable from camera, not walkable)
+      Cyan   — walkable voxels (candidate + floor >= cam_h below)
+      Green  — waypoints
+    """
+    unit_scale = config.get("_unit_scale", 1.0)
+    cam_h = config["camera_height"] / unit_scale
+    res = config.get("_effective_grid_resolution",
+                     config["grid_resolution"])
+    min_x, min_y = bounds[0], bounds[1]
+    min_z = bounds[4]
+
+    sphere_r = res * 0.10  # voxel marker radius
+    wp_r     = res * 0.25  # waypoint marker radius
+    free_r   = res * 0.06  # free voxel radius (smaller — background info)
+    axis_len = res * 0.6   # camera axis length
+    shaft_r  = res * 0.015
+    head_r   = res * 0.05
+
+    solid_set     = set(map(tuple, solid)) if solid else set()
+    walkable_set  = set(map(tuple, walkable))
+    waypoint_set  = {tuple(wp) for wp in waypoints}
+    cand_set      = set(map(tuple, candidates_v2)) if candidates_v2 else None
+
+    n_free = nx * ny * nz - len(solid_set) - len(walkable_set) if nx else 0
+    if cand_set is not None:
+        print(f"[DebugViz] V2 mode — solid={len(solid_set)} red, "
+              f"free_disconnected yellow, "
+              f"candidate={len(cand_set)} blue, "
+              f"walkable={len(walkable_set)} cyan, "
+              f"waypoints={len(waypoint_set)} green")
+    else:
+        print(f"[DebugViz] solid={len(solid_set)} red, "
+              f"free≈{n_free} yellow, "
+              f"walkable={len(walkable_set)} blue, "
+              f"waypoints={len(waypoint_set)} green")
+
+    # Collect voxel sets per category
+    # 0. Red — solid
+    _make_voxel_wireframes("dbg_solid", list(solid_set), bounds, res,
+                           color=(1.0, 0.1, 0.1))
+
+    # 1. Yellow — free voxels not reachable from camera
+    if nx and ny and nz:
+        yellow_cells = []
+        for ixx in range(nx):
+            for iyy in range(ny):
+                for izz in range(nz):
+                    cell = (ixx, iyy, izz)
+                    if cell in solid_set:
+                        continue
+                    if cand_set is not None:
+                        if cell not in cand_set:
+                            yellow_cells.append(cell)
+                    else:
+                        if cell not in walkable_set:
+                            yellow_cells.append(cell)
+        _make_voxel_wireframes("dbg_free", yellow_cells, bounds, res,
+                               color=(1.0, 0.85, 0.0))
+
+    # 2. Blue — candidates NOT walkable (V2) OR walkable (standard)
+    if cand_set is not None:
+        blue_cells = [c for c in cand_set if c not in walkable_set]
+    else:
+        blue_cells = [c for c in walkable_set if tuple(c) not in waypoint_set]
+    _make_voxel_wireframes("dbg_candidate", blue_cells, bounds, res,
+                           color=(0.2, 0.4, 1.0))
+
+    # 3. Cyan — walkable (V2 only, excluding waypoints)
+    if cand_set is not None:
+        cyan_cells = [c for c in walkable_set if tuple(c) not in waypoint_set]
+        _make_voxel_wireframes("dbg_walkable", cyan_cells, bounds, res,
+                               color=(0.0, 0.9, 0.9))
+
+    # 4. Green — waypoints (sphere so they stand out)
+    def _voxel_center(ix, iy, iz):
+        return Vector((min_x + (ix + 0.5) * res,
+                       min_y + (iy + 0.5) * res,
+                       min_z + (iz + 0.5) * res))
+
+    for i, wp in enumerate(waypoints):
+        ix, iy, iz = wp
+        _make_sphere(f"dbg_waypoint_{i:02d}", _voxel_center(ix, iy, iz),
+                     wp_r, color=(0.1, 1.0, 0.2))
+
+    # 3. Pink path line at camera height (path_points already snapped to floor)
+    cam_up = Vector((0, 0, cam_h))
+    _make_line("dbg_path", [p + cam_up for p in path_points],
+               color=(1.0, 0.3, 0.6), thickness=res * 0.05)
+
+    # 4. RGB camera arrows at each frame (compact arrows with cones)
+    fps = config["fps"]
+    step = max(1, fps)  # every 1 second
+    for fi in range(0, total_frames, step):
+        bpy.context.scene.frame_set(fi + 1)
+        pos = Vector(cam_obj.location)
+        mat4 = cam_obj.matrix_world.to_3x3()
+        # Blender camera: -Z = forward, +X = right, +Y = up
+        right   = Vector(mat4.col[0]).normalized()
+        up      = Vector(mat4.col[1]).normalized()
+        forward = -Vector(mat4.col[2]).normalized()
+
+        _make_arrow(f"dbg_cam_x_{fi:04d}", pos, right, axis_len,
+                    color=(1.0, 0.0, 0.0), shaft_r=shaft_r, head_r=head_r)
+        _make_arrow(f"dbg_cam_y_{fi:04d}", pos, up, axis_len,
+                    color=(0.0, 1.0, 0.0), shaft_r=shaft_r, head_r=head_r)
+        _make_arrow(f"dbg_cam_z_{fi:04d}", pos, forward, axis_len,
+                    color=(0.0, 0.4, 1.0), shaft_r=shaft_r, head_r=head_r)
+
+    # 5. Set clip_start > voxel sphere diameter but << axis length so
+    #    nearby spheres are clipped but camera orientation arrows stay visible.
+    #    voxel sphere diameter = sphere_r * 2 = res * 0.24
+    #    safe_clip             = sphere_r * 2 * 1.5 = res * 0.36
+    #    axis_len              = res * 0.6  (arrows remain fully visible)
+    voxel_diameter = sphere_r * 2.0
+    safe_clip = voxel_diameter * 1.5          # clips spheres, keeps arrows
+    cam_data = cam_obj.data
+    if cam_data.clip_start < safe_clip:
+        print(f"[DebugViz] clip_start {cam_data.clip_start:.4f} → "
+              f"{safe_clip:.4f} (> voxel diameter {voxel_diameter:.4f}, "
+              f"<< axis_len {axis_len:.4f})")
+        cam_data.clip_start = safe_clip
+
+    # 6. White cross markers at every ray hit position
+    hit_positions = config.get("_debug_hits")
+    if hit_positions:
+        _make_hit_markers("dbg_hits", hit_positions,
+                          s=res * 0.08, color=(1.0, 1.0, 1.0))
+        print(f"[DebugViz] Hit markers: {len(hit_positions)}")
+
+    print(f"[DebugViz] Done.")
 
 
 # ---------------------------------------------------------------------------
@@ -1678,16 +2233,41 @@ def main():
             t0 = time.time()
             # Voxel grid uses bidirectional scene.ray_cast (no custom BVH needed).
             _prelim_floor_z = prelim_floor_hit.z if prelim_floor_hit is not None else None
+            _hit_collector = [] if config.get("debug_viz") else None
             solid, nx, ny, nz, _res, local_bounds = _build_local_voxel_grid(
-                config, center, floor_z_override=_prelim_floor_z
+                config, center, floor_z_override=_prelim_floor_z,
+                hit_collector=_hit_collector
             )
             timing["voxel_grid_s"] = round(time.time() - t0, 1)
             print(f"[Timing] local voxel grid: {timing['voxel_grid_s']}s")
+            if _hit_collector is not None:
+                print(f"[DebugViz] Collected {len(_hit_collector)} ray hit positions")
+                config["_debug_hits"] = _hit_collector
 
             t0 = time.time()
-            walkable, camera_seed, actual_floor_z = _flood_fill_walkable(
-                solid, config, local_bounds, nx, ny, nz, center
-            )
+            if config.get("walkable_algorithm") == "v2":
+                # V2: flood fill free voxels from camera, then floor-distance check.
+                cam_ix = max(0, min(nx-1, int((center.x - local_bounds[0]) / _res)))
+                cam_iy = max(0, min(ny-1, int((center.y - local_bounds[1]) / _res)))
+                cam_iz = max(0, min(nz-1, int((center.z - local_bounds[4]) / _res)))
+                camera_ijk_v2 = (cam_ix, cam_iy, cam_iz)
+                print(f"[WalkableV2] Camera voxel: {camera_ijk_v2}")
+                candidates_v2 = _flood_fill_free_from_camera(solid, camera_ijk_v2, nx, ny, nz)
+                walkable = _check_walkable_v2(candidates_v2, local_bounds, config)
+                # nearest walkable to camera as path seed
+                if walkable:
+                    camera_seed = min(walkable,
+                                      key=lambda c: (c[0]-cam_ix)**2
+                                                  + (c[1]-cam_iy)**2
+                                                  + (c[2]-cam_iz)**2)
+                else:
+                    camera_seed = camera_ijk_v2
+                actual_floor_z = None
+                config["_candidates_v2"] = candidates_v2
+            else:
+                walkable, camera_seed, actual_floor_z = _flood_fill_walkable(
+                    solid, config, local_bounds, nx, ny, nz, center
+                )
             timing["walkable_s"] = round(time.time() - t0, 1)
 
             bounds_for_path = local_bounds
@@ -1763,6 +2343,7 @@ def main():
             if actual_floor_z is not None:
                 voxel_floor_z = bounds_for_path[4] + camera_seed[2] * res
                 z_correction = actual_floor_z - voxel_floor_z
+                config["_z_correction"] = z_correction
                 path_points = [Vector((pt.x, pt.y, pt.z + z_correction))
                                for pt in path_points]
                 print(f"[Walkthrough] Floor Z correction: voxel={voxel_floor_z:.1f}  "
@@ -1818,14 +2399,40 @@ def main():
                 print(f"[Walkthrough] Path {path_length:.1f}m / {walk_speed}m/s "
                       f"= {config['duration_seconds']:.1f}s")
 
+        # ---- Step 5c: Waypoint orientations ----
+        wp_gaze_mode = config.get("waypoint_gaze_mode", "free")
+        wp_schedule = None
+        if wp_gaze_mode in ("force_only", "constrained") and len(tour) >= 2:
+            t0_wp = time.time()
+            cam_h_bu = config["camera_height"] / unit_scale
+            dg = bpy.context.evaluated_depsgraph_get()
+            wp_oris = _compute_waypoint_orientations(
+                tour, cam_h_bu, bpy.context.scene, dg)
+            wp_path_idx = _map_tour_to_path(tour, path_points)
+            n_pp = max(1, len(path_points) - 1)
+            wp_schedule = sorted(
+                [(wp_path_idx[k] / n_pp, wp_oris[k]) for k in range(len(tour))],
+                key=lambda x: x[0],
+            )
+            print(f"[Timing] waypoint orientations: {time.time() - t0_wp:.2f}s")
+
         # ---- Steps 6 & 7: Camera animation ----
         t0 = time.time()
         cam_obj, total_frames = _setup_and_animate_camera(
             path_points, [], config,
             initial_rotation_quat=initial_rotation_quat,
+            wp_schedule=wp_schedule,
         )
         timing["camera_anim_s"] = round(time.time() - t0, 1)
         print(f"[Timing] camera animation: {timing['camera_anim_s']}s")
+
+        # ---- Step 7b: Debug visualisation ----
+        if config.get("debug_viz"):
+            _add_debug_viz(list(walkable), list(waypoints), path_points,
+                           cam_obj, total_frames, config, bounds_for_path,
+                           solid=list(solid), nx=nx, ny=ny, nz=nz,
+                           candidates_v2=list(config.get("_candidates_v2") or [])
+                           if config.get("walkable_algorithm") == "v2" else None)
 
         # ---- Step 8: Save ----
         output_blend.parent.mkdir(parents=True, exist_ok=True)
@@ -1847,12 +2454,19 @@ def main():
                 _ensure_lights(scene)
             else:
                 scene.render.engine = "CYCLES"
-                scene.cycles.samples               = 32
+                scene.cycles.samples               = config.get("render_samples", 32)
                 scene.cycles.use_adaptive_sampling = True
                 scene.cycles.adaptive_threshold    = 0.01
                 scene.cycles.adaptive_min_samples  = 4
                 scene.view_layers[0].cycles.use_denoising = True
                 _enable_cycles_gpu(scene)
+
+            # Panoramic (360° equirectangular) mode — Cycles only
+            if config.get("panoramic"):
+                cam_data = scene.camera.data
+                cam_data.type = "PANO"
+                cam_data.panorama_type = "EQUIRECTANGULAR"
+                print("[Render] Panoramic mode: EQUIRECTANGULAR 360°")
 
             scene.render.resolution_x = config.get("render_width",  1280)
             scene.render.resolution_y = config.get("render_height", 720)
