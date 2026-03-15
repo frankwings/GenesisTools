@@ -1348,10 +1348,10 @@ def _compute_waypoint_orientations(tour, cam_height, scene, depsgraph):
           f"visibility: min={min(n_vis)} max={max(n_vis)} avg={sum(n_vis)/n:.1f}")
 
     orientations = []
-    n_samples = 32
     for i in range(n):
         visible_eyes = [eyes[j] for j in range(n) if j != i and vis[i][j]]
         if not visible_eyes:
+            # Fallback: face toward next waypoint
             nxt = (i + 1) % n
             fwd = eyes[nxt] - eyes[i]
             fwd.z = 0
@@ -1359,21 +1359,16 @@ def _compute_waypoint_orientations(tour, cam_height, scene, depsgraph):
                                 else Vector((1, 0, 0)))
             continue
 
-        best_count = -1
-        best_dir = Vector((1, 0, 0))
-        for s in range(n_samples):
-            az = 2.0 * math.pi * s / n_samples
-            cand = Vector((math.cos(az), math.sin(az), 0))
-            count = 0
-            for vp in visible_eyes:
-                to_vp = vp - eyes[i]
-                to_vp.z = 0
-                if to_vp.length > 0.01 and cand.dot(to_vp.normalized()) > 0:
-                    count += 1
-            if count > best_count:
-                best_count = count
-                best_dir = cand
-        orientations.append(best_dir)
+        # Average of unit vectors toward each visible waypoint (horizontal only).
+        # This points toward the "centre of mass" of the visible waypoint cloud.
+        avg = Vector((0.0, 0.0, 0.0))
+        for vp in visible_eyes:
+            to_vp = vp - eyes[i]
+            to_vp.z = 0.0
+            if to_vp.length > 0.01:
+                avg += to_vp.normalized()
+        orientations.append(avg.normalized() if avg.length > 0.01
+                            else Vector((1, 0, 0)))
 
     return orientations
 
