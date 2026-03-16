@@ -1809,14 +1809,11 @@ def _debug_collection():
 
     parent = bpy.data.collections.new("DebugViz")
     bpy.context.scene.collection.children.link(parent)
-    parent.hide_render = True          # debug geometry never appears in rendered frames
 
     spheres = bpy.data.collections.new("DebugViz_Spheres")
     wires   = bpy.data.collections.new("DebugViz_Wireframes")
     parent.children.link(spheres)
     parent.children.link(wires)
-    spheres.hide_render = True
-    wires.hide_render   = True
 
     _DEBUG_COL      = parent
     _SPHERES_COL    = spheres
