@@ -1809,11 +1809,14 @@ def _debug_collection():
 
     parent = bpy.data.collections.new("DebugViz")
     bpy.context.scene.collection.children.link(parent)
+    parent.hide_render = True          # debug geometry never appears in rendered frames
 
     spheres = bpy.data.collections.new("DebugViz_Spheres")
     wires   = bpy.data.collections.new("DebugViz_Wireframes")
     parent.children.link(spheres)
     parent.children.link(wires)
+    spheres.hide_render = True
+    wires.hide_render   = True
 
     _DEBUG_COL      = parent
     _SPHERES_COL    = spheres
@@ -1857,33 +1860,63 @@ def _make_sphere(name, location, radius, color):
     return obj
 
 
-def _make_voxel_spheres(name, cells, bounds, res, color):
-    """Create ONE merged mesh containing low-poly spheres at every voxel centre.
+_ICO_VERTS = None  # (12,3) relative icosahedron template at unit radius
+_ICO_FACES = None  # (20,3) face index triples
 
-    All cells of the same type are batched into a single object so Blender
-    stays fast even with thousands of voxels.  Placed in DebugViz_Spheres.
+
+def _ico_template():
+    """Compute icosahedron verts/faces once; reuse for all sphere batches."""
+    global _ICO_VERTS, _ICO_FACES
+    if _ICO_VERTS is not None:
+        return _ICO_VERTS, _ICO_FACES
+    phi = (1.0 + math.sqrt(5.0)) * 0.5
+    t = 1.0 / math.sqrt(1.0 + phi * phi)
+    p = phi * t
+    _ICO_VERTS = [
+        (-t,  p, 0), ( t,  p, 0), (-t, -p, 0), ( t, -p, 0),
+        ( 0, -t,  p), ( 0,  t,  p), ( 0, -t, -p), ( 0,  t, -p),
+        ( p,  0, -t), ( p,  0,  t), (-p,  0, -t), (-p,  0,  t),
+    ]
+    _ICO_FACES = [
+        (0,11,5),(0,5,1),(0,1,7),(0,7,10),(0,10,11),
+        (1,5,9),(5,11,4),(11,10,2),(10,7,6),(7,1,8),
+        (3,9,4),(3,4,2),(3,2,6),(3,6,8),(3,8,9),
+        (4,9,5),(2,4,11),(6,2,10),(8,6,7),(9,8,1),
+    ]
+    return _ICO_VERTS, _ICO_FACES
+
+
+def _make_voxel_spheres(name, cells, bounds, res, color):
+    """Create ONE merged icosphere mesh at every voxel centre.
+
+    Pre-computes an icosahedron template (12 verts, 20 faces) and offsets it
+    per-cell using plain Python list arithmetic — one mesh.from_pydata() call
+    for the whole batch.  Fast even for tens of thousands of voxels.
+    Placed in DebugViz_Spheres.
     """
     if not cells:
         return None
-    import bmesh as _bm
     min_x, min_y = bounds[0], bounds[1]
     min_z = bounds[4]
-    radius = res * 0.10   # same proportion as _make_sphere
+    radius = res * 0.10
 
-    mesh = bpy.data.meshes.new(name)
-    bm = _bm.new()
-    for (ix, iy, iz) in cells:
+    ico_v, ico_f = _ico_template()
+    nv = len(ico_v)
+
+    verts = []
+    faces = []
+    for i, (ix, iy, iz) in enumerate(cells):
         cx = min_x + (ix + 0.5) * res
         cy = min_y + (iy + 0.5) * res
         cz = min_z + (iz + 0.5) * res
-        result = _bm.ops.create_uvsphere(bm, u_segments=6, v_segments=3,
-                                         radius=radius)
-        for v in result["verts"]:
-            v.co.x += cx
-            v.co.y += cy
-            v.co.z += cz
-    bm.to_mesh(mesh)
-    bm.free()
+        base = i * nv
+        for (vx, vy, vz) in ico_v:
+            verts.append((cx + vx * radius, cy + vy * radius, cz + vz * radius))
+        for f in ico_f:
+            faces.append((base + f[0], base + f[1], base + f[2]))
+
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(verts, [], faces)
     obj = bpy.data.objects.new(name, mesh)
     _spheres_col().objects.link(obj)
     obj.data.materials.append(_flat_material(name + "_mat", color))
@@ -1891,11 +1924,17 @@ def _make_voxel_spheres(name, cells, bounds, res, color):
 
 
 def _make_voxel_wireframes(name, cells, bounds, res, color):
-    """Create ONE curve object containing wireframe boxes for all given voxels.
+    """Create ONE edge-mesh object containing wireframe boxes for all given voxels.
 
-    Uses CURVE with bevel_depth so lines have visible thickness and color.
-    Each voxel gets 12 POLY splines (one per edge). All voxels of the same
-    type are batched into a single curve object for performance.
+    Uses mesh.from_pydata(verts, edges, []) — a single bulk call — so even
+    tens of thousands of voxels complete in milliseconds.
+
+    Color is stored on obj.color (RGBA) so it appears in the Blender viewport
+    when Viewport Shading → Color is set to "Object".  A matching material is
+    also attached for Material Preview mode.
+
+    All voxels of the same type are batched into a single object.
+    Placed in DebugViz_Wireframes collection.
     """
     if not cells:
         return None
@@ -1908,28 +1947,25 @@ def _make_voxel_wireframes(name, cells, bounds, res, color):
         (0,4),(1,5),(2,6),(3,7),   # verticals
     ]
 
-    curve = bpy.data.curves.new(name, type='CURVE')
-    curve.dimensions = '3D'
-    curve.bevel_depth = res * 0.015   # line thickness ≈ 1.5% of voxel size
-    curve.bevel_resolution = 0        # square cross-section (fast)
-    curve.use_fill_caps = False
-
-    for (ix, iy, iz) in cells:
+    verts = []
+    edges = []
+    for i, (ix, iy, iz) in enumerate(cells):
         x0, x1 = min_x + ix * res, min_x + (ix + 1) * res
         y0, y1 = min_y + iy * res, min_y + (iy + 1) * res
         z0, z1 = min_z + iz * res, min_z + (iz + 1) * res
-        corners = [
+        base = i * 8
+        verts += [
             (x0,y0,z0),(x1,y0,z0),(x1,y1,z0),(x0,y1,z0),
             (x0,y0,z1),(x1,y0,z1),(x1,y1,z1),(x0,y1,z1),
         ]
         for (a, b) in _EDGE_PAIRS:
-            sp = curve.splines.new('POLY')
-            sp.points.add(1)            # starts with 1, add 1 more = 2 total
-            sp.points[0].co = (*corners[a], 1.0)
-            sp.points[1].co = (*corners[b], 1.0)
+            edges.append((base + a, base + b))
 
-    obj = bpy.data.objects.new(name, curve)
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(verts, edges, [])
+    obj = bpy.data.objects.new(name, mesh)
     _wireframes_col().objects.link(obj)
+    obj.color = (*color, 1.0)          # visible in "Object Color" viewport mode
     obj.data.materials.append(_flat_material(name + "_mat", color))
     return obj
 
@@ -1937,27 +1973,27 @@ def _make_voxel_wireframes(name, cells, bounds, res, color):
 def _make_hit_markers(name, positions, s, color):
     """Draw a small 3-axis cross at each ray hit position.
 
-    All crosses are batched into ONE curve object for performance.
+    All crosses are batched into ONE edge-mesh (from_pydata) for speed.
     s = half-length of each arm of the cross.
     """
     if not positions:
         return None
-    curve = bpy.data.curves.new(name, type='CURVE')
-    curve.dimensions = '3D'
-    curve.bevel_depth = s * 0.3
-    curve.bevel_resolution = 0
-    curve.use_fill_caps = False
+    verts = []
+    edges = []
     for (px, py, pz) in positions:
-        for axis in range(3):
-            sp = curve.splines.new('POLY')
-            sp.points.add(1)
-            a, b = [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
-            a[axis] = -s
-            b[axis] =  s
-            sp.points[0].co = (px+a[0], py+a[1], pz+a[2], 1.0)
-            sp.points[1].co = (px+b[0], py+b[1], pz+b[2], 1.0)
-    obj = bpy.data.objects.new(name, curve)
+        base = len(verts)
+        # 6 verts: ±X, ±Y, ±Z arms
+        verts += [
+            (px - s, py, pz), (px + s, py, pz),
+            (px, py - s, pz), (px, py + s, pz),
+            (px, py, pz - s), (px, py, pz + s),
+        ]
+        edges += [(base, base+1), (base+2, base+3), (base+4, base+5)]
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(verts, edges, [])
+    obj = bpy.data.objects.new(name, mesh)
     _debug_collection().objects.link(obj)
+    obj.color = (*color, 1.0)
     obj.data.materials.append(_flat_material(name + "_mat", color))
     return obj
 
