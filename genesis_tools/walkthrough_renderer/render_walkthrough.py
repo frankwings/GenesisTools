@@ -287,6 +287,13 @@ def _build_local_voxel_grid(config, center, floor_z_override=None, hit_collector
     span_y = max_y - min_y
     span_z = max_z - min_z
 
+    # Hard cap on local grid size — prevents 8k×8k grids when unit_scale and
+    # coordinate system are mismatched (e.g. scene in cm-BU but scale_length=1.0).
+    max_xy = config.get("max_local_cells_xy", 80)
+    max_nz = config.get("max_local_cells_z", 40)
+    res = max(res, span_x / max_xy, span_y / max_xy, span_z / max_nz)
+    config["_effective_grid_resolution"] = res
+
     nx = max(1, int(math.ceil(span_x / res)))
     ny = max(1, int(math.ceil(span_y / res)))
     nz = max(1, int(math.ceil(span_z / res)))
@@ -582,32 +589,13 @@ def _flood_fill_free_from_camera(solid, camera_ijk, nx, ny, nz):
 
 
 def _check_walkable_v2(candidates, bounds, config):
-    """For each candidate voxel, cast a ray straight down.
+    """Floor-based walkable filter — currently disabled (floor detection precision too low).
 
-    Walkable condition: ray hits an upward-facing surface AND
-    the voxel center is at least cam_h above the hit point.
+    All BFS-reachable candidates are considered walkable.
+    Interface is preserved for future floor detection implementation.
     """
-    unit_scale = config.get("_unit_scale", 1.0)
-    cam_h = config["camera_height"] / unit_scale
-    res   = config.get("_effective_grid_resolution", config["grid_resolution"])
-    min_x, min_y = bounds[0], bounds[1]
-    min_z = bounds[4]
-
-    scene = bpy.context.scene
-    dg    = bpy.context.evaluated_depsgraph_get()
-
-    walkable = set()
-    for (ix, iy, iz) in candidates:
-        vx = min_x + (ix + 0.5) * res
-        vy = min_y + (iy + 0.5) * res
-        vz = min_z + (iz + 0.5) * res
-        hit, loc, normal, *_ = scene.ray_cast(dg, Vector((vx, vy, vz)),
-                                               Vector((0, 0, -1)))
-        if hit and normal.z > 0.5:
-            walkable.add((ix, iy, iz))
-
-    print(f"[WalkableV2] Walkable voxels: {len(walkable)} / {len(candidates)} candidates")
-    return walkable
+    print(f"[WalkableV2] Floor check skipped — all {len(candidates)} candidates walkable")
+    return set(candidates)
 
 
 # ---------------------------------------------------------------------------
@@ -1832,13 +1820,84 @@ def _wireframes_col():
 
 
 def _flat_material(name, color):
-    """Create a flat solid-color material (no emission, no specular)."""
+    """Create a flat solid-color material (no nodes — fast, no shader compilation)."""
     mat = bpy.data.materials.new(name)
-    mat.use_nodes = False          # no node tree — simple flat color
+    mat.use_nodes = False
     mat.diffuse_color = (*color, 1.0)
     mat.roughness = 1.0
     mat.specular_intensity = 0.0
     return mat
+
+
+_EDGE_TUBE_GROUP = None  # cached Geometry Nodes group
+
+
+def _edge_tube_nodegroup():
+    """Return (and cache) a Geometry Nodes group: edge mesh → thick square tubes.
+
+    Inputs:  Geometry, Radius (float)
+    Pipeline: Mesh to Curve → Curve to Mesh (4-point circle profile)
+
+    No SetMaterial node — the output geometry inherits material slot 0 from
+    the object that holds the modifier, so use_nodes=False diffuse_color works.
+    """
+    global _EDGE_TUBE_GROUP
+    if _EDGE_TUBE_GROUP is not None:
+        return _EDGE_TUBE_GROUP
+
+    group = bpy.data.node_groups.new("EdgeToTube", 'GeometryNodeTree')
+    group.interface.new_socket("Geometry", in_out='INPUT',
+                               socket_type='NodeSocketGeometry')
+    group.interface.new_socket("Radius", in_out='INPUT',
+                               socket_type='NodeSocketFloat')
+    group.interface.new_socket("Geometry", in_out='OUTPUT',
+                               socket_type='NodeSocketGeometry')
+
+    gi = group.nodes.new('NodeGroupInput')
+    go = group.nodes.new('NodeGroupOutput')
+    gi.location = (-500, 0)
+    go.location = (400, 0)
+
+    m2c = group.nodes.new('GeometryNodeMeshToCurve')
+    m2c.location = (-250, 0)
+
+    circle = group.nodes.new('GeometryNodeCurvePrimitiveCircle')
+    circle.location = (-50, -150)
+    circle.inputs['Resolution'].default_value = 4
+
+    c2m = group.nodes.new('GeometryNodeCurveToMesh')
+    c2m.location = (150, 0)
+
+    # Geometry → Mesh to Curve → Curve to Mesh → Output
+    group.links.new(gi.outputs[0], m2c.inputs[0])
+    group.links.new(m2c.outputs[0], c2m.inputs[0])
+    group.links.new(gi.outputs[1], circle.inputs['Radius'])
+    group.links.new(circle.outputs[0], c2m.inputs[1])
+    group.links.new(c2m.outputs[0], go.inputs[0])
+
+    _EDGE_TUBE_GROUP = group
+    return group
+
+
+def _apply_edge_tube(obj, thickness):
+    """Apply the EdgeToTube GN modifier to *obj*.
+
+    show_render=False: skip GN evaluation during headless save/render (fast).
+    show_viewport=True: thick tubes visible when file is opened in Blender UI.
+    The base edge mesh (thin lines) is used for render; viewport shows tubes.
+    The tube geometry inherits material slot 0 from the object, so the color
+    set on obj.data.materials[0] (use_nodes=False diffuse_color) is used.
+    """
+    ng = _edge_tube_nodegroup()
+    mod = obj.modifiers.new("ThickEdges", 'NODES')
+    mod.node_group = ng
+    mod.show_viewport = True
+    mod.show_render = False   # don't evaluate GN during headless save — keeps save fast
+    # Set the Radius input
+    for item in ng.interface.items_tree:
+        if hasattr(item, 'in_out') and item.in_out == 'INPUT' and item.name == "Radius":
+            mod[item.identifier] = thickness
+            break
 
 
 def _make_sphere(name, location, radius, color):
@@ -1964,6 +2023,7 @@ def _make_voxel_wireframes(name, cells, bounds, res, color):
     _wireframes_col().objects.link(obj)
     obj.color = (*color, 1.0)          # visible in "Object Color" viewport mode
     obj.data.materials.append(_flat_material(name + "_mat", color))
+    _apply_edge_tube(obj, res * 0.015)  # thick tubes via Geometry Nodes
     return obj
 
 
@@ -1992,6 +2052,7 @@ def _make_hit_markers(name, positions, s, color):
     _debug_collection().objects.link(obj)
     obj.color = (*color, 1.0)
     obj.data.materials.append(_flat_material(name + "_mat", color))
+    _apply_edge_tube(obj, s * 0.3)  # thick tubes via Geometry Nodes
     return obj
 
 
@@ -2343,35 +2404,25 @@ def main():
                 config["_debug_hits"] = _hit_collector
 
             t0 = time.time()
-            if config.get("walkable_algorithm") == "v2":
-                # V2: flood fill free voxels from camera, then floor-distance check.
-                cam_ix = max(0, min(nx-1, int((center.x - local_bounds[0]) / _res)))
-                cam_iy = max(0, min(ny-1, int((center.y - local_bounds[1]) / _res)))
-                cam_iz = max(0, min(nz-1, int((center.z - local_bounds[4]) / _res)))
-                camera_ijk_v2 = (cam_ix, cam_iy, cam_iz)
-                print(f"[WalkableV2] Camera voxel: {camera_ijk_v2}")
-                candidates_v2 = _flood_fill_free_from_camera(solid, camera_ijk_v2, nx, ny, nz)
-                walkable = _check_walkable_v2(candidates_v2, local_bounds, config)
-                # nearest walkable to camera as path seed
-                if walkable:
-                    camera_seed = min(walkable,
-                                      key=lambda c: (c[0]-cam_ix)**2
-                                                  + (c[1]-cam_iy)**2
-                                                  + (c[2]-cam_iz)**2)
-                else:
-                    camera_seed = camera_ijk_v2
-                actual_floor_z = None
-                config["_candidates_v2"] = candidates_v2
-            else:
-                walkable, camera_seed, actual_floor_z = _flood_fill_walkable(
-                    solid, config, local_bounds, nx, ny, nz, center
-                )
+            cam_ix = max(0, min(nx-1, int((center.x - local_bounds[0]) / _res)))
+            cam_iy = max(0, min(ny-1, int((center.y - local_bounds[1]) / _res)))
+            cam_iz = max(0, min(nz-1, int((center.z - local_bounds[4]) / _res)))
+            camera_ijk_v2 = (cam_ix, cam_iy, cam_iz)
+            print(f"[WalkableV2] Camera voxel: {camera_ijk_v2}")
+            candidates_v2 = _flood_fill_free_from_camera(solid, camera_ijk_v2, nx, ny, nz)
+            walkable = _check_walkable_v2(candidates_v2, local_bounds, config)
+            camera_seed = min(walkable,
+                              key=lambda c: (c[0]-cam_ix)**2
+                                          + (c[1]-cam_iy)**2
+                                          + (c[2]-cam_iz)**2) if walkable else camera_ijk_v2
+            actual_floor_z = None
+            config["_candidates_v2"] = candidates_v2
             timing["walkable_s"] = round(time.time() - t0, 1)
 
             bounds_for_path = local_bounds
 
         # ================================================================
-        # GLOBAL MODE  (legacy: full scene.ray_cast)
+        # GLOBAL MODE  (full scene.ray_cast)
         # ================================================================
         else:
             t0 = time.time()
@@ -2380,7 +2431,19 @@ def main():
             print(f"[Timing] global voxel grid: {timing['voxel_grid_s']}s")
 
             t0 = time.time()
-            walkable = _find_walkable_voxels(solid, config, scene_bounds, nx, ny, nz)
+            center = _find_local_center(config)
+            cam_ix = max(0, min(nx-1, int((center.x - scene_bounds[0]) / _res)))
+            cam_iy = max(0, min(ny-1, int((center.y - scene_bounds[1]) / _res)))
+            cam_iz = max(0, min(nz-1, int((center.z - scene_bounds[4]) / _res)))
+            camera_ijk_global = (cam_ix, cam_iy, cam_iz)
+            print(f"[WalkableV2] Global camera voxel: {camera_ijk_global}")
+            candidates_v2 = _flood_fill_free_from_camera(solid, camera_ijk_global, nx, ny, nz)
+            walkable = _check_walkable_v2(candidates_v2, scene_bounds, config)
+            camera_seed = min(walkable,
+                              key=lambda c: (c[0]-cam_ix)**2
+                                          + (c[1]-cam_iy)**2
+                                          + (c[2]-cam_iz)**2) if walkable else camera_ijk_global
+            config["_candidates_v2"] = candidates_v2
             timing["walkable_s"] = round(time.time() - t0, 1)
 
             bounds_for_path = scene_bounds
@@ -2397,11 +2460,7 @@ def main():
 
         # ---- Step 4: Coverage path ----
         t0 = time.time()
-        if local_area_ratio:
-            component = walkable   # flood-fill already gives reachable set
-        else:
-            component = _bfs_largest_component(walkable)
-            camera_seed = None
+        component = walkable   # flood-fill from camera always gives reachable set
 
         n_wp      = min(config["num_waypoints"], len(component))
         waypoints = _farthest_point_sample(component, n_wp, config["seed"],
@@ -2529,8 +2588,7 @@ def main():
             _add_debug_viz(list(walkable), list(waypoints), path_points,
                            cam_obj, total_frames, config, bounds_for_path,
                            solid=list(solid), nx=nx, ny=ny, nz=nz,
-                           candidates_v2=list(config.get("_candidates_v2") or [])
-                           if config.get("walkable_algorithm") == "v2" else None)
+                           candidates_v2=list(config.get("_candidates_v2") or []))
 
         # ---- Step 8: Save ----
         output_blend.parent.mkdir(parents=True, exist_ok=True)
