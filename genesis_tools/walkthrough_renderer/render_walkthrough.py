@@ -206,21 +206,30 @@ def _compute_scene_density_bounds(config):
                     d += obj["volume"] * math.exp(-(dx*dx + dy*dy + dz*dz) * inv2s2)
                 density[i][j][k] = d
 
-    # --- Step 4: find density peak ---
-    peak_val  = 0.0
-    peak_ijk  = (ndx // 2, ndy // 2, ndz // 2)
+    # --- Step 4: global peak density (for threshold normalisation only) ---
+    peak_val = 0.0
     for i in range(ndx):
         for j in range(ndy):
             for k in range(ndz):
                 if density[i][j][k] > peak_val:
-                    peak_val  = density[i][j][k]
-                    peak_ijk  = (i, j, k)
-    print(f"[DensityBounds] Peak density={peak_val:.4g} at voxel {peak_ijk}")
+                    peak_val = density[i][j][k]
 
-    # --- Step 5: BFS flood-fill from peak (6-connectivity) ---
+    # --- Step 4b: flood-fill seed = camera position ---
+    # Always root the fill at the camera so we capture the room the camera
+    # is actually in, not the globally densest cluster (which may be elsewhere).
+    cam_pos   = _find_local_center(config)
+    seed_i    = max(0, min(ndx-1, int((cam_pos.x - bmin_x) / dres)))
+    seed_j    = max(0, min(ndy-1, int((cam_pos.y - bmin_y) / dres)))
+    seed_k    = max(0, min(ndz-1, int((cam_pos.z - bmin_z) / dres)))
+    seed_ijk  = (seed_i, seed_j, seed_k)
+    cam_density = density[seed_i][seed_j][seed_k]
+    print(f"[DensityBounds] Camera cell {seed_ijk}  density={cam_density:.4g}  "
+          f"peak={peak_val:.4g}")
+
+    # --- Step 5: BFS flood-fill from camera cell (6-connectivity) ---
     threshold  = config.get("density_threshold", 0.05) * peak_val
-    visited    = {peak_ijk}
-    queue      = deque([peak_ijk])
+    visited    = {seed_ijk}
+    queue      = deque([seed_ijk])
     while queue:
         i, j, k = queue.popleft()
         for di, dj, dk in [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)]:
