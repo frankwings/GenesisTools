@@ -98,6 +98,166 @@ def _scene_bounds():
     return min(xs), min(ys), max(xs), max(ys), min(zs), max(zs)
 
 
+def _compute_scene_density_bounds(config):
+    """Compute scene bounds via 3D density field to exclude outliers and micro-objects.
+
+    Analogous to Active Contour in 3D: a density field is built from object
+    volumes (each object contributes a Gaussian blob), then the scene extent
+    is defined by the contiguous high-density region reachable from the peak.
+    Small isolated objects produce low-amplitude islands that fall below the
+    flood-fill threshold and are excluded automatically.
+
+    Algorithm
+    ---------
+    1. Collect all mesh objects; compute world-space AABB volume + centre.
+    2. Drop micro-objects (volume < median_volume * min_object_volume_fraction).
+    3. Build a coarse 3D density grid (density_grid_cells^3).
+       Each object adds: volume * exp(-dist² / (2σ²)), σ = size * sigma_factor.
+    4. Find the density peak → scene centroid.
+    5. BFS flood-fill from peak where density ≥ threshold * peak_density.
+    6. AABB of flood-fill cells + density_padding_cells → output bounds.
+
+    Falls back to _scene_bounds() if fewer than 2 objects survive filtering.
+
+    Config keys (all optional)
+    --------------------------
+    density_grid_cells          int   coarse grid resolution (default 20)
+    density_threshold           float flood-fill cutoff as fraction of peak (default 0.05)
+    density_sigma_factor        float blob σ = object_size * factor (default 1.5)
+    min_object_volume_fraction  float drop objects below median_vol * this (default 0.01)
+    density_padding_cells       int   expand final AABB by N cells (default 2)
+    """
+    # --- Step 1: collect objects ---
+    objects = []
+    for obj in bpy.context.scene.objects:
+        if obj.type != "MESH":
+            continue
+        corners = [obj.matrix_world @ Vector(c) for c in obj.bound_box]
+        xs_o = [c.x for c in corners]
+        ys_o = [c.y for c in corners]
+        zs_o = [c.z for c in corners]
+        sx = max(xs_o) - min(xs_o)
+        sy = max(ys_o) - min(ys_o)
+        sz = max(zs_o) - min(zs_o)
+        vol = sx * sy * sz
+        if vol < 1e-9:
+            continue
+        objects.append({
+            "center": ((min(xs_o)+max(xs_o))/2,
+                       (min(ys_o)+max(ys_o))/2,
+                       (min(zs_o)+max(zs_o))/2),
+            "volume": vol,
+            "size":   max(sx, sy, sz),
+            "bounds": (min(xs_o), min(ys_o), max(xs_o), max(ys_o), min(zs_o), max(zs_o)),
+        })
+
+    if not objects:
+        raise RuntimeError("No mesh objects in scene — cannot build voxel grid.")
+
+    # --- Step 2: drop micro-objects ---
+    min_frac = config.get("min_object_volume_fraction", 0.01)
+    volumes  = sorted(o["volume"] for o in objects)
+    median_v = volumes[len(volumes) // 2]
+    min_vol  = median_v * min_frac
+    filtered = [o for o in objects if o["volume"] >= min_vol]
+    print(f"[DensityBounds] Objects: {len(objects)} total, "
+          f"{len(filtered)} after micro-filter (min_vol={min_vol:.4g})")
+
+    if len(filtered) < 2:
+        print("[DensityBounds] Too few objects after filter — falling back to _scene_bounds()")
+        return _scene_bounds()
+
+    # --- Step 3: coarse density grid ---
+    n_coarse = config.get("density_grid_cells", 20)
+    sigma_f  = config.get("density_sigma_factor", 1.5)
+
+    all_xs = [o["bounds"][0] for o in filtered] + [o["bounds"][2] for o in filtered]
+    all_ys = [o["bounds"][1] for o in filtered] + [o["bounds"][3] for o in filtered]
+    all_zs = [o["bounds"][4] for o in filtered] + [o["bounds"][5] for o in filtered]
+    bmin_x, bmax_x = min(all_xs), max(all_xs)
+    bmin_y, bmax_y = min(all_ys), max(all_ys)
+    bmin_z, bmax_z = min(all_zs), max(all_zs)
+
+    span_x = max(bmax_x - bmin_x, 1e-6)
+    span_y = max(bmax_y - bmin_y, 1e-6)
+    span_z = max(bmax_z - bmin_z, 1e-6)
+    dres   = max(span_x, span_y, span_z) / n_coarse
+    ndx    = max(1, int(math.ceil(span_x / dres)))
+    ndy    = max(1, int(math.ceil(span_y / dres)))
+    ndz    = max(1, int(math.ceil(span_z / dres)))
+
+    # 3-D density array (flat list-of-lists-of-lists — no numpy needed)
+    density = [[[0.0] * ndz for _ in range(ndy)] for _ in range(ndx)]
+    for i in range(ndx):
+        cx_c = bmin_x + (i + 0.5) * dres
+        for j in range(ndy):
+            cy_c = bmin_y + (j + 0.5) * dres
+            for k in range(ndz):
+                cz_c = bmin_z + (k + 0.5) * dres
+                d = 0.0
+                for obj in filtered:
+                    sigma = obj["size"] * sigma_f
+                    if sigma < 1e-9:
+                        continue
+                    dx = cx_c - obj["center"][0]
+                    dy = cy_c - obj["center"][1]
+                    dz = cz_c - obj["center"][2]
+                    inv2s2 = 1.0 / (2.0 * sigma * sigma)
+                    d += obj["volume"] * math.exp(-(dx*dx + dy*dy + dz*dz) * inv2s2)
+                density[i][j][k] = d
+
+    # --- Step 4: find density peak ---
+    peak_val  = 0.0
+    peak_ijk  = (ndx // 2, ndy // 2, ndz // 2)
+    for i in range(ndx):
+        for j in range(ndy):
+            for k in range(ndz):
+                if density[i][j][k] > peak_val:
+                    peak_val  = density[i][j][k]
+                    peak_ijk  = (i, j, k)
+    print(f"[DensityBounds] Peak density={peak_val:.4g} at voxel {peak_ijk}")
+
+    # --- Step 5: BFS flood-fill from peak (6-connectivity) ---
+    threshold  = config.get("density_threshold", 0.05) * peak_val
+    visited    = {peak_ijk}
+    queue      = deque([peak_ijk])
+    while queue:
+        i, j, k = queue.popleft()
+        for di, dj, dk in [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)]:
+            ni, nj, nk = i+di, j+dj, k+dk
+            if 0 <= ni < ndx and 0 <= nj < ndy and 0 <= nk < ndz:
+                cell = (ni, nj, nk)
+                if cell not in visited and density[ni][nj][nk] >= threshold:
+                    visited.add(cell)
+                    queue.append(cell)
+    print(f"[DensityBounds] Flood-fill region: {len(visited)} / {ndx*ndy*ndz} cells "
+          f"(threshold={threshold:.4g})")
+
+    # --- Step 6: AABB of visited cells + padding ---
+    pad    = config.get("density_padding_cells", 2)
+    vis_i  = [c[0] for c in visited]
+    vis_j  = [c[1] for c in visited]
+    vis_k  = [c[2] for c in visited]
+    out_min_x = bmin_x + (min(vis_i) - pad) * dres
+    out_max_x = bmin_x + (max(vis_i) + 1 + pad) * dres
+    out_min_y = bmin_y + (min(vis_j) - pad) * dres
+    out_max_y = bmin_y + (max(vis_j) + 1 + pad) * dres
+    out_min_z = bmin_z + (min(vis_k) - pad) * dres
+    out_max_z = bmin_z + (max(vis_k) + 1 + pad) * dres
+
+    print(f"[DensityBounds] Smart bounds: "
+          f"X[{out_min_x:.1f},{out_max_x:.1f}] "
+          f"Y[{out_min_y:.1f},{out_max_y:.1f}] "
+          f"Z[{out_min_z:.1f},{out_max_z:.1f}]")
+    raw = _scene_bounds()
+    print(f"[DensityBounds] Raw bounds:   "
+          f"X[{raw[0]:.1f},{raw[2]:.1f}] "
+          f"Y[{raw[1]:.1f},{raw[3]:.1f}] "
+          f"Z[{raw[4]:.1f},{raw[5]:.1f}]")
+
+    return (out_min_x, out_min_y, out_max_x, out_max_y, out_min_z, out_max_z)
+
+
 # ---------------------------------------------------------------------------
 # Unit scale helper
 # ---------------------------------------------------------------------------
@@ -2172,8 +2332,14 @@ def main():
         print(f"[Walkthrough] Scene unit scale: {unit_scale:.4f} m/BU "
               f"({'metric' if abs(unit_scale - 1.0) < 0.01 else f'{unit_scale*100:.1f}cm/BU'})")
 
-        # ---- Scene bounds (fast; needed for ratio calculation and global mode) ----
-        scene_bounds = _scene_bounds()
+        # ---- Scene bounds — density-field smart bounds ----
+        # Uses 3D Gaussian density field to exclude outliers and micro-objects,
+        # giving a tight AABB around the main scene cluster.
+        # Falls back to raw _scene_bounds() if too few objects survive filtering.
+        t0 = time.time()
+        scene_bounds = _compute_scene_density_bounds(config)
+        timing["density_bounds_s"] = round(time.time() - t0, 1)
+        print(f"[Timing] density bounds: {timing['density_bounds_s']}s")
         span_x = scene_bounds[2] - scene_bounds[0]
         span_y = scene_bounds[3] - scene_bounds[1]
 
