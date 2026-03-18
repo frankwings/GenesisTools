@@ -63,11 +63,11 @@ Small indoor scene → very few walkable cells (159 vs 10,458 for desert) — ro
 
 **Sample frame (frame_0001)**:
 
-![frame 001](../results/bedroom_walkthrough/frames/frame_0001.png)
+![frame 001](assets/bedroom_walkthrough/frames/frame_0001.png)
 
 **Walkthrough GIF** (179 frames, 8 fps, 55 MB):
 
-![walkthrough GIF](../results/bedroom_walkthrough/bedroom_walkthrough.gif)
+![walkthrough GIF](assets/bedroom_walkthrough/bedroom_walkthrough.gif)
 
 ---
 

@@ -79,11 +79,11 @@ render_scene_walkthrough(
 
 **Sample frame (frame_0001)**:
 
-![frame 001](../results/scene_desert_walkthrough/frames/frame_0001.png)
+![frame 001](assets/scene_desert_walkthrough/frames/frame_0001.png)
 
 **Walkthrough GIF** (240 frames, 8 fps, 4.9 MB):
 
-![walkthrough GIF](../results/scene_desert_walkthrough/scene_fine_walkthrough.gif)
+![walkthrough GIF](assets/scene_desert_walkthrough/scene_fine_walkthrough.gif)
 
 ---
 

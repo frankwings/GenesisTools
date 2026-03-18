@@ -76,7 +76,7 @@ Cascade of failures:
   3. **Path points**: 322 (vs 418 with 20 waypoints) — shorter, more focused path.
 - **Min frame size**: **417KB** — best so far (v24b: 288KB, v24a: 301KB, v23: 207KB). Indicates significantly less wall staring.
 - **Dark frames**: **0**
-- **GIF**: ![v25](../results/ai33_001_walkthrough_v25/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v25](assets/ai33_001_walkthrough_v25/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -89,7 +89,7 @@ Cascade of failures:
   3. **force_only mode**: When no active three-feature gaze target, camera follows the lerped waypoint base direction. Three-feature gaze can still override with interesting local targets (free gaze between waypoints).
 - **Min frame size**: 300KB (vs 207KB in v23) — less wall content per frame
 - **Dark frames**: **0**
-- **GIF**: ![v24a](../results/ai33_001_walkthrough_v24a/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v24a](assets/ai33_001_walkthrough_v24a/AI33_001_280_walkthrough.gif)
 
 ### v24b — Waypoint Orientations + Constrained Gaze
 - **Resolution**: 640×480 | **Mode**: local (`local_area_ratio=0.3`) | **Frames**: 720
@@ -99,7 +99,7 @@ Cascade of failures:
   - **constrained mode**: Three-feature gaze targets must fall within ±60° (cos>0.5) of the lerped base direction. Targets outside the cone are blocked. When no gaze target found, camera follows the base direction.
 - **Min frame size**: 288KB
 - **Dark frames**: **0**
-- **GIF**: ![v24b](../results/ai33_001_walkthrough_v24b/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v24b](assets/ai33_001_walkthrough_v24b/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -116,7 +116,7 @@ Cascade of failures:
   - Ray range: all objects visible regardless of distance
   - >180° rotation: short-arc SLERP eliminates unnecessary spins
 - **Dark frames**: **0**
-- **GIF**: ![v23](../results/ai33_001_walkthrough_v23/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v23](assets/ai33_001_walkthrough_v23/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -131,7 +131,7 @@ Cascade of failures:
   - White wall staring: void punishment penalises directions with ray misses near wall openings
   - Ping-pong turning: EMA dampens alternating direction selections
 - **Dark frames**: **0**
-- **GIF**: ![v22](../results/ai33_001_walkthrough_v22/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v22](assets/ai33_001_walkthrough_v22/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -153,7 +153,7 @@ Cascade of failures:
   - Raw depth variance: inflated by floor/horizon gradients
   - Semantic weight from obj.name: fragile naming conventions
 - **Dark frames**: **0**
-- **GIF**: ![v21](../results/ai33_001_walkthrough_v21/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v21](assets/ai33_001_walkthrough_v21/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -167,7 +167,7 @@ Cascade of failures:
   3. **Why cheaper**: custom BVH cost ~1.2s to build from extracted mesh data. With ~8,400 rays total, bidirectional `scene.ray_cast` (0.05ms/ray × 2) = 0.84s vs BVH build (1.2s) + BVH rays (0.02ms × 8,400 = 0.17s) = 1.37s.
   4. **Additional benefit**: `scene.ray_cast` includes particles and GN instances automatically (custom BVH required manual extraction).
 - **Dark frames**: **0**
-- **GIF**: ![v20](../results/ai33_001_walkthrough_v20/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v20](assets/ai33_001_walkthrough_v20/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -186,7 +186,7 @@ Cascade of failures:
   - Depth variance: inflated by floor/horizon gradients (half near, half far ≠ interesting)
   - Normal entropy: unit-free, robust to all above cases, captures geometric complexity
 - **Dark frames**: **0**
-- **GIF**: ![v19](../results/ai33_001_walkthrough_v19/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v19](assets/ai33_001_walkthrough_v19/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -203,7 +203,7 @@ Cascade of failures:
   6. **Speed**: `walk_speed_mps` default raised 1.2 → 2.5 m/s.
 - **Gaze cycle**: gaze 3s → forced forward 2s → direction cooldown 6s → new gaze
 - **Dark frames**: **0**
-- **GIF**: ![v18](../results/ai33_001_walkthrough_v18/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v18](assets/ai33_001_walkthrough_v18/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -216,7 +216,7 @@ Cascade of failures:
   2. **360° density gaze**: Replace keyword/volume-filtered `interesting_objects` scan with `_find_density_look_target()`. Every ~2s, casts 64 Fibonacci-sphere rays from camera position, scores each direction by number of distinct objects within a 45° cone, gazes toward highest-density direction. No object metadata required.
 - **Walkable voxels**: 145 (solid: 874) — same floor-level grid as v16
 - **Dark frames**: **0**
-- **GIF**: ![v17](../results/ai33_001_walkthrough_v17/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v17](assets/ai33_001_walkthrough_v17/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -227,7 +227,7 @@ Cascade of failures:
 - **Fine adjustment result**: 0 points nudged — coarse path already clean after floor anchor fix; fine adjustment is a safety net that activates only when coarse path hits a wall
 - **Walkable voxels**: 145 (solid: 874) — correctly detected at floor level
 - **Dark frames**: **0** (previously dark frames: 317KB-632KB)
-- **GIF**: ![v16](../results/ai33_001_walkthrough_v16/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v16](assets/ai33_001_walkthrough_v16/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -238,7 +238,7 @@ Cascade of failures:
 - **Walkable voxels**: 4135 (solid: 18481) — full scene coverage
 - **Dark frames**: **0**
 - **Note**: v15 looks very different from v14 — global mode covers full scene (4135 walkable cells, longer path) vs local mode's 7m radius (231 cells). Frame count difference (720 vs 240) is from longer auto-calculated duration.
-- **GIF**: ![v15](../results/ai33_001_walkthrough_v15/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v15](assets/ai33_001_walkthrough_v15/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -250,7 +250,7 @@ Cascade of failures:
   - Before: grid z=[649.3, 1149.8], solid=256, walkable=256
   - After: grid z=[-0.5, 500.0], solid=1033, walkable=231
 - **Dark frames**: **0** (all 23 fixed, previously-dark frames now 232KB-480KB)
-- **GIF**: ![v14](../results/ai33_001_walkthrough_v14/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v14](assets/ai33_001_walkthrough_v14/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -260,7 +260,7 @@ Cascade of failures:
 - **Changes**: Parity fill — X/Y ray hit pairs mark wall interior voxels solid
 - **Dark frames**: 23 — grid still at wrong Z (z=[649, 1149]), parity fill marked wrong voxels
 - **Dark frame size**: ~9.6KB (black)
-- **GIF**: ![v13](../results/ai33_001_walkthrough_v13/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v13](assets/ai33_001_walkthrough_v13/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -270,7 +270,7 @@ Cascade of failures:
 - **Changes**: Horizontal BVH check — 4-direction rays at eye height reject cells inside thin walls
 - **Dark frames**: 23 — 0 cells rejected (grid floating at mezzanine, walls not in BVH at that height)
 - **Dark frame size**: ~9.6KB (black)
-- **GIF**: ![v12](../results/ai33_001_walkthrough_v12/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v12](assets/ai33_001_walkthrough_v12/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -280,7 +280,7 @@ Cascade of failures:
 - **Changes**: Bidirectional LOS — reverse `scene.ray_cast` in `_los_clear()` catches back-facing wall normals
 - **Dark frames**: 23 — LOS affects path smoothing only, not walkable detection
 - **Dark frame size**: ~9.6KB (black)
-- **GIF**: ![v11](../results/ai33_001_walkthrough_v11/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v11](assets/ai33_001_walkthrough_v11/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -290,7 +290,7 @@ Cascade of failures:
 - **Changes**: Added `render_width` and `render_height` to public API
 - **Dark frames**: 23 — smaller resolution, same bug
 - **Dark frame size**: ~9.6KB (black at 640×480)
-- **GIF**: ![v10](../results/ai33_001_walkthrough_v10/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v10](assets/ai33_001_walkthrough_v10/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -300,7 +300,7 @@ Cascade of failures:
 - **Changes**: Reverted v8 experiment
 - **Dark frames**: 23
 - **Dark frame size**: ~30KB (black)
-- **GIF**: ![v9](../results/ai33_001_walkthrough_v9/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v9](assets/ai33_001_walkthrough_v9/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -309,7 +309,7 @@ Cascade of failures:
 - **Timing**: ~700s total
 - **Changes**: Different path seed / walkable detection experiment
 - **Dark frames**: Partial — some frames lit (868KB) by chance (path avoided those walls), underlying bug not fixed
-- **GIF**: ![v8](../results/ai33_001_walkthrough_v8/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v8](assets/ai33_001_walkthrough_v8/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -318,7 +318,7 @@ Cascade of failures:
 - **Timing**: ~700s total
 - **Changes**: Additional path snapping
 - **Dark frames**: 23 | **Dark frame size**: ~30KB
-- **GIF**: ![v7](../results/ai33_001_walkthrough_v7/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v7](assets/ai33_001_walkthrough_v7/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -327,7 +327,7 @@ Cascade of failures:
 - **Timing**: ~700s total
 - **Changes**: Path constraint improvements
 - **Dark frames**: 23 | **Dark frame size**: ~30KB
-- **GIF**: ![v6](../results/ai33_001_walkthrough_v6/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v6](assets/ai33_001_walkthrough_v6/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -336,7 +336,7 @@ Cascade of failures:
 - **Timing**: ~700s total
 - **Changes**: Walkable voxel detection adjustments
 - **Dark frames**: 23 | **Dark frame size**: ~30KB
-- **GIF**: ![v5](../results/ai33_001_walkthrough_v5/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v5](assets/ai33_001_walkthrough_v5/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -345,7 +345,7 @@ Cascade of failures:
 - **Timing**: ~700s total
 - **Changes**: clip_start = 1mm (eliminate near-clip wall artifacts)
 - **Dark frames**: 23 | **Dark frame size**: ~30KB
-- **GIF**: ![v4](../results/ai33_001_walkthrough_v4/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v4](assets/ai33_001_walkthrough_v4/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -354,7 +354,7 @@ Cascade of failures:
 - **Timing**: ~700s total
 - **Changes**: Path smoothing adjustments
 - **Dark frames**: 23 | **Dark frame size**: ~31KB
-- **GIF**: ![v3](../results/ai33_001_walkthrough_v3/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v3](assets/ai33_001_walkthrough_v3/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -363,7 +363,7 @@ Cascade of failures:
 - **Timing**: ~700s total
 - **Changes**: Minor path planning adjustments
 - **Dark frames**: 23 | **Dark frame size**: ~31KB
-- **GIF**: ![v2](../results/ai33_001_walkthrough_v2/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v2](assets/ai33_001_walkthrough_v2/AI33_001_280_walkthrough.gif)
 
 ---
 
@@ -372,7 +372,7 @@ Cascade of failures:
 - **Timing**: ~700s total
 - **Changes**: Initial walkthrough render
 - **Dark frames**: 23 (frames 89-96, 119-126, 216-222) | **Dark frame size**: ~30KB
-- **GIF**: ![v1](../results/ai33_001_walkthrough/AI33_001_280_walkthrough.gif)
+- **GIF**: ![v1](assets/ai33_001_walkthrough/AI33_001_280_walkthrough.gif)
 
 ---
 

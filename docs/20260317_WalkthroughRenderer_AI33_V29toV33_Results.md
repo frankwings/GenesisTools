@@ -43,17 +43,17 @@
 
 **Screenshots** (Blender viewport, debug viz):
 
-![v33 1](../results/ai33_001_walkthrough_v33/AI33_001_280_walkthrough.1.png)
-![v33 2](../results/ai33_001_walkthrough_v33/AI33_001_280_walkthrough.2.png)
-![v33 3](../results/ai33_001_walkthrough_v33/AI33_001_280_walkthrough.3.png)
-![v33 4](../results/ai33_001_walkthrough_v33/AI33_001_280_walkthrough.4.png)
-![v33 5](../results/ai33_001_walkthrough_v33/AI33_001_280_walkthrough.5.png)
-![v33 6](../results/ai33_001_walkthrough_v33/AI33_001_280_walkthrough.6.png)
-![v33 7](../results/ai33_001_walkthrough_v33/AI33_001_280_walkthrough.7.png)
+![v33 1](assets/ai33_001_walkthrough_v33/AI33_001_280_walkthrough.1.png)
+![v33 2](assets/ai33_001_walkthrough_v33/AI33_001_280_walkthrough.2.png)
+![v33 3](assets/ai33_001_walkthrough_v33/AI33_001_280_walkthrough.3.png)
+![v33 4](assets/ai33_001_walkthrough_v33/AI33_001_280_walkthrough.4.png)
+![v33 5](assets/ai33_001_walkthrough_v33/AI33_001_280_walkthrough.5.png)
+![v33 6](assets/ai33_001_walkthrough_v33/AI33_001_280_walkthrough.6.png)
+![v33 7](assets/ai33_001_walkthrough_v33/AI33_001_280_walkthrough.7.png)
 
 **GIF**:
 
-![v33](../results/ai33_001_walkthrough_v33/AI33_001_280_walkthrough.gif)
+![v33](assets/ai33_001_walkthrough_v33/AI33_001_280_walkthrough.gif)
 
 ## Files
 
@@ -89,7 +89,7 @@ No walkable or path planning changes. Fix only.
 
 **GIF** (debug spheres and wireframes now visible in render):
 
-![v32](../results/ai33_001_walkthrough_v32/AI33_001_280_walkthrough.gif)
+![v32](assets/ai33_001_walkthrough_v32/AI33_001_280_walkthrough.gif)
 
 ## Files
 
@@ -141,16 +141,16 @@ Debug viz build time: **minutes → milliseconds** for large grids.
 
 **Screenshots** (10 viewport captures — full voxel grid inspection):
 
-![v31 1](../results/ai33_001_walkthrough_v31/AI33_001_280_walkthrough1.png)
-![v31 2](../results/ai33_001_walkthrough_v31/AI33_001_280_walkthrough2.png)
-![v31 3](../results/ai33_001_walkthrough_v31/AI33_001_280_walkthrough3.png)
-![v31 4](../results/ai33_001_walkthrough_v31/AI33_001_280_walkthrough4.png)
-![v31 5](../results/ai33_001_walkthrough_v31/AI33_001_280_walkthrough5.png)
-![v31 6](../results/ai33_001_walkthrough_v31/AI33_001_280_walkthrough6.png)
-![v31 7](../results/ai33_001_walkthrough_v31/AI33_001_280_walkthrough7.png)
-![v31 8](../results/ai33_001_walkthrough_v31/AI33_001_280_walkthrough8.png)
-![v31 9](../results/ai33_001_walkthrough_v31/AI33_001_280_walkthrough9.png)
-![v31 10](../results/ai33_001_walkthrough_v31/AI33_001_280_walkthrough10.png)
+![v31 1](assets/ai33_001_walkthrough_v31/AI33_001_280_walkthrough1.png)
+![v31 2](assets/ai33_001_walkthrough_v31/AI33_001_280_walkthrough2.png)
+![v31 3](assets/ai33_001_walkthrough_v31/AI33_001_280_walkthrough3.png)
+![v31 4](assets/ai33_001_walkthrough_v31/AI33_001_280_walkthrough4.png)
+![v31 5](assets/ai33_001_walkthrough_v31/AI33_001_280_walkthrough5.png)
+![v31 6](assets/ai33_001_walkthrough_v31/AI33_001_280_walkthrough6.png)
+![v31 7](assets/ai33_001_walkthrough_v31/AI33_001_280_walkthrough7.png)
+![v31 8](assets/ai33_001_walkthrough_v31/AI33_001_280_walkthrough8.png)
+![v31 9](assets/ai33_001_walkthrough_v31/AI33_001_280_walkthrough9.png)
+![v31 10](assets/ai33_001_walkthrough_v31/AI33_001_280_walkthrough10.png)
 
 ## Files
 
@@ -195,15 +195,15 @@ The `_unexpected_red` screenshots capture a debugging session where solid voxels
 
 **Screenshots**:
 
-![v30 1](../results/ai33_001_walkthrough_v30/AI33_001_280_walkthrough.png)
-![v30 2](../results/ai33_001_walkthrough_v30/AI33_001_280_walkthrough1.png)
-![v30 3](../results/ai33_001_walkthrough_v30/AI33_001_280_walkthrough2.png)
-![v30 4](../results/ai33_001_walkthrough_v30/AI33_001_280_walkthrough3.png)
+![v30 1](assets/ai33_001_walkthrough_v30/AI33_001_280_walkthrough.png)
+![v30 2](assets/ai33_001_walkthrough_v30/AI33_001_280_walkthrough1.png)
+![v30 3](assets/ai33_001_walkthrough_v30/AI33_001_280_walkthrough2.png)
+![v30 4](assets/ai33_001_walkthrough_v30/AI33_001_280_walkthrough3.png)
 
 **Unexpected red investigation**:
 
-![v30 unexpected red](../results/ai33_001_walkthrough_v30/AI33_001_280_walkthrough_unexpected_red.png)
-![v30 unexpected red 2](../results/ai33_001_walkthrough_v30/AI33_001_280_walkthrough_unexpected_red1.png)
+![v30 unexpected red](assets/ai33_001_walkthrough_v30/AI33_001_280_walkthrough_unexpected_red.png)
+![v30 unexpected red 2](assets/ai33_001_walkthrough_v30/AI33_001_280_walkthrough_unexpected_red1.png)
 
 ## Files
 
@@ -239,12 +239,12 @@ The `_unexpected_red` screenshots capture a debugging session where solid voxels
 
 **GIF**:
 
-![v29](../results/ai33_001_walkthrough_v29/walkthrough_v29.gif)
+![v29](assets/ai33_001_walkthrough_v29/walkthrough_v29.gif)
 
 **Screenshots**:
 
-![v29 1](../results/ai33_001_walkthrough_v29/AI33_001_280_walkthrough.png)
-![v29 2](../results/ai33_001_walkthrough_v29/AI33_001_280_walkthrough1.png)
+![v29 1](assets/ai33_001_walkthrough_v29/AI33_001_280_walkthrough.png)
+![v29 2](assets/ai33_001_walkthrough_v29/AI33_001_280_walkthrough1.png)
 
 ## Files
 

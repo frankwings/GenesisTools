@@ -8,3 +8,7 @@ build/
 venv/
 *.egg
 .DS_Store
+
+# Results (large .blend files + raw frames)
+results/
+docs/assets/ai33_001_walkthrough_v29b/walkthrough_v29b.gif

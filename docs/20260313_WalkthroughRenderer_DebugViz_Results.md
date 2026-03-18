@@ -21,7 +21,7 @@
 
 **GIF** (all 720 frames):
 
-![v29b](../results/ai33_001_walkthrough_v29b/walkthrough_v29b.gif)
+![v29b](assets/ai33_001_walkthrough_v29b/walkthrough_v29b.gif)
 
 ## Files
 
@@ -55,7 +55,7 @@ Show the entire voxel grid at a glance:
 
 **GIF**:
 
-![v29](../results/ai33_001_walkthrough_v29/walkthrough_v29.gif)
+![v29](assets/ai33_001_walkthrough_v29/walkthrough_v29.gif)
 
 ## Red Sphere Placement
 
@@ -90,7 +90,7 @@ Re-render the v28 walkthrough with a 360° equirectangular camera so the output 
 
 **GIF** (every 3rd frame, 0.5× scale):
 
-![v28b](../results/ai33_001_walkthrough_v28b/walkthrough_v28b.gif)
+![v28b](assets/ai33_001_walkthrough_v28b/walkthrough_v28b.gif)
 
 ## Notes
 
@@ -139,7 +139,7 @@ All debug objects must be visible in the .blend viewport AND not cause dark fram
 | Voxel sphere Z | ~170.9 BU |
 | Path Z | ~170 BU |
 
-**GIF**: ![v28](../results/ai33_001_walkthrough_v28/AI33_001_280_walkthrough.gif)
+**GIF**: ![v28](assets/ai33_001_walkthrough_v28/AI33_001_280_walkthrough.gif)
 
 ## Approach: clip_start > debug sphere diameter
 
