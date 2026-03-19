@@ -112,7 +112,14 @@ Re-render the v28 walkthrough with a 360° equirectangular camera so the output 
 
 ## Goal
 
-Overlay voxel grid and waypoints on the walkthrough `.blend` to inspect pathfinding.
+Overlay voxel grid, waypoints, and per-frame camera pose on the walkthrough `.blend` to inspect pathfinding and camera orientation.
+
+## Changes vs v26
+
+- **Voxel spheres (blue)**: walkable voxel grid overlaid on scene
+- **Waypoint spheres (green)**: farthest-point sampled waypoints
+- **Path line (pink)**: camera path through voxel grid
+- **Camera pose arrows (RGB triplets)**: per-position orientation indicator — red=right, green=up, blue=forward. Added in v27 to visualise camera heading at each point along the path.
 
 ## Result
 
@@ -132,6 +139,7 @@ Overlay voxel grid and waypoints on the walkthrough `.blend` to inspect pathfind
 | Voxel spheres (blue) | Floor level via `z_correction` | Too low — not at camera height |
 | Waypoint spheres (green) | World coords from grid indices | Bug: grid index → wrong world coords |
 | Path line (pink) | Floor level via `z_correction` | Misaligned with camera trajectory |
+| Camera pose arrows (RGB) | Floor level | Too low — fixed in v28 |
 
 All issues fixed in v28 (debug objects lifted to camera height, waypoint coords corrected).
 
