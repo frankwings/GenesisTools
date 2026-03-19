@@ -106,6 +106,42 @@ Re-render the v28 walkthrough with a 360° equirectangular camera so the output 
 
 ---
 
+# v27 — First Debug Viz Pass (Floor Level) (2026-03-14)
+
+**Base**: v26 (no-loop tour) → v27 adds first debug visualization geometry.
+
+## Goal
+
+Overlay voxel grid and waypoints on the walkthrough `.blend` to inspect pathfinding.
+
+## Result
+
+| Metric | Value |
+|--------|-------|
+| Resolution | 640×480 |
+| Mode | local (`local_area_ratio=0.3`) |
+| Frames | 720 |
+| Dark frames | 0 |
+
+**GIF**: ![v27](assets/ai33_001_walkthrough_v27/AI33_001_280_walkthrough.gif)
+
+## Debug Geometry (v27)
+
+| Object | Z placement | Issue |
+|--------|-------------|-------|
+| Voxel spheres (blue) | Floor level via `z_correction` | Too low — not at camera height |
+| Waypoint spheres (green) | World coords from grid indices | Bug: grid index → wrong world coords |
+| Path line (pink) | Floor level via `z_correction` | Misaligned with camera trajectory |
+
+All issues fixed in v28 (debug objects lifted to camera height, waypoint coords corrected).
+
+## Files
+
+- **GIF**: `results/ai33_001_walkthrough_v27/AI33_001_280_walkthrough.gif`
+- **.blend**: `results/ai33_001_walkthrough_v27/AI33_001_280_walkthrough.blend`
+
+---
+
 # v28 — Debug Viz at Camera Height (2026-03-14)
 
 **Base**: v27 (debug viz at floor level) → v28 (debug viz at camera height)

@@ -1,4 +1,4 @@
-# AI33_001 Walkthrough Dark Frame Fix — v1 to v26
+# AI33_001 Walkthrough Dark Frame Fix — v1 to v27
 
 **Date**: 2026-03-12
 **Scene**: `AI33_001_280.blend` (cm-scale scene, unit_scale=0.01, 1 BU = 1 cm)
@@ -24,6 +24,7 @@ Cascade of failures:
 
 | Version | Resolution | Mode | Frames | Dark Frames | Render Time | Key Change | Fixed? |
 |---------|-----------|------|--------|-------------|-------------|------------|--------|
+| v27 | 640×480 | local | 720 | 0 | TBD | First debug viz pass (floor-level spheres) | Yes |
 | v26 | 640×480 | local | 720 | 0 | ~624s | No-loop tour (visit each waypoint once) + 8wp constrained | Yes |
 | **v25** | **640×480** | **local** | **720** | **0** | **~680s** | **8 waypoints + constrained gaze (min frame 417KB)** | **Yes** |
 | v24a | 640×480 | local | 720 | 0 | ~606s | Waypoint mutual-visibility orientations (force_only, 20 wp) | Yes |
@@ -63,7 +64,7 @@ Cascade of failures:
   3. **Same constrained gaze as v25**: Three-feature gaze restricted to ±60° of lerped waypoint base direction.
 - **Motivation**: User observed a "jump" in v25 where the camera teleported between distant waypoints due to loop closure. With only 8 waypoints, the greedy TSP tour's return segment often connected distant endpoints, causing a discontinuous path.
 - **Dark frames**: 0
-- **GIF**: TBD
+- **GIF**: ![v26](assets/ai33_001_walkthrough_v26/AI33_001_280_walkthrough.gif)
 
 ---
 
