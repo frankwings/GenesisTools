@@ -10,7 +10,7 @@ Produces four figures saved to results/active_contour/:
 Usage
 -----
     cd GenesisTools
-    python genesis_tools/scripts/visualize_active_contour.py
+    python genesis_tools/active_contour/visualize.py
 """
 
 from __future__ import annotations
@@ -26,14 +26,14 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers 3D projection)
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 # Allow running from repo root without installing the package
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from genesis_tools.active_contour.snake_3d import (
     Snake3D,
     sample_mesh_surface,
 )
 
-OUT_DIR = Path(__file__).resolve().parents[2] / "results" / "active_contour"
+OUT_DIR = Path(__file__).resolve().parents[3] / "results" / "active_contour"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
