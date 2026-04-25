@@ -178,7 +178,7 @@ def figure_protrusion() -> None:
     print("[Fig 3] Protrusion bypass (high α vs low α) …")
     # Use same geometry + parameters as the passing unit tests
     v, f = _cube_with_spike(spike_h=0.20, spike_b=0.12)
-    pts = sample_mesh_surface([(v, f)], sampling_resolution=0.10)
+    pts = sample_mesh_surface([(v, f)], sampling_resolution=0.05)
 
     configs = [
         ("High α = 0.85  β = 0.15  dt = 0.04\n(spike bypassed)",

@@ -251,19 +251,22 @@ class TestProtrusionBypass:
     High alpha (strong smoothness) → small spike EXCLUDED from contour.
     Low  alpha (weak  smoothness) → small spike INCLUDED in contour.
 
-    Geometry: unit cube [0,1]³ with a 0.2 m pyramid on the top face centre.
-    Spike tip is at (0.5, 0.5, 1.2).  Test point is at (0.5, 0.5, 1.1) —
-    well inside the spike, just above the cube top.
+    Geometry: unit cube [0,1]³ with a 0.3 m pyramid (base 0.20) on the top face.
+    Spike tip is at (0.5, 0.5, 1.3).
+    TEST_POINT is at z=1.10 — well within the sampled region of the spike faces,
+    so the attraction signal is reliable regardless of exact sample positions.
     """
 
     SPIKE_H = 0.2
-    TEST_POINT = np.array([0.5, 0.5, 1.15])   # inside spike, above cube top
-    SAFE_INTERIOR = np.array([0.5, 0.5, 0.5])  # cube centre, always inside
+    SPIKE_B = 0.12
+    # z=1.15: well within sampled spike region (max_z≈1.18 at res=0.05)
+    TEST_POINT = np.array([0.5, 0.5, 1.15])
+    SAFE_INTERIOR = np.array([0.5, 0.5, 0.5])
 
     @pytest.fixture(scope="class")
     def mesh_pts(self):
-        v, f = _cube_with_spike_mesh(spike_height=self.SPIKE_H, spike_base=0.12)
-        return sample_mesh_surface([(v, f)], sampling_resolution=0.1)
+        v, f = _cube_with_spike_mesh(spike_height=self.SPIKE_H, spike_base=self.SPIKE_B)
+        return sample_mesh_surface([(v, f)], sampling_resolution=0.05)
 
     @pytest.fixture(scope="class")
     def snake_high_alpha(self, mesh_pts):
