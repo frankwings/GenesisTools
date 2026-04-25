@@ -44,7 +44,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from genesis_tools.active_contour.snake_3d import Snake3D, sample_mesh_surface
 
-EXTRACT_SCRIPT = Path(__file__).parent / "extract_scene_meshes.py"
+EXTRACT_SCRIPT  = Path(__file__).parent / "extract_scene_meshes.py"
+OVERLAY_SCRIPT  = Path(__file__).parent / "overlay_snake_in_blend.py"
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +88,47 @@ def extract_meshes_from_blend(
             return result
 
     raise RuntimeError(f"No MESH_EXTRACT_RESULT in Blender output:\n{stdout[-3000:]}")
+
+
+def _run_blender_overlay(
+    blend_path: Path,
+    snake_npz: Path,
+    output_blend: Path,
+    render_dir: Path,
+    engine: str = "WORKBENCH",
+    blender_command: str = "blender",
+) -> dict:
+    """Call Blender to add the snake mesh as a transparent overlay and render views."""
+    cmd = [
+        blender_command,
+        "--background", str(blend_path),
+        "--python", str(OVERLAY_SCRIPT),
+        "--",
+        "--snake-npz", str(snake_npz),
+        "--output-blend", str(output_blend),
+        "--render-dir", str(render_dir),
+        "--engine", engine,
+    ]
+    env = os.environ.copy()
+    _extra_lib = "/tmp/deb_extract/usr/lib/x86_64-linux-gnu"
+    if os.path.isdir(_extra_lib):
+        env["LD_LIBRARY_PATH"] = _extra_lib + ":" + env.get("LD_LIBRARY_PATH", "")
+
+    print(f"[contour] Rendering Blender overlay views …")
+    t0 = time.time()
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    stdout = proc.stdout + proc.stderr
+
+    prefix = "OVERLAY_RESULT:"
+    for line in reversed(stdout.splitlines()):
+        if line.startswith(prefix):
+            result = json.loads(line[len(prefix):])
+            print(f"  overlay done in {time.time()-t0:.1f}s — "
+                  f"{len(result.get('renders', []))} renders")
+            return result
+
+    print(f"  [warn] No OVERLAY_RESULT in Blender output — skipping overlay")
+    return {"renders": []}
 
 
 # ---------------------------------------------------------------------------
@@ -322,13 +364,30 @@ def fit_scene_active_contour(
     fit_time = time.time() - t0
     print(f"  converged in {snake.iterations_run} iterations ({fit_time:.1f}s)")
 
-    # --- 5. Figures ---
+    # --- 5. Save snake mesh for Blender overlay ---
+    snake_npz = output_dir / "snake_mesh.npz"
+    np.savez_compressed(
+        str(snake_npz),
+        vertices=snake.vertices.astype(np.float32),
+        faces=snake.faces.astype(np.int32),
+    )
+    print(f"[contour] Snake mesh saved → {snake_npz}")
+
+    # --- 6. Figures ---
     p1 = figure_pointcloud(pts, output_dir, scene_name)
     p2 = figure_contour(pts, snake, init_verts, output_dir, scene_name)
     p3 = figure_slices(pts, snake, output_dir, scene_name)
     p4 = figure_convergence(snake, output_dir, scene_name)
 
-    # --- 6. Summary ---
+    # --- 7. Blender overlay ---
+    overlay_blend = output_dir / f"{scene_name}_with_contour.blend"
+    render_dir = output_dir / "renders"
+    overlay_result = _run_blender_overlay(
+        blend_path, snake_npz, overlay_blend, render_dir,
+        blender_command=blender_command,
+    )
+
+    # --- 8. Summary ---
     summary = {
         "scene": scene_name,
         "blend_path": str(blend_path),
@@ -342,6 +401,8 @@ def fit_scene_active_contour(
         "snake_faces": len(snake.faces),
         "fit_seconds": round(fit_time, 1),
         "figures": [str(p1), str(p2), str(p3), str(p4)],
+        "overlay_blend": str(overlay_blend),
+        "renders": overlay_result.get("renders", []),
     }
     summary_path = output_dir / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=2))
@@ -361,6 +422,8 @@ def parse_args():
     p.add_argument("--subdivision-levels", type=int, default=2)
     p.add_argument("--max-tris", type=int, default=500_000)
     p.add_argument("--blender", default="blender")
+    p.add_argument("--render-engine", default="WORKBENCH",
+                   choices=["WORKBENCH", "EEVEE", "CYCLES"])
     p.add_argument("--reuse-npz", action="store_true",
                    help="Skip Blender extraction if meshes.npz already exists")
     return p.parse_args()
