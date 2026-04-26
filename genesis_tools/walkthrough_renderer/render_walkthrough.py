@@ -2460,20 +2460,20 @@ def main():
 
         # ---- Active contour snake (optional) ----
         snake_data = _load_snake_data(config)
+        use_snake_grid = snake_data is not None and snake_data["centers"] is not None
 
-        # ---- Scene bounds — density-field smart bounds (skipped in snake-grid mode) ----
-        if snake_data and snake_data["centers"] is not None:
-            scene_bounds = None   # replaced by snake bounds inside the snake branch
-        else:
+        # ---- Scene bounds — density-field smart bounds ----
+        # Needed for LOCAL mode (span_x/span_y → radius) and GLOBAL mode (grid extent).
+        # Skipped when snake grid is used — the snake provides its own bounds.
+        if not use_snake_grid:
             t0 = time.time()
             scene_bounds = _compute_scene_density_bounds(config)
             timing["density_bounds_s"] = round(time.time() - t0, 1)
             print(f"[Timing] density bounds: {timing['density_bounds_s']}s")
-        if scene_bounds is not None:
             span_x = scene_bounds[2] - scene_bounds[0]
             span_y = scene_bounds[3] - scene_bounds[1]
         else:
-            span_x = span_y = None   # not needed in snake-grid mode
+            scene_bounds = span_x = span_y = None
 
         # ---- Depsgraph (needed by both modes for camera animation LOS) ----
         t0 = time.time()
@@ -2482,36 +2482,9 @@ def main():
         print(f"[Timing] depsgraph eval: {timing['depsgraph_s']}s")
 
         # ================================================================
-        # SNAKE VOXELGRID MODE  (voxel_grid_npz supplied)
+        # LOCAL MODE  (local_area_ratio set, snake grid not in use)
         # ================================================================
-        if snake_data and snake_data["centers"] is not None:
-            t0 = time.time()
-            center = _find_local_center(config)
-            solid, nx, ny, nz, _res, snake_bounds = _build_voxel_grid_from_snake(snake_data)
-            timing["voxel_grid_s"] = round(time.time() - t0, 1)
-            print(f"[Timing] snake voxel grid: {timing['voxel_grid_s']}s")
-
-            t0 = time.time()
-            cam_ix = max(0, min(nx-1, int((center.x - snake_bounds[0]) / _res)))
-            cam_iy = max(0, min(ny-1, int((center.y - snake_bounds[1]) / _res)))
-            cam_iz = max(0, min(nz-1, int((center.z - snake_bounds[4]) / _res)))
-            camera_ijk_snake = (cam_ix, cam_iy, cam_iz)
-            print(f"[WalkableV2] Snake camera voxel: {camera_ijk_snake}")
-            candidates_v2 = _flood_fill_free_from_camera(solid, camera_ijk_snake, nx, ny, nz)
-            walkable = _check_walkable_v2(candidates_v2, snake_bounds, config)
-            camera_seed = min(walkable,
-                              key=lambda c: (c[0]-cam_ix)**2
-                                          + (c[1]-cam_iy)**2
-                                          + (c[2]-cam_iz)**2) if walkable else camera_ijk_snake
-            actual_floor_z = None
-            config["_candidates_v2"] = candidates_v2
-            timing["walkable_s"] = round(time.time() - t0, 1)
-            bounds_for_path = snake_bounds
-
-        # ================================================================
-        # LOCAL MODE  (local_area_ratio set)
-        # ================================================================
-        elif local_area_ratio:
+        if local_area_ratio and not use_snake_grid:
             # Radius = ratio × min(span_x, span_y) — uses scene-relative sizing,
             # independent of unit system (cm vs m vs inches).
             scene_char_bu = min(span_x, span_y)
@@ -2570,31 +2543,34 @@ def main():
             bounds_for_path = local_bounds
 
         # ================================================================
-        # GLOBAL MODE  (full scene.ray_cast)
+        # GLOBAL MODE  (full scene.ray_cast, or snake grid as drop-in replacement)
         # ================================================================
         else:
             t0 = time.time()
-            solid, nx, ny, nz, _res = _build_voxel_grid(config, scene_bounds)
+            if use_snake_grid:
+                solid, nx, ny, nz, _res, bounds_for_path = _build_voxel_grid_from_snake(snake_data)
+                print(f"[Timing] snake voxel grid: {time.time() - t0:.1f}s")
+            else:
+                solid, nx, ny, nz, _res = _build_voxel_grid(config, scene_bounds)
+                bounds_for_path = scene_bounds
+                print(f"[Timing] global voxel grid: {time.time() - t0:.1f}s")
             timing["voxel_grid_s"] = round(time.time() - t0, 1)
-            print(f"[Timing] global voxel grid: {timing['voxel_grid_s']}s")
 
             t0 = time.time()
             center = _find_local_center(config)
-            cam_ix = max(0, min(nx-1, int((center.x - scene_bounds[0]) / _res)))
-            cam_iy = max(0, min(ny-1, int((center.y - scene_bounds[1]) / _res)))
-            cam_iz = max(0, min(nz-1, int((center.z - scene_bounds[4]) / _res)))
+            cam_ix = max(0, min(nx-1, int((center.x - bounds_for_path[0]) / _res)))
+            cam_iy = max(0, min(ny-1, int((center.y - bounds_for_path[1]) / _res)))
+            cam_iz = max(0, min(nz-1, int((center.z - bounds_for_path[4]) / _res)))
             camera_ijk_global = (cam_ix, cam_iy, cam_iz)
             print(f"[WalkableV2] Global camera voxel: {camera_ijk_global}")
             candidates_v2 = _flood_fill_free_from_camera(solid, camera_ijk_global, nx, ny, nz)
-            walkable = _check_walkable_v2(candidates_v2, scene_bounds, config)
+            walkable = _check_walkable_v2(candidates_v2, bounds_for_path, config)
             camera_seed = min(walkable,
                               key=lambda c: (c[0]-cam_ix)**2
                                           + (c[1]-cam_iy)**2
                                           + (c[2]-cam_iz)**2) if walkable else camera_ijk_global
             config["_candidates_v2"] = candidates_v2
             timing["walkable_s"] = round(time.time() - t0, 1)
-
-            bounds_for_path = scene_bounds
 
         # ================================================================
         # Shared: path planning, camera, render
@@ -2625,13 +2601,13 @@ def main():
         # ---- Level 2: Fine path adjustment ----
         # Walk the coarse path step-by-step, building small high-res voxel
         # patches to detect thin walls missed by the coarse grid.
-        if local_area_ratio:
+        if local_area_ratio and not use_snake_grid:
             t0_fine = time.time()
             path_points = _fine_adjust_path(path_points, config)
             timing["fine_adjust_s"] = round(time.time() - t0_fine, 1)
             print(f"[Timing] fine path adjustment: {timing['fine_adjust_s']}s")
 
-        # In local mode:
+        # In local mode (not snake grid):
         # 1. Correct path Z for voxel quantisation. The voxel grid uses
         #    iz * res as the floor Z, but the actual floor surface is at
         #    actual_floor_z (from BVH ray cast). Shift all path points by the
@@ -2640,7 +2616,7 @@ def main():
         # 3. Use the original scene camera orientation for frame 1 so it renders
         #    exactly the original camera view; SLERP into path direction after.
         initial_rotation_quat = None
-        if local_area_ratio and camera_seed is not None:
+        if local_area_ratio and not use_snake_grid and camera_seed is not None:
             cam_h_bu = config["camera_height"] / unit_scale
             res = config.get("_effective_grid_resolution", config["grid_resolution"])
 
@@ -2794,8 +2770,8 @@ def main():
             "solid_voxels_count":        len(solid),
             "interesting_objects_count": 0,  # replaced by density-based gaze
             "timing":                    timing,
-            "mode":                      "local" if local_area_ratio else "global",
-            "snake_used":                snake_data is not None,
+            "mode":                      "local" if (local_area_ratio and not use_snake_grid) else "global",
+            "snake_used":                use_snake_grid,
         }))
 
     except Exception as exc:
