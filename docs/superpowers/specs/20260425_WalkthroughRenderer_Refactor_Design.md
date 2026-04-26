@@ -12,9 +12,9 @@ Refactor `render_walkthrough.py` (currently ~2800 lines, monolithic Blender head
 1. Each pipeline step is an **importable Python module** with a clean function API
 2. Each step saves its output to an **intermediate file** (.npz / .json)
 3. A **visualization CLI** reads any combination of step outputs and adds debug geometry to a .blend
-4. A **walkthrough CLI** orchestrates the full pipeline with `--from-step` / `--to-step` support
+4. A **walkthrough CLI** orchestrates the full pipeline; skips steps whose output files already exist in `--output-dir` (implicit resume — delete a file to re-run from that step)
 5. All steps except rendering run via **pip bpy 4.5** (`/home/kingy/blender/4.5/python/bin/python3.11`) — no `blender --background` needed
-6. Rendering (`--render` flag) still uses `blender --background` via `BlenderRunner`
+6. Rendering is a separate optional step using `blender --background` via `BlenderRunner`
 
 ---
 
@@ -39,11 +39,12 @@ genesis_tools/walkthrough_renderer/
 ├── visualize.py                 # visualization — importable visualize() + CLI
 ├── pipeline/
 │   ├── __init__.py
-│   ├── voxel_grid.py            # Step 1: ray_cast → solid voxel grid
+│   ├── voxel_grid.py            # Step 1: ray_cast → solid voxel grid (AABB local/global or snake)
 │   ├── walkable.py              # Step 2: flood fill → reachable + walkable cells
 │   ├── path_plan.py             # Step 3: waypoints + smooth path (pure Python)
 │   ├── camera_orient.py         # Step 4: waypoint gaze orientations (needs bpy LOS)
-│   └── camera_animate.py        # Step 5: write camera keyframes into .blend
+│   ├── camera_animate.py        # Step 5: write camera keyframes into .blend (pip bpy, no render)
+│   └── render.py                # Step 6 (optional): render frames via blender --background
 ├── viz/
 │   ├── __init__.py
 │   ├── primitives.py            # shared Blender geometry builders
@@ -108,16 +109,23 @@ bounds       (6,) float64    — reference bounds (same as voxel_grid)
 ## Module APIs
 
 ### `pipeline/voxel_grid.py`
+
+Three build modes, selected by config keys:
+- **Snake** (`config["snake_npz"]` set): uses pre-computed VoxelGrid centers from snake contour
+- **Local AABB** (`config["local_area_ratio"]` set): bidirectional ray_cast in a region around the camera
+- **Global AABB** (neither): tri-axial sweep over full scene bounds
+
 ```python
 @dataclass
 class VoxelGridData:
     solid: np.ndarray        # (N, 3) int32
-    candidates: np.ndarray   # (K, 3) int32
+    candidates: np.ndarray   # (K, 3) int32 — flood-fill reachable from camera
     nx: int; ny: int; nz: int
     res: float
     bounds: tuple            # (min_x, min_y, max_x, max_y, min_z, max_z)
     unit_scale: float
-    hits: np.ndarray | None  # (H, 3) float64 — ray hit positions
+    mode: str                # "snake" | "local" | "global"
+    hits: np.ndarray | None  # (H, 3) float64 — ray hit positions (debug only)
 
 def build(blend_path: str, config: dict) -> VoxelGridData
 def save(data: VoxelGridData, path: str) -> None
@@ -164,11 +172,21 @@ def load(path: str) -> OrientData
 ```
 
 ### `pipeline/camera_animate.py`
+Writes camera keyframes into a copy of the input `.blend` and saves it. Does **not** render.
+
 ```python
 def build(blend_path: str, path: PathData, orient: OrientData,
           config: dict, output_blend: str) -> str
 ```
-Returns path to saved .blend with camera animation. Rendering (if `config["render"]`) invoked via `BlenderRunner`.
+Returns path to the saved `.blend` containing camera keyframes.
+
+### `pipeline/render.py`
+Invokes `blender --background` via `BlenderRunner` to render the animated `.blend` to frames.
+
+```python
+def build(blend_path: str, config: dict, output_dir: str) -> list[str]
+```
+Returns list of rendered frame paths. Uses `blender --background` (needs real Blender, not pip bpy).
 
 ---
 
@@ -176,11 +194,9 @@ Returns path to saved .blend with camera animation. Rendering (if `config["rende
 
 ```python
 # walkthrough.py
-STEPS = ["voxel_grid", "walkable", "path", "camera_orient", "camera_animate"]
+STEPS = ["voxel_grid", "walkable", "path", "camera_orient", "camera_animate", "render"]
 
-def run(blend_path: str, config: dict, output_dir: str,
-        from_step: str | None = None,
-        to_step: str | None = None) -> dict
+def run(blend_path: str, config: dict, output_dir: str, render: bool = False) -> dict
 ```
 
 ```bash
@@ -188,14 +204,18 @@ python -m genesis_tools.walkthrough_renderer.walkthrough \
     --blend scene.blend \
     --config config.json \
     --output-dir out/ \
-    [--from-step walkable] \
-    [--to-step path] \
     [--render]
 ```
 
-Steps run in order: `voxel_grid → walkable → path → camera_orient → camera_animate`.  
-`--from-step X` skips all steps before X, loading their `.npz` from `--output-dir`.  
-`--to-step X` stops after X (inclusive).
+Steps run in order: `voxel_grid → walkable → path → camera_orient → camera_animate → (render)`.
+
+**Implicit resume**: the orchestrator checks for each step's output file in `--output-dir`. If the file already exists, that step is skipped and its data is loaded from disk. To re-run from a step, delete that file and all subsequent output files:
+
+```bash
+# Re-run from path onwards:
+rm out/path.npz out/wp_schedule.json out/scene_walkthrough.blend
+python -m genesis_tools.walkthrough_renderer.walkthrough --blend scene.blend ...
+```
 
 ---
 
