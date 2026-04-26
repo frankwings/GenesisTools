@@ -67,6 +67,8 @@ def render_scene_walkthrough(
     debug_viz: bool = False,
     panoramic: bool = False,
     render_samples: int = 32,
+    snake_npz: Union[str, Path] = None,
+    voxel_grid_npz: Union[str, Path] = None,
     blender_command: str = "blender",
 ) -> dict:
     """Render a patrol-style walkthrough GIF inside a Blender scene.
@@ -161,6 +163,8 @@ def render_scene_walkthrough(
         "debug_viz": debug_viz,
         "panoramic": panoramic,
         "render_samples": render_samples,
+        "snake_npz": str(snake_npz) if snake_npz else None,
+        "voxel_grid_npz": str(voxel_grid_npz) if voxel_grid_npz else None,
     }
 
     # Windows fix: NamedTemporaryFile stays open until explicitly closed;

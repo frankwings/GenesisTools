@@ -35,6 +35,7 @@ import time
 from collections import deque
 from pathlib import Path
 
+import numpy as np
 import bpy
 from mathutils import Vector
 
@@ -285,6 +286,122 @@ def _get_unit_scale():
     if scale <= 0:
         scale = 1.0
     return scale
+
+
+# ---------------------------------------------------------------------------
+# Active Contour (Snake) boundary integration
+# ---------------------------------------------------------------------------
+
+def _load_snake_data(config):
+    """Load snake mesh from config["snake_npz"] + optional voxel_size from config["voxel_grid_npz"].
+
+    Config keys
+    -----------
+    snake_npz      — path to snake_mesh.npz  {vertices (V,3), faces (F,3)}
+    voxel_grid_npz — path to voxel_grid.npz  {voxel_size, ...}  (optional)
+
+    Returns dict {verts, faces, lo, hi, voxel_size} or None if snake_npz absent.
+    """
+    path = config.get("snake_npz")
+    if not path:
+        return None
+    data  = np.load(path)
+    verts = data["vertices"].astype(np.float64)
+    faces = data["faces"].astype(np.int64)
+    lo    = verts.min(axis=0)
+    hi    = verts.max(axis=0)
+    voxel_size = None
+    centers    = None
+    grid_shape = None
+    gp = config.get("voxel_grid_npz")
+    if gp:
+        gdata      = np.load(gp)
+        voxel_size = float(gdata["voxel_size"])
+        centers    = gdata["centers"].astype(np.float64)          # (K, 3)
+        grid_shape = tuple(int(x) for x in gdata["grid_shape"].tolist())  # (nx,ny,nz)
+    print(f"[Snake] {len(verts)} verts  {len(faces)} faces  "
+          f"AABB X[{lo[0]:.1f},{hi[0]:.1f}] "
+          f"Y[{lo[1]:.1f},{hi[1]:.1f}] "
+          f"Z[{lo[2]:.1f},{hi[2]:.1f}]"
+          + (f"  {len(centers)} voxels  voxel_size={voxel_size:.4f}  grid {grid_shape}"
+             if centers is not None else ""))
+    return {"verts": verts, "faces": faces, "lo": lo, "hi": hi,
+            "voxel_size": voxel_size, "centers": centers, "grid_shape": grid_shape}
+
+
+def _build_voxel_grid_from_snake(snake_data):
+    """Build solid set directly from VoxelGrid snake centres.
+
+    Uses the K pre-computed centres from voxel_grid.npz — already guaranteed
+    to lie inside the snake contour and sized to match the user's target voxel
+    count.  For each centre a short-range 6-direction Blender ray_cast decides
+    whether that voxel contains scene geometry (solid).  Every grid position
+    that has no corresponding centre is added to solid so flood-fill cannot
+    escape the snake boundary.
+
+    This replaces _build_local_voxel_grid / _build_voxel_grid when
+    voxel_grid_npz is supplied, giving a walkable region that:
+      - Matches the user's target voxel count (set during VoxelGrid construction)
+      - Is exactly bounded by the snake contour (non-rectangular)
+      - Respects actual scene geometry (walls, floors, furniture)
+
+    Returns
+    -------
+    solid, nx, ny, nz, res, bounds
+    """
+    centers    = snake_data["centers"]      # (K, 3) world-space centres
+    res        = snake_data["voxel_size"]   # Blender units
+    nx, ny, nz = snake_data["grid_shape"]
+    lo         = snake_data["lo"]           # snake AABB min
+
+    bounds = (lo[0], lo[1],
+              lo[0] + nx * res, lo[1] + ny * res,
+              lo[2], lo[2] + nz * res)
+
+    scene     = bpy.context.scene
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    half      = res * 0.5
+
+    # Map world-space centres → grid indices (deduplicated)
+    center_world = {}
+    for cx, cy, cz in centers.tolist():
+        ix = max(0, min(nx - 1, int((cx - lo[0]) / res)))
+        iy = max(0, min(ny - 1, int((cy - lo[1]) / res)))
+        iz = max(0, min(nz - 1, int((cz - lo[2]) / res)))
+        center_world[(ix, iy, iz)] = (cx, cy, cz)
+
+    # Solid detection: 6-direction short-range ray cast from each centre.
+    # A hit within res/2 means geometry passes through this voxel.
+    DIRS = [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)]
+    solid      = set()
+    n_geo      = 0
+    for (ix, iy, iz), (cx, cy, cz) in center_world.items():
+        for dx, dy, dz in DIRS:
+            hit, *_ = scene.ray_cast(depsgraph,
+                                     Vector((cx, cy, cz)),
+                                     Vector((dx, dy, dz)),
+                                     distance=half)
+            if hit:
+                solid.add((ix, iy, iz))
+                n_geo += 1
+                break
+
+    # Non-centre positions are outside the snake → treat as solid so flood-fill
+    # stays within the contour.
+    n_boundary = 0
+    for iix in range(nx):
+        for iiy in range(ny):
+            for iiz in range(nz):
+                if (iix, iiy, iiz) not in center_world:
+                    solid.add((iix, iiy, iiz))
+                    n_boundary += 1
+
+    n_free = len(center_world) - n_geo
+    print(f"[Snake] VoxelGrid {nx}×{ny}×{nz}: "
+          f"{len(centers)} centres  "
+          f"{n_geo} geo-solid  {n_boundary} boundary-solid  {n_free} free  "
+          f"res={res:.4f} BU")
+    return solid, nx, ny, nz, res, bounds
 
 
 # ---------------------------------------------------------------------------
@@ -2341,16 +2458,22 @@ def main():
         print(f"[Walkthrough] Scene unit scale: {unit_scale:.4f} m/BU "
               f"({'metric' if abs(unit_scale - 1.0) < 0.01 else f'{unit_scale*100:.1f}cm/BU'})")
 
-        # ---- Scene bounds — density-field smart bounds ----
-        # Uses 3D Gaussian density field to exclude outliers and micro-objects,
-        # giving a tight AABB around the main scene cluster.
-        # Falls back to raw _scene_bounds() if too few objects survive filtering.
-        t0 = time.time()
-        scene_bounds = _compute_scene_density_bounds(config)
-        timing["density_bounds_s"] = round(time.time() - t0, 1)
-        print(f"[Timing] density bounds: {timing['density_bounds_s']}s")
-        span_x = scene_bounds[2] - scene_bounds[0]
-        span_y = scene_bounds[3] - scene_bounds[1]
+        # ---- Active contour snake (optional) ----
+        snake_data = _load_snake_data(config)
+
+        # ---- Scene bounds — density-field smart bounds (skipped in snake-grid mode) ----
+        if snake_data and snake_data["centers"] is not None:
+            scene_bounds = None   # replaced by snake bounds inside the snake branch
+        else:
+            t0 = time.time()
+            scene_bounds = _compute_scene_density_bounds(config)
+            timing["density_bounds_s"] = round(time.time() - t0, 1)
+            print(f"[Timing] density bounds: {timing['density_bounds_s']}s")
+        if scene_bounds is not None:
+            span_x = scene_bounds[2] - scene_bounds[0]
+            span_y = scene_bounds[3] - scene_bounds[1]
+        else:
+            span_x = span_y = None   # not needed in snake-grid mode
 
         # ---- Depsgraph (needed by both modes for camera animation LOS) ----
         t0 = time.time()
@@ -2359,9 +2482,36 @@ def main():
         print(f"[Timing] depsgraph eval: {timing['depsgraph_s']}s")
 
         # ================================================================
+        # SNAKE VOXELGRID MODE  (voxel_grid_npz supplied)
+        # ================================================================
+        if snake_data and snake_data["centers"] is not None:
+            t0 = time.time()
+            center = _find_local_center(config)
+            solid, nx, ny, nz, _res, snake_bounds = _build_voxel_grid_from_snake(snake_data)
+            timing["voxel_grid_s"] = round(time.time() - t0, 1)
+            print(f"[Timing] snake voxel grid: {timing['voxel_grid_s']}s")
+
+            t0 = time.time()
+            cam_ix = max(0, min(nx-1, int((center.x - snake_bounds[0]) / _res)))
+            cam_iy = max(0, min(ny-1, int((center.y - snake_bounds[1]) / _res)))
+            cam_iz = max(0, min(nz-1, int((center.z - snake_bounds[4]) / _res)))
+            camera_ijk_snake = (cam_ix, cam_iy, cam_iz)
+            print(f"[WalkableV2] Snake camera voxel: {camera_ijk_snake}")
+            candidates_v2 = _flood_fill_free_from_camera(solid, camera_ijk_snake, nx, ny, nz)
+            walkable = _check_walkable_v2(candidates_v2, snake_bounds, config)
+            camera_seed = min(walkable,
+                              key=lambda c: (c[0]-cam_ix)**2
+                                          + (c[1]-cam_iy)**2
+                                          + (c[2]-cam_iz)**2) if walkable else camera_ijk_snake
+            actual_floor_z = None
+            config["_candidates_v2"] = candidates_v2
+            timing["walkable_s"] = round(time.time() - t0, 1)
+            bounds_for_path = snake_bounds
+
+        # ================================================================
         # LOCAL MODE  (local_area_ratio set)
         # ================================================================
-        if local_area_ratio:
+        elif local_area_ratio:
             # Radius = ratio × min(span_x, span_y) — uses scene-relative sizing,
             # independent of unit system (cm vs m vs inches).
             scene_char_bu = min(span_x, span_y)
@@ -2393,7 +2543,7 @@ def main():
             _hit_collector = [] if config.get("debug_viz") else None
             solid, nx, ny, nz, _res, local_bounds = _build_local_voxel_grid(
                 config, center, floor_z_override=_prelim_floor_z,
-                hit_collector=_hit_collector
+                hit_collector=_hit_collector,
             )
             timing["voxel_grid_s"] = round(time.time() - t0, 1)
             print(f"[Timing] local voxel grid: {timing['voxel_grid_s']}s")
@@ -2645,6 +2795,7 @@ def main():
             "interesting_objects_count": 0,  # replaced by density-based gaze
             "timing":                    timing,
             "mode":                      "local" if local_area_ratio else "global",
+            "snake_used":                snake_data is not None,
         }))
 
     except Exception as exc:
