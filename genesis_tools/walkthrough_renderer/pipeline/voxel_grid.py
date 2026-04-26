@@ -1,0 +1,446 @@
+"""Step 1: ray_cast -> solid voxel grid.
+
+Three build modes (selected by config keys):
+  - "snake"  -- config["snake_npz"] set: uses pre-computed VoxelGrid centers
+  - "local"  -- config["local_area_ratio"] set: bidirectional ray_cast in local AABB
+  - "global" -- neither: tri-axial sweep over full scene bounds
+
+Input:  open bpy scene (must be called under bpy Python)
+Output: VoxelGridData -> voxel_grid.npz
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+from collections import deque
+from dataclasses import dataclass
+
+import numpy as np
+
+
+@dataclass
+class VoxelGridData:
+    solid: np.ndarray        # (N, 3) int32 -- grid indices of solid voxels
+    candidates: np.ndarray   # (K, 3) int32 -- flood-fill reachable voxels
+    nx: int
+    ny: int
+    nz: int
+    res: float               # voxel size in Blender units
+    bounds: tuple            # (min_x, min_y, max_x, max_y, min_z, max_z)
+    unit_scale: float        # metres per Blender unit
+    mode: str                # "snake" | "local" | "global"
+    hits: np.ndarray | None  # (H, 3) float64 -- ray hit positions (debug only)
+
+
+# ---------------------------------------------------------------------------
+# bpy-dependent helpers (only called at runtime under bpy Python)
+# ---------------------------------------------------------------------------
+
+def _get_unit_scale():
+    import bpy
+    scale = bpy.context.scene.unit_settings.scale_length
+    return scale if scale > 0 else 1.0
+
+
+def _scene_bounds():
+    import bpy
+    from mathutils import Vector
+    xs, ys, zs = [], [], []
+    for obj in bpy.context.scene.objects:
+        if obj.type != "MESH":
+            continue
+        for corner in obj.bound_box:
+            world = obj.matrix_world @ Vector(corner)
+            xs.append(world.x); ys.append(world.y); zs.append(world.z)
+    if not xs:
+        raise RuntimeError("No mesh objects in scene.")
+    return min(xs), min(ys), max(xs), max(ys), min(zs), max(zs)
+
+
+def _find_local_center(config):
+    import bpy
+    from mathutils import Vector
+    cam = bpy.context.scene.camera
+    if cam is not None:
+        return cam.location.copy()
+    for obj in bpy.context.scene.objects:
+        if obj.type == "CAMERA":
+            return obj.location.copy()
+    xs, ys, zs = [], [], []
+    for obj in bpy.context.scene.objects:
+        if obj.type != "MESH":
+            continue
+        for corner in obj.bound_box:
+            w = obj.matrix_world @ Vector(corner)
+            xs.append(w.x); ys.append(w.y); zs.append(w.z)
+    if xs:
+        return Vector(((min(xs)+max(xs))/2, (min(ys)+max(ys))/2,
+                       min(zs)+(max(zs)-min(zs))*0.6))
+    return Vector((0.0, 0.0, 1.7))
+
+
+def _cast_all_hits_bidir(origin, direction, max_dist):
+    """Yield every surface hit along a bidirectional ray via scene.ray_cast."""
+    import bpy
+    from mathutils import Vector
+    scene = bpy.context.scene
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    origin = Vector(origin)
+    direction = Vector(direction).normalized()
+
+    step_past = 0.05
+    cur = Vector(origin); rem = max_dist; fwd = []
+    while rem > step_past:
+        hit, loc, _n, *_ = scene.ray_cast(depsgraph, cur, direction, distance=rem)
+        if not hit: break
+        fwd.append(loc)
+        rem -= (loc - cur).length + step_past
+        cur = loc + direction * step_past
+
+    end_pt = origin + direction * max_dist
+    cur = Vector(end_pt); rev_dir = -direction; rem = max_dist; rev = []
+    while rem > step_past:
+        hit, loc, _n, *_ = scene.ray_cast(depsgraph, cur, rev_dir, distance=rem)
+        if not hit: break
+        rev.append(loc)
+        rem -= (loc - cur).length + step_past
+        cur = loc + rev_dir * step_past
+
+    all_hits = list(fwd)
+    for rh in rev:
+        if all((rh - fh).length >= step_past * 2 for fh in all_hits):
+            all_hits.append(rh)
+    all_hits.sort(key=lambda h: (h - origin).dot(direction))
+    yield from all_hits
+
+
+def _collect_hits_bidir(origin, direction, max_dist):
+    return list(_cast_all_hits_bidir(origin, direction, max_dist))
+
+
+def _load_snake_data(config):
+    path = config.get("snake_npz")
+    if not path:
+        return None
+    data = np.load(path)
+    verts = data["vertices"].astype(np.float64)
+    faces = data["faces"].astype(np.int64)
+    lo = verts.min(axis=0)
+    hi = verts.max(axis=0)
+    centers = None; grid_shape = None; voxel_size = None
+    gp = config.get("voxel_grid_npz")
+    if gp:
+        gdata = np.load(gp)
+        voxel_size = float(gdata["voxel_size"])
+        centers = gdata["centers"].astype(np.float64)
+        grid_shape = tuple(int(x) for x in gdata["grid_shape"].tolist())
+    return {"verts": verts, "faces": faces, "lo": lo, "hi": hi,
+            "voxel_size": voxel_size, "centers": centers, "grid_shape": grid_shape}
+
+
+def _build_voxel_grid_from_snake(snake_data):
+    """Build solid set from pre-computed VoxelGrid snake centres."""
+    import bpy
+    from mathutils import Vector
+    centers    = snake_data["centers"]
+    res        = snake_data["voxel_size"]
+    nx, ny, nz = snake_data["grid_shape"]
+    lo         = snake_data["lo"]
+    bounds = (lo[0], lo[1], lo[0]+nx*res, lo[1]+ny*res, lo[2], lo[2]+nz*res)
+
+    scene     = bpy.context.scene
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    half      = res * 0.5
+    DIRS = [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)]
+
+    center_world = {}
+    for cx, cy, cz in centers.tolist():
+        ix = max(0, min(nx-1, int((cx-lo[0])/res)))
+        iy = max(0, min(ny-1, int((cy-lo[1])/res)))
+        iz = max(0, min(nz-1, int((cz-lo[2])/res)))
+        center_world[(ix,iy,iz)] = (cx,cy,cz)
+
+    solid = set()
+    for (ix,iy,iz),(cx,cy,cz) in center_world.items():
+        for dx,dy,dz in DIRS:
+            hit,*_ = scene.ray_cast(depsgraph, Vector((cx,cy,cz)),
+                                    Vector((dx,dy,dz)), distance=half)
+            if hit:
+                solid.add((ix,iy,iz)); break
+
+    for iix in range(nx):
+        for iiy in range(ny):
+            for iiz in range(nz):
+                if (iix,iiy,iiz) not in center_world:
+                    solid.add((iix,iiy,iiz))
+
+    return solid, nx, ny, nz, res, bounds
+
+
+def _build_local_voxel_grid(config, center, hit_collector=None):
+    """Bidirectional ray_cast voxelisation of a local AABB around center."""
+    import bpy
+    from mathutils import Vector
+    unit_scale = _get_unit_scale()
+    radius_xy = config["_local_radius_bu"]
+    height    = config.get("local_height", 8.0) / unit_scale
+    res       = config["grid_resolution"] / unit_scale
+
+    min_x = center.x - radius_xy; max_x = center.x + radius_xy
+    min_y = center.y - radius_xy; max_y = center.y + radius_xy
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    _hit, floor_loc, *_ = bpy.context.scene.ray_cast(
+        depsgraph, Vector((center.x, center.y, center.z+height)),
+        Vector((0,0,-1)), distance=height*3.0)
+    if _hit:
+        min_z = floor_loc.z - 0.5; max_z = floor_loc.z + height
+    else:
+        min_z = center.z - 1.0;    max_z = center.z + height
+
+    local_bounds = (min_x, min_y, max_x, max_y, min_z, max_z)
+    span_x = max_x-min_x; span_y = max_y-min_y; span_z = max_z-min_z
+
+    max_xy = config.get("max_local_cells_xy", 80)
+    max_nz = config.get("max_local_cells_z", 40)
+    res = max(res, span_x/max_xy, span_y/max_xy, span_z/max_nz)
+    config["_effective_grid_resolution"] = res
+
+    nx = max(1, int(math.ceil(span_x/res)))
+    ny = max(1, int(math.ceil(span_y/res)))
+    nz = max(1, int(math.ceil(span_z/res)))
+    solid = set()
+    n = config.get("voxel_ray_samples", 3)
+
+    def mark(loc_v):
+        ix = min(nx-1, max(0, int((loc_v.x-min_x)/res)))
+        iy = min(ny-1, max(0, int((loc_v.y-min_y)/res)))
+        iz = min(nz-1, max(0, int((loc_v.z-min_z)/res)))
+        solid.add((ix,iy,iz))
+        if hit_collector is not None:
+            hit_collector.append((loc_v.x, loc_v.y, loc_v.z))
+
+    ray_span_z = span_z+2.0; ray_span_x = span_x+2.0; ray_span_y = span_y+2.0
+    for ix in range(nx):
+        for iy in range(ny):
+            for sx in range(n):
+                x = min_x+(ix+(sx+0.5)/n)*res
+                for sy in range(n):
+                    y = min_y+(iy+(sy+0.5)/n)*res
+                    for lv in _cast_all_hits_bidir((x,y,max_z+1.0),(0,0,-1),ray_span_z):
+                        mark(lv)
+    for iy in range(ny):
+        for iz in range(nz):
+            for sy in range(n):
+                y = min_y+(iy+(sy+0.5)/n)*res
+                for sz in range(n):
+                    z = min_z+(iz+(sz+0.5)/n)*res
+                    for lv in _collect_hits_bidir((min_x-1.0,y,z),(1,0,0),ray_span_x):
+                        mark(lv)
+    for ix in range(nx):
+        for iz in range(nz):
+            for sx in range(n):
+                x = min_x+(ix+(sx+0.5)/n)*res
+                for sz in range(n):
+                    z = min_z+(iz+(sz+0.5)/n)*res
+                    for lv in _collect_hits_bidir((x,min_y-1.0,z),(0,1,0),ray_span_y):
+                        mark(lv)
+
+    return solid, nx, ny, nz, res, local_bounds
+
+
+def _build_global_voxel_grid(config, scene_bounds, hit_collector=None):
+    """Tri-axial sweep voxelisation over the full scene."""
+    import bpy
+    from mathutils import Vector
+    unit_scale = _get_unit_scale()
+    min_x, min_y, max_x, max_y, min_z, max_z = scene_bounds
+    max_xy    = config.get("max_grid_cells_xy", 80)
+    max_z_c   = config.get("max_grid_cells_z", 40)
+    res_bu    = config.get("grid_resolution", 0.5) / unit_scale
+
+    span_x = max_x-min_x; span_y = max_y-min_y; span_z = max_z-min_z
+    res_bu = max(res_bu, span_x/max_xy, span_y/max_xy, span_z/max_z_c)
+    nx = max(1, int(math.ceil(span_x/res_bu)))
+    ny = max(1, int(math.ceil(span_y/res_bu)))
+    nz = max(1, int(math.ceil(span_z/res_bu)))
+
+    scene = bpy.context.scene
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    solid = set(); step = 0.05
+
+    def _cast_hits(origin, direction, max_d):
+        org = Vector(origin); d = Vector(direction).normalized(); rem = max_d
+        while rem > step:
+            hit, loc, *_ = scene.ray_cast(depsgraph, org, d, distance=rem)
+            if not hit: break
+            yield loc
+            rem -= (loc-org).length+step; org = loc+d*step
+
+    def mark(loc_v):
+        ix = min(nx-1, max(0, int((loc_v.x-min_x)/res_bu)))
+        iy = min(ny-1, max(0, int((loc_v.y-min_y)/res_bu)))
+        iz = min(nz-1, max(0, int((loc_v.z-min_z)/res_bu)))
+        solid.add((ix,iy,iz))
+        if hit_collector is not None:
+            hit_collector.append((loc_v.x, loc_v.y, loc_v.z))
+
+    for ix in range(nx):
+        for iy in range(ny):
+            x = min_x+(ix+0.5)*res_bu; y = min_y+(iy+0.5)*res_bu
+            for lv in _cast_hits((x,y,max_z+1.0),(0,0,-1),span_z+2.0): mark(lv)
+    for iy in range(ny):
+        for iz in range(nz):
+            y = min_y+(iy+0.5)*res_bu; z = min_z+(iz+0.5)*res_bu
+            for lv in _cast_hits((min_x-1.0,y,z),(1,0,0),span_x+2.0): mark(lv)
+    for ix in range(nx):
+        for iz in range(nz):
+            x = min_x+(ix+0.5)*res_bu; z = min_z+(iz+0.5)*res_bu
+            for lv in _cast_hits((x,min_y-1.0,z),(0,1,0),span_y+2.0): mark(lv)
+
+    return solid, nx, ny, nz, res_bu, scene_bounds
+
+
+# ---------------------------------------------------------------------------
+# Flood-fill candidates helper
+# ---------------------------------------------------------------------------
+
+def _flood_fill_candidates(solid: set, center_ijk: tuple,
+                            nx: int, ny: int, nz: int) -> np.ndarray:
+    """BFS flood fill through non-solid voxels from center_ijk."""
+    cx, cy, cz = center_ijk
+    if (cx, cy, cz) in solid:
+        best, best_d = None, float("inf")
+        for ix in range(nx):
+            for iy in range(ny):
+                for iz in range(nz):
+                    if (ix,iy,iz) not in solid:
+                        d = (ix-cx)**2+(iy-cy)**2+(iz-cz)**2
+                        if d < best_d:
+                            best_d, best = d, (ix,iy,iz)
+        if best is None:
+            return np.empty((0,3), dtype=np.int32)
+        cx, cy, cz = best
+    visited = {(cx,cy,cz)}
+    q = deque([(cx,cy,cz)])
+    while q:
+        ix,iy,iz = q.popleft()
+        for dx,dy,dz in [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)]:
+            ni,nj,nk = ix+dx,iy+dy,iz+dz
+            if 0<=ni<nx and 0<=nj<ny and 0<=nk<nz:
+                cell = (ni,nj,nk)
+                if cell not in visited and cell not in solid:
+                    visited.add(cell); q.append(cell)
+    if visited:
+        return np.array(sorted(visited), dtype=np.int32)
+    return np.empty((0,3), dtype=np.int32)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def build(blend_path: str, config: dict) -> VoxelGridData:
+    """Build VoxelGridData from a .blend file using pip bpy.
+
+    Must be called under /home/kingy/blender/4.5/python/bin/python3.11.
+    """
+    import bpy
+    bpy.ops.wm.open_mainfile(filepath=blend_path)
+
+    unit_scale = _get_unit_scale()
+    hit_collector = [] if config.get("debug_viz") else None
+    snake_data = _load_snake_data(config)
+
+    if snake_data is not None and snake_data.get("centers") is not None:
+        solid, nx, ny, nz, res, bounds = _build_voxel_grid_from_snake(snake_data)
+        mode = "snake"
+        center_ijk = (nx//2, ny//2, nz//2)
+    elif config.get("local_area_ratio"):
+        center = _find_local_center(config)
+        scene_bds = _scene_bounds()
+        span_xy = min(scene_bds[2]-scene_bds[0], scene_bds[3]-scene_bds[1])
+        config["_local_radius_bu"] = config["local_area_ratio"] * span_xy * 0.5
+        solid, nx, ny, nz, res, bounds = _build_local_voxel_grid(
+            config, center, hit_collector=hit_collector)
+        mode = "local"
+        from mathutils import Vector
+        ix = max(0, min(nx-1, int((center.x-bounds[0])/res)))
+        iy = max(0, min(ny-1, int((center.y-bounds[1])/res)))
+        iz = max(0, min(nz-1, int((center.z-bounds[4])/res)))
+        center_ijk = (ix, iy, iz)
+    else:
+        scene_bds = _scene_bounds()
+        solid, nx, ny, nz, res, bounds = _build_global_voxel_grid(
+            config, scene_bds, hit_collector=hit_collector)
+        mode = "global"
+        cam = _find_local_center(config)
+        ix = max(0, min(nx-1, int((cam.x-bounds[0])/res)))
+        iy = max(0, min(ny-1, int((cam.y-bounds[1])/res)))
+        iz = max(0, min(nz-1, int((cam.z-bounds[4])/res)))
+        center_ijk = (ix, iy, iz)
+
+    solid_arr = np.array(sorted(solid), dtype=np.int32) if solid else np.empty((0,3), dtype=np.int32)
+    candidates = _flood_fill_candidates(solid, center_ijk, nx, ny, nz)
+    hits_arr = np.array(hit_collector, dtype=np.float64) if hit_collector else None
+
+    return VoxelGridData(
+        solid=solid_arr, candidates=candidates,
+        nx=nx, ny=ny, nz=nz,
+        res=float(res), bounds=tuple(float(b) for b in bounds),
+        unit_scale=float(unit_scale),
+        mode=mode, hits=hits_arr,
+    )
+
+
+def save(data: VoxelGridData, path: str) -> None:
+    arrays = dict(
+        solid=data.solid, candidates=data.candidates,
+        nx=np.int32(data.nx), ny=np.int32(data.ny), nz=np.int32(data.nz),
+        res=np.float64(data.res),
+        bounds=np.array(data.bounds, dtype=np.float64),
+        unit_scale=np.float64(data.unit_scale),
+        mode=np.array(data.mode),
+    )
+    if data.hits is not None:
+        arrays["hits"] = data.hits
+    np.savez_compressed(path, **arrays)
+    print(f"[VoxelGrid] Saved -> {path}")
+
+
+def load(path: str) -> VoxelGridData:
+    npz = np.load(path)
+    hits = npz["hits"] if "hits" in npz else None
+    return VoxelGridData(
+        solid=npz["solid"],
+        candidates=npz["candidates"],
+        nx=int(npz["nx"]),
+        ny=int(npz["ny"]),
+        nz=int(npz["nz"]),
+        res=float(npz["res"]),
+        bounds=tuple(npz["bounds"].tolist()),
+        unit_scale=float(npz["unit_scale"]),
+        mode=str(npz["mode"]),
+        hits=hits,
+    )
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def _cli():
+    parser = argparse.ArgumentParser(description="Walkthrough step 1: voxel grid")
+    parser.add_argument("--blend", required=True)
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--output", required=True)
+    args = parser.parse_args()
+    with open(args.config) as f:
+        config = json.load(f)
+    data = build(args.blend, config)
+    save(data, args.output)
+
+
+if __name__ == "__main__":
+    _cli()

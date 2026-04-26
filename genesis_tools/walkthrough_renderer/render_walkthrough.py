@@ -2449,6 +2449,228 @@ def main():
 
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
+        _main_new(config, output_blend, output_dir, t_total_start)
+    except Exception as exc:
+        import traceback
+        print("WALKTHROUGH_RESULT:" + json.dumps({
+            "status": "error", "message": str(exc),
+            "traceback": traceback.format_exc(),
+        }))
+
+
+def _main_new(config, output_blend, output_dir, t_total_start):
+    """New modular implementation of the walkthrough pipeline.
+
+    Called from main() after arg parsing. Uses the pipeline modules directly
+    (bpy is already loaded by blender --background).
+    """
+    import time as _time
+    timing = {}
+
+    from genesis_tools.walkthrough_renderer.pipeline.voxel_grid import (
+        build as vg_build, save as vg_save, load as vg_load)
+    from genesis_tools.walkthrough_renderer.pipeline.walkable import (
+        build as wk_build, save as wk_save)
+    from genesis_tools.walkthrough_renderer.pipeline.path_plan import (
+        build as pd_build, save as pd_save)
+    from genesis_tools.walkthrough_renderer.pipeline.camera_orient import (
+        build as orient_build, save as orient_save, OrientData)
+    from genesis_tools.walkthrough_renderer.pipeline.camera_animate import (
+        build as animate_build)
+
+    blend_path = str(bpy.data.filepath)  # already loaded by blender --background
+    blend_stem = Path(blend_path).stem
+
+    vg_path     = output_dir / "voxel_grid.npz"
+    wk_path     = output_dir / "walkable.npz"
+    pd_path     = output_dir / "path.npz"
+    orient_path = output_dir / "wp_schedule.json"
+
+    # ---- Unit scale ----
+    unit_scale = _get_unit_scale()
+    config["_unit_scale"] = unit_scale
+
+    # ---- Step 1: voxel grid ----
+    if vg_path.exists():
+        print(f"[Walkthrough] Skipping voxel_grid (found {vg_path})")
+        vg = vg_load(str(vg_path))
+    else:
+        t0 = _time.time()
+        # Build in-process (bpy already loaded)
+        snake_data = _load_snake_data(config)
+        use_snake = snake_data is not None and snake_data.get("centers") is not None
+        scene_bounds = None if use_snake else _compute_scene_density_bounds(config)
+        if use_snake:
+            solid, nx, ny, nz, res, bounds = _build_voxel_grid_from_snake(snake_data)
+            mode = "snake"; center_ijk = (nx//2, ny//2, nz//2)
+        elif config.get("local_area_ratio"):
+            center = _find_local_center(config)
+            span_xy = min(scene_bounds[2]-scene_bounds[0], scene_bounds[3]-scene_bounds[1])
+            config["_local_radius_bu"] = config["local_area_ratio"] * span_xy * 0.5
+            hit_col = [] if config.get("debug_viz") else None
+            solid, nx, ny, nz, res, bounds = _build_local_voxel_grid(
+                config, center, hit_collector=hit_col)
+            config["_debug_hits"] = hit_col
+            mode = "local"
+            ix = max(0, min(nx-1, int((center.x-bounds[0])/res)))
+            iy = max(0, min(ny-1, int((center.y-bounds[1])/res)))
+            iz = max(0, min(nz-1, int((center.z-bounds[4])/res)))
+            center_ijk = (ix, iy, iz)
+        else:
+            solid, nx, ny, nz, res, bounds = _build_voxel_grid(config, scene_bounds)
+            mode = "global"
+            cam = _find_local_center(config)
+            ix = max(0, min(nx-1, int((cam.x-scene_bounds[0])/res)))
+            iy = max(0, min(ny-1, int((cam.y-scene_bounds[1])/res)))
+            iz = max(0, min(nz-1, int((cam.z-scene_bounds[4])/res)))
+            center_ijk = (ix, iy, iz)
+
+        from genesis_tools.walkthrough_renderer.pipeline.voxel_grid import (
+            VoxelGridData, _flood_fill_candidates)
+        import numpy as np
+        solid_arr = np.array(sorted(solid), dtype=np.int32) if solid else np.empty((0,3), dtype=np.int32)
+        cand_arr  = _flood_fill_candidates(solid, center_ijk, nx, ny, nz)
+        vg = VoxelGridData(solid=solid_arr, candidates=cand_arr,
+                           nx=nx, ny=ny, nz=nz, res=float(res),
+                           bounds=tuple(float(b) for b in bounds),
+                           unit_scale=float(unit_scale), mode=mode, hits=None)
+        vg_save(vg, str(vg_path))
+        timing["voxel_grid_s"] = round(_time.time() - t0, 1)
+
+    # ---- Step 2: walkable ----
+    if wk_path.exists():
+        print(f"[Walkthrough] Skipping walkable (found {wk_path})")
+        from genesis_tools.walkthrough_renderer.pipeline.walkable import load as wk_load
+        wk = wk_load(str(wk_path))
+    else:
+        t0 = _time.time()
+        wk = wk_build(vg, config)
+        wk_save(wk, str(wk_path))
+        timing["walkable_s"] = round(_time.time() - t0, 1)
+
+    if len(wk.walkable) == 0:
+        raise RuntimeError("No walkable voxels found.")
+
+    # ---- Step 3: path ----
+    if pd_path.exists():
+        print(f"[Walkthrough] Skipping path (found {pd_path})")
+        from genesis_tools.walkthrough_renderer.pipeline.path_plan import load as pd_load
+        pd = pd_load(str(pd_path))
+    else:
+        t0 = _time.time()
+        config["_effective_grid_resolution"] = vg.res
+        pd = pd_build(vg, wk, config)
+        pd_save(pd, str(pd_path))
+        timing["path_s"] = round(_time.time() - t0, 1)
+
+    if len(pd.path_points) == 0:
+        raise RuntimeError("Path planning produced no points.")
+
+    # ---- Step 4: camera orient ----
+    if orient_path.exists():
+        print(f"[Walkthrough] Skipping camera_orient (found {orient_path})")
+        orient = orient_build.__func__ if hasattr(orient_build, '__func__') else None
+        from genesis_tools.walkthrough_renderer.pipeline.camera_orient import (
+            load as orient_load, OrientData)
+        orient = orient_load(str(orient_path))
+    else:
+        t0 = _time.time()
+        orient = orient_build(blend_path, pd, config)
+        orient_save(orient, str(orient_path))
+        timing["camera_orient_s"] = round(_time.time() - t0, 1)
+
+    # ---- Step 5: camera animate ----
+    if output_blend.exists():
+        print(f"[Walkthrough] Skipping camera_animate (found {output_blend})")
+    else:
+        t0 = _time.time()
+        animate_build(blend_path, pd, orient, config, str(output_blend))
+        timing["camera_animate_s"] = round(_time.time() - t0, 1)
+
+    # ---- Step 6 (optional): debug viz ----
+    if config.get("debug_viz"):
+        import numpy as _np
+        walkable_list = [tuple(r) for r in wk.walkable]
+        waypoints_list = [tuple(r) for r in pd.waypoints]
+        from mathutils import Vector as _V
+        path_vecs = [_V(tuple(p)) for p in pd.path_points]
+        cam_obj = bpy.context.scene.camera
+        fps = config.get("fps", 12)
+        dur = config.get("duration_seconds", 10)
+        total_frames = max(1, int(dur * fps))
+        solid_list = [tuple(r) for r in vg.solid]
+        cand_list  = [tuple(r) for r in vg.candidates]
+        # Re-open output blend before adding debug viz
+        bpy.ops.wm.open_mainfile(filepath=str(output_blend))
+        cam_obj = bpy.context.scene.camera
+        if cam_obj:
+            _add_debug_viz(walkable_list, waypoints_list, path_vecs,
+                           cam_obj, total_frames, config, vg.bounds,
+                           solid=solid_list, nx=vg.nx, ny=vg.ny, nz=vg.nz,
+                           candidates_v2=cand_list)
+            bpy.data.use_autopack = False
+            bpy.ops.wm.save_as_mainfile(filepath=str(output_blend))
+
+    # ---- Step 7 (optional): render ----
+    frames_dir = None
+    if config.get("render"):
+        t0 = _time.time()
+        bpy.ops.wm.open_mainfile(filepath=str(output_blend))
+        scene  = bpy.context.scene
+        engine = config.get("render_engine", "CYCLES").upper()
+        if engine == "WORKBENCH":
+            scene.render.engine = "BLENDER_WORKBENCH"
+        elif engine in ("EEVEE", "BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"):
+            scene.render.engine = "BLENDER_EEVEE_NEXT"
+            _ensure_lights(scene)
+        else:
+            scene.render.engine = "CYCLES"
+            scene.cycles.samples = config.get("render_samples", 32)
+            scene.cycles.use_adaptive_sampling = True
+            scene.cycles.adaptive_threshold = 0.01
+            scene.cycles.adaptive_min_samples = 4
+            scene.view_layers[0].cycles.use_denoising = True
+            _enable_cycles_gpu(scene)
+        if config.get("panoramic"):
+            cam_data = scene.camera.data
+            cam_data.type = "PANO"; cam_data.panorama_type = "EQUIRECTANGULAR"
+        scene.render.resolution_x = config.get("render_width", 1280)
+        scene.render.resolution_y = config.get("render_height", 720)
+        frames_dir = output_dir / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        scene.render.filepath = str(frames_dir / "frame_")
+        scene.render.image_settings.file_format = "PNG"
+        scene.render.use_persistent_data = True
+        bpy.ops.render.render(animation=True)
+        timing["render_s"] = round(_time.time() - t0, 1)
+
+    timing["total_s"] = round(_time.time() - t_total_start, 1)
+    print("WALKTHROUGH_RESULT:" + json.dumps({
+        "status": "success",
+        "blend_output":              str(output_blend),
+        "frames_dir":                str(frames_dir) if frames_dir else None,
+        "path_points_count":         len(pd.path_points),
+        "walkable_voxels_count":     len(wk.walkable),
+        "solid_voxels_count":        len(vg.solid),
+        "interesting_objects_count": 0,
+        "timing":                    timing,
+        "mode":                      vg.mode,
+        "snake_used":                (vg.mode == "snake"),
+    }))
+
+
+def _main_LEGACY():
+    t_total_start = time.time()
+    timing = {}
+
+    try:
+        config, output_blend, output_dir = _parse_args()
+    except Exception as exc:
+        print("WALKTHROUGH_RESULT:" + json.dumps({"status": "error", "message": str(exc)}))
+        return
+
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
 
         local_area_ratio = config.get("local_area_ratio")
 
