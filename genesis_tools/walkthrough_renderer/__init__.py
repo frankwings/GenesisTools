@@ -20,24 +20,15 @@ Usage::
         output_dir="output/walkthrough",
         duration_seconds=10.0,
         num_waypoints=12,
-        blender_command="blender",
     )
     print(result["gif"])           # path to walkthrough GIF
     print(result["blend_output"])  # path to animated .blend
 """
 
-import json
-import os
-import subprocess
-import tempfile
 from pathlib import Path
-from subprocess import PIPE, STDOUT
 from typing import Union
 
 from genesis_tools.gif_generator import create_gif
-
-# Blender script lives alongside this __init__.py inside the sub-package.
-RENDER_WALKTHROUGH_SCRIPT = Path(__file__).parent / "render_walkthrough.py"
 
 
 def render_scene_walkthrough(
@@ -69,75 +60,20 @@ def render_scene_walkthrough(
     render_samples: int = 32,
     snake_npz: Union[str, Path] = None,
     voxel_grid_npz: Union[str, Path] = None,
-    blender_command: str = "blender",
 ) -> dict:
     """Render a patrol-style walkthrough GIF inside a Blender scene.
 
-    Calls Blender headlessly to:
-
-    1. Auto-detect traversable floor space (raycast + normal filter).
-    2. Build a capsule occupancy grid (3-height horizontal sweeps).
-    3. Plan a coverage path (farthest-point sampling → greedy tour →
-       Catmull-Rom spline + post-smooth snap).
-    4. Animate a QUATERNION camera with smart look-at (line-of-sight filtered).
-    5. Render PNG frames (EEVEE by default).
-    6. Assemble frames into a looping GIF.
-
-    Args:
-        blend_path:          Path to the input ``.blend`` file.
-        output_dir:          Directory for frames, GIF, and animated ``.blend``.
-        camera_height:       Camera height above detected floor in metres (default 1.7).
-        grid_resolution:     Minimum voxel size in metres (default 0.5). The actual
-                             voxel size is scaled up so the grid never exceeds
-                             max_grid_cells_xy × max_grid_cells_xy × max_grid_cells_z,
-                             keeping ray-cast count fixed regardless of scene size.
-        max_grid_cells_xy:   Maximum grid cells along X and Y axes (default 80).
-        max_grid_cells_z:    Maximum grid cells along Z axis (default 40).
-        obstacle_radius:     Horizontal clearance radius in metres (default 0.5).
-        fps:                 Frames per second rendered by Blender (default 12).
-                             Lower = faster render and smaller GIF.
-        duration_seconds:    Total walkthrough duration in seconds. ``None`` (default)
-                             = auto-calculated from path length / walk_speed_mps,
-                             then capped by max_duration_seconds.
-        max_duration_seconds: Hard cap on auto-calculated duration in seconds (default 60.0).
-                             Prevents multi-hour renders on large outdoor scenes.
-                             Set to ``None`` to disable the cap.
-        walk_speed_mps:      Walking speed in m/s used for auto duration (default 1.2).
-                             Only used when duration_seconds is None.
-        num_waypoints:       Number of coverage waypoints (default 20).
-        look_range:          Maximum distance in metres for look-at targets (default 15.0).
-        rotation_smooth_seconds: Camera rotation time constant in seconds (default 2.0).
-                             Larger = slower, more cinematic rotation.
-        gif_frame_duration:  Milliseconds per GIF frame (default 80 ≈ 12.5 fps).
-        render_engine:       Blender render engine — ``"CYCLES"`` (GPU, default),
-                             ``"EEVEE"``, or ``"WORKBENCH"``.
-        seed:                RNG seed for reproducible path sampling (default 42).
-        render_width:        Rendered frame width in pixels (default 1280).
-        render_height:       Rendered frame height in pixels (default 720).
-        panoramic:           If True, render with a 360° equirectangular camera (Cycles only).
-                             Use render_width=2048, render_height=1024 for standard 360° output.
-        render_samples:      Cycles sample count per frame (default 32). Higher = less noise,
-                             longer render. Ignored for EEVEE/WORKBENCH engines.
-        blender_command:     Path to the Blender executable (default ``"blender"``).
+    Runs the modular walkthrough pipeline (implicit resume) and assembles
+    rendered frames into a GIF.
 
     Returns:
-        dict with keys:
-
-        - ``gif``: Path to the assembled walkthrough GIF.
-        - ``blend_output``: Path to the animated ``.blend`` file.
-        - ``frames_dir``: Path to the rendered PNG frames directory.
-        - ``frame_count``: Number of PNG frames rendered.
-        - ``path_points_count``: Number of smooth path sample points.
-        - ``free_cells_count``: Number of traversable grid cells found.
-        - ``interesting_objects_count``: Number of scoreable look-at targets.
-
-    Raises:
-        RuntimeError: If Blender produces no ``WALKTHROUGH_RESULT:`` line.
+        dict with keys: gif, blend_output, frame_count, frames, step_outputs.
     """
+    from genesis_tools.walkthrough_renderer.walkthrough import run as _wt_run
+
     blend_path = Path(blend_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    blend_output = output_dir / (blend_path.stem + "_walkthrough.blend")
 
     config = {
         "camera_height": camera_height,
@@ -146,16 +82,16 @@ def render_scene_walkthrough(
         "max_grid_cells_z": max_grid_cells_z,
         "obstacle_radius": obstacle_radius,
         "fps": fps,
-        "duration_seconds": duration_seconds,   # None = auto from path length
+        "duration_seconds": duration_seconds,
         "max_duration_seconds": max_duration_seconds,
         "walk_speed_mps": walk_speed_mps,
         "num_waypoints": num_waypoints,
         "look_range": look_range,
         "rotation_smooth_seconds": rotation_smooth_seconds,
-        "render": True,  # always render frames so we can build a GIF
+        "render": True,
         "render_engine": render_engine,
         "seed": seed,
-        "local_area_ratio": local_area_ratio,  # None = global mode; float = ratio × min(span_x,span_y)
+        "local_area_ratio": local_area_ratio,
         "local_height": local_height,
         "render_width": render_width,
         "render_height": render_height,
@@ -167,56 +103,13 @@ def render_scene_walkthrough(
         "voxel_grid_npz": str(voxel_grid_npz) if voxel_grid_npz else None,
     }
 
-    # Windows fix: NamedTemporaryFile stays open until explicitly closed;
-    # Blender subprocess cannot read it while the handle is held.
-    tf = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-    json.dump(config, tf)
-    tf.close()
-    config_path = tf.name
+    result = _wt_run(str(blend_path), config, str(output_dir), render=True)
 
-    try:
-        cmd = [
-            blender_command,
-            "--background",
-            str(blend_path),
-            "--python", str(RENDER_WALKTHROUGH_SCRIPT),
-            "--",
-            "--config", config_path,
-            "--output-blend", str(blend_output),
-            "--output-dir", str(output_dir),
-            "--render-engine", render_engine.upper(),
-        ]
-        env = os.environ.copy()
-        # Ensure libSM.so.6 (and friends) are found when running Blender
-        _extra_lib = "/tmp/deb_extract/usr/lib/x86_64-linux-gnu"
-        if os.path.isdir(_extra_lib):
-            env["LD_LIBRARY_PATH"] = _extra_lib + ":" + env.get("LD_LIBRARY_PATH", "")
-        proc = subprocess.run(cmd, stdout=PIPE, stderr=STDOUT, env=env)
-        stdout = proc.stdout.decode(errors="replace")
-    finally:
-        os.unlink(config_path)
-
-    prefix = "WALKTHROUGH_RESULT:"
-    result = None
-    for line in reversed(stdout.splitlines()):
-        if line.startswith(prefix):
-            result = json.loads(line[len(prefix):])
-            break
-
-    if result is None:
-        raise RuntimeError(
-            f"No WALKTHROUGH_RESULT in Blender output:\n{stdout[-3000:]}"
-        )
-
-    if result.get("status") == "error":
-        raise RuntimeError(f"Blender script error: {result.get('message')}\n{result.get('traceback', '')}")
-
-    # Assemble rendered PNG frames into a GIF.
-    frames_dir = Path(result["frames_dir"])
-    png_frames = sorted(frames_dir.glob("frame_*.png"))
+    frames = result.get("frames", [])
     gif_path = output_dir / (blend_path.stem + "_walkthrough.gif")
-    create_gif(png_frames, gif_path, duration=gif_frame_duration)
+    if frames:
+        create_gif([Path(f) for f in frames], gif_path, duration=gif_frame_duration)
 
     result["gif"] = str(gif_path)
-    result["frame_count"] = len(png_frames)
+    result["frame_count"] = len(frames)
     return result

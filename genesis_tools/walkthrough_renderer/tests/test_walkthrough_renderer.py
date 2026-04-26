@@ -1,205 +1,124 @@
-"""Unit tests for genesis_tools.walkthrough_renderer.
-
-All tests mock subprocess.run and create_gif — no real Blender or PIL required.
-"""
-
-import json
+"""Tests for render_scene_walkthrough() — mocks walkthrough.run and create_gif."""
 import os
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch, MagicMock
+import tempfile
 
-from genesis_tools.walkthrough_renderer import render_scene_walkthrough, RENDER_WALKTHROUGH_SCRIPT
+from genesis_tools.walkthrough_renderer import render_scene_walkthrough
 
 
-# Helpers -----------------------------------------------------------------
-
-def _make_result(**kwargs):
-    """Return encoded subprocess stdout bytes containing WALKTHROUGH_RESULT."""
-    payload = {
-        "status": "success",
-        "blend_output": "/out/scene_walkthrough.blend",
-        "frames_dir": "/out/frames",
-        "path_points_count": 100,
-        "free_cells_count": 400,
-        "interesting_objects_count": 5,
-        **kwargs,
+def _make_run_result(output_dir, blend_stem, n_frames=3):
+    frames = [str(Path(output_dir) / "frames" / f"frame_{i:04d}.png") for i in range(n_frames)]
+    return {
+        "blend_output": str(Path(output_dir) / f"{blend_stem}_walkthrough.blend"),
+        "frames": frames,
+        "step_outputs": {
+            "voxel_grid": str(Path(output_dir) / "voxel_grid.npz"),
+            "walkable":   str(Path(output_dir) / "walkable.npz"),
+            "path":       str(Path(output_dir) / "path.npz"),
+        },
     }
-    line = "WALKTHROUGH_RESULT:" + json.dumps(payload)
-    return line.encode()
 
-
-def _run_mock(stdout_bytes):
-    mock = MagicMock()
-    mock.stdout = stdout_bytes
-    return mock
-
-
-# Tests -------------------------------------------------------------------
 
 @patch("genesis_tools.walkthrough_renderer.create_gif")
 class TestRenderSceneWalkthrough(unittest.TestCase):
-    """All tests patch both subprocess.run and create_gif."""
 
     def setUp(self):
-        import tempfile
         self._tmp = tempfile.NamedTemporaryFile(suffix=".blend", delete=False)
         self._tmp.close()
         self.blend_path = self._tmp.name
+        self.stem = Path(self.blend_path).stem
 
     def tearDown(self):
         os.unlink(self._tmp.name)
 
     # ------------------------------------------------------------------
-    # 1. Happy path — result dict has expected keys + gif key present
+    # 1. Returns expected keys
     # ------------------------------------------------------------------
-    @patch("genesis_tools.walkthrough_renderer.subprocess.run")
-    def test_default_params_returns_result_dict(self, mock_run, mock_gif):
-        mock_run.return_value = _run_mock(_make_result())
-        result = render_scene_walkthrough(self.blend_path, "/tmp/wt_out")
+    @patch("genesis_tools.walkthrough_renderer.walkthrough.run")
+    def test_returns_expected_keys(self, mock_run, mock_gif):
+        mock_run.return_value = _make_run_result("/tmp/wt", self.stem)
+        result = render_scene_walkthrough(self.blend_path, "/tmp/wt")
         self.assertIn("blend_output", result)
-        self.assertIn("path_points_count", result)
-        self.assertIn("free_cells_count", result)
-        self.assertIn("interesting_objects_count", result)
         self.assertIn("gif", result)
-        self.assertEqual(result["status"], "success")
+        self.assertIn("frame_count", result)
+        self.assertIn("step_outputs", result)
 
     # ------------------------------------------------------------------
-    # 2. Output .blend filename uses stem + "_walkthrough"
+    # 2. GIF path uses blend stem
     # ------------------------------------------------------------------
-    @patch("genesis_tools.walkthrough_renderer.subprocess.run")
-    def test_blend_output_stem_naming(self, mock_run, mock_gif):
-        mock_run.return_value = _run_mock(_make_result())
-        render_scene_walkthrough(self.blend_path, "/tmp/wt_out")
-        cmd = mock_run.call_args[0][0]
-        idx = cmd.index("--output-blend")
-        output_blend_arg = cmd[idx + 1]
-        stem = Path(self.blend_path).stem
-        self.assertTrue(
-            output_blend_arg.endswith(f"{stem}_walkthrough.blend"),
-            f"Expected stem '{stem}_walkthrough.blend', got: {output_blend_arg}",
-        )
-
-    # ------------------------------------------------------------------
-    # 3. Config JSON written and path passed after --config
-    # ------------------------------------------------------------------
-    @patch("genesis_tools.walkthrough_renderer.subprocess.run")
-    def test_config_json_written_and_path_passed(self, mock_run, mock_gif):
-        mock_run.return_value = _run_mock(_make_result())
-        render_scene_walkthrough(self.blend_path, "/tmp/wt_out", seed=99)
-        cmd = mock_run.call_args[0][0]
-        self.assertIn("--config", cmd)
-        config_path = cmd[cmd.index("--config") + 1]
-        self.assertTrue(config_path.endswith(".json"), config_path)
-
-    # ------------------------------------------------------------------
-    # 4. render is always True in config (GIF requires frames)
-    # ------------------------------------------------------------------
-    @patch("genesis_tools.walkthrough_renderer.subprocess.run")
-    def test_render_always_true_in_config(self, mock_run, mock_gif):
-        captured_config = {}
-
-        def capture_run(cmd, **kwargs):
-            config_path = cmd[cmd.index("--config") + 1]
-            with open(config_path) as fh:
-                captured_config.update(json.load(fh))
-            return _run_mock(_make_result())
-
-        mock_run.side_effect = capture_run
-        render_scene_walkthrough(self.blend_path, "/tmp/wt_out")
-        self.assertTrue(captured_config.get("render"), "render must always be True")
-
-    # ------------------------------------------------------------------
-    # 5. --render-engine is passed in the command
-    # ------------------------------------------------------------------
-    @patch("genesis_tools.walkthrough_renderer.subprocess.run")
-    def test_render_engine_passed_in_cmd(self, mock_run, mock_gif):
-        mock_run.return_value = _run_mock(_make_result())
-        render_scene_walkthrough(self.blend_path, "/tmp/wt_out", render_engine="WORKBENCH")
-        cmd = mock_run.call_args[0][0]
-        self.assertIn("--render-engine", cmd)
-        idx = cmd.index("--render-engine")
-        self.assertEqual(cmd[idx + 1], "WORKBENCH")
-
-    # ------------------------------------------------------------------
-    # 6. WALKTHROUGH_RESULT line is correctly parsed
-    # ------------------------------------------------------------------
-    @patch("genesis_tools.walkthrough_renderer.subprocess.run")
-    def test_result_line_parsed_correctly(self, mock_run, mock_gif):
-        mock_run.return_value = _run_mock(
-            b"Blender startup noise\n"
-            b"WALKTHROUGH_RESULT:" + json.dumps({
-                "status": "success",
-                "blend_output": "/x/y_walkthrough.blend",
-                "frames_dir": "/x/frames",
-                "path_points_count": 42,
-                "free_cells_count": 200,
-                "interesting_objects_count": 3,
-            }).encode()
-        )
-        result = render_scene_walkthrough(self.blend_path, "/tmp/wt_out")
-        self.assertEqual(result["path_points_count"], 42)
-        self.assertEqual(result["free_cells_count"], 200)
-
-    # ------------------------------------------------------------------
-    # 7. Missing WALKTHROUGH_RESULT raises RuntimeError
-    # ------------------------------------------------------------------
-    @patch("genesis_tools.walkthrough_renderer.subprocess.run")
-    def test_missing_result_line_raises_runtime_error(self, mock_run, mock_gif):
-        mock_run.return_value = _run_mock(b"Blender crash log\nNo result here\n")
-        with self.assertRaises(RuntimeError):
-            render_scene_walkthrough(self.blend_path, "/tmp/wt_out")
-
-    # ------------------------------------------------------------------
-    # 8. Temp config file deleted after successful run
-    # ------------------------------------------------------------------
-    @patch("genesis_tools.walkthrough_renderer.subprocess.run")
-    def test_temp_file_cleaned_up_on_success(self, mock_run, mock_gif):
-        saved_path = []
-
-        def capture_and_succeed(cmd, **kwargs):
-            saved_path.append(cmd[cmd.index("--config") + 1])
-            return _run_mock(_make_result())
-
-        mock_run.side_effect = capture_and_succeed
-        render_scene_walkthrough(self.blend_path, "/tmp/wt_out")
-        self.assertFalse(os.path.exists(saved_path[0]))
-
-    # ------------------------------------------------------------------
-    # 9. Temp config file deleted even on subprocess failure
-    # ------------------------------------------------------------------
-    @patch("genesis_tools.walkthrough_renderer.subprocess.run")
-    def test_temp_file_cleaned_up_on_failure(self, mock_run, mock_gif):
-        saved_path = []
-
-        def capture_and_fail(cmd, **kwargs):
-            saved_path.append(cmd[cmd.index("--config") + 1])
-            raise OSError("blender not found")
-
-        mock_run.side_effect = capture_and_fail
-        with self.assertRaises(OSError):
-            render_scene_walkthrough(self.blend_path, "/tmp/wt_out")
-        self.assertFalse(os.path.exists(saved_path[0]))
-
-    # ------------------------------------------------------------------
-    # 10. RENDER_WALKTHROUGH_SCRIPT is inside the sub-package
-    # ------------------------------------------------------------------
-    def test_render_walkthrough_script_is_inside_subpackage(self, mock_gif):
-        self.assertTrue(RENDER_WALKTHROUGH_SCRIPT.exists())
-        self.assertEqual(RENDER_WALKTHROUGH_SCRIPT.name, "render_walkthrough.py")
-
-    # ------------------------------------------------------------------
-    # 11. create_gif is called with PNG frames from frames_dir
-    # ------------------------------------------------------------------
-    @patch("genesis_tools.walkthrough_renderer.subprocess.run")
-    def test_create_gif_called_after_render(self, mock_run, mock_gif):
-        mock_run.return_value = _run_mock(_make_result(frames_dir="/out/frames"))
-        render_scene_walkthrough(self.blend_path, "/tmp/wt_out")
-        mock_gif.assert_called_once()
-        # Second positional arg is the gif output path
+    @patch("genesis_tools.walkthrough_renderer.walkthrough.run")
+    def test_gif_path_uses_blend_stem(self, mock_run, mock_gif):
+        mock_run.return_value = _make_run_result("/tmp/wt", self.stem)
+        render_scene_walkthrough(self.blend_path, "/tmp/wt")
         gif_out = mock_gif.call_args[0][1]
-        stem = Path(self.blend_path).stem
-        self.assertTrue(str(gif_out).endswith(f"{stem}_walkthrough.gif"))
+        self.assertTrue(str(gif_out).endswith(f"{self.stem}_walkthrough.gif"))
+
+    # ------------------------------------------------------------------
+    # 3. render=True is always passed to walkthrough.run
+    # ------------------------------------------------------------------
+    @patch("genesis_tools.walkthrough_renderer.walkthrough.run")
+    def test_render_true_passed_to_run(self, mock_run, mock_gif):
+        mock_run.return_value = _make_run_result("/tmp/wt", self.stem)
+        render_scene_walkthrough(self.blend_path, "/tmp/wt")
+        _, _, _, render_kwarg = mock_run.call_args[0][0], mock_run.call_args[0][1], mock_run.call_args[0][2], True
+        # render is the 4th positional arg or keyword
+        call_args, call_kwargs = mock_run.call_args
+        render_val = call_kwargs.get("render", call_args[3] if len(call_args) > 3 else None)
+        self.assertTrue(render_val)
+
+    # ------------------------------------------------------------------
+    # 4. Config params forwarded correctly
+    # ------------------------------------------------------------------
+    @patch("genesis_tools.walkthrough_renderer.walkthrough.run")
+    def test_config_params_forwarded(self, mock_run, mock_gif):
+        mock_run.return_value = _make_run_result("/tmp/wt", self.stem)
+        render_scene_walkthrough(self.blend_path, "/tmp/wt", seed=99, num_waypoints=7)
+        call_args = mock_run.call_args[0]
+        config = call_args[1]
+        self.assertEqual(config["seed"], 99)
+        self.assertEqual(config["num_waypoints"], 7)
+        self.assertTrue(config.get("render"))
+
+    # ------------------------------------------------------------------
+    # 5. frame_count matches frames list length
+    # ------------------------------------------------------------------
+    @patch("genesis_tools.walkthrough_renderer.walkthrough.run")
+    def test_frame_count_matches_frames(self, mock_run, mock_gif):
+        mock_run.return_value = _make_run_result("/tmp/wt", self.stem, n_frames=5)
+        result = render_scene_walkthrough(self.blend_path, "/tmp/wt")
+        self.assertEqual(result["frame_count"], 5)
+
+    # ------------------------------------------------------------------
+    # 6. create_gif called once with correct output path
+    # ------------------------------------------------------------------
+    @patch("genesis_tools.walkthrough_renderer.walkthrough.run")
+    def test_create_gif_called_once(self, mock_run, mock_gif):
+        mock_run.return_value = _make_run_result("/tmp/wt", self.stem)
+        render_scene_walkthrough(self.blend_path, "/tmp/wt")
+        mock_gif.assert_called_once()
+
+    # ------------------------------------------------------------------
+    # 7. No GIF call when frames list is empty
+    # ------------------------------------------------------------------
+    @patch("genesis_tools.walkthrough_renderer.walkthrough.run")
+    def test_no_gif_when_no_frames(self, mock_run, mock_gif):
+        result_data = _make_run_result("/tmp/wt", self.stem, n_frames=0)
+        mock_run.return_value = result_data
+        result = render_scene_walkthrough(self.blend_path, "/tmp/wt")
+        mock_gif.assert_not_called()
+        self.assertEqual(result["frame_count"], 0)
+
+    # ------------------------------------------------------------------
+    # 8. gif_frame_duration forwarded to create_gif
+    # ------------------------------------------------------------------
+    @patch("genesis_tools.walkthrough_renderer.walkthrough.run")
+    def test_gif_frame_duration_forwarded(self, mock_run, mock_gif):
+        mock_run.return_value = _make_run_result("/tmp/wt", self.stem)
+        render_scene_walkthrough(self.blend_path, "/tmp/wt", gif_frame_duration=120)
+        _, kwargs = mock_gif.call_args[0], mock_gif.call_args[1]
+        self.assertEqual(kwargs.get("duration"), 120)
 
 
 if __name__ == "__main__":

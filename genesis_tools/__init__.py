@@ -9,7 +9,4 @@ from genesis_tools.rotation_renderer import (  # noqa: F401
     RENDER_ROTATION_SCRIPT,
     RENDER_SCENE_ROTATION_SCRIPT,
 )
-from genesis_tools.walkthrough_renderer import (  # noqa: F401
-    render_scene_walkthrough,
-    RENDER_WALKTHROUGH_SCRIPT,
-)
+from genesis_tools.walkthrough_renderer import render_scene_walkthrough  # noqa: F401
