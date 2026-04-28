@@ -40,7 +40,8 @@ def build(blend_path: str, path_data, orient: "OrientData",
             for i in range(len(path_vecs) - 1)
         )
         walk_speed = config.get("walk_speed_mps", 1.2)
-        raw_dur = max(5.0, path_length / walk_speed)
+        path_length_m = path_length * unit_scale  # BU → metres
+        raw_dur = max(5.0, path_length_m / walk_speed)
         max_dur = config.get("max_duration_seconds")
         config["duration_seconds"] = min(raw_dur, max_dur) if max_dur else raw_dur
 

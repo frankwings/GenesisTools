@@ -11,13 +11,20 @@ from pathlib import Path
 from typing import List
 
 
+BLENDER_CMD = "/home/kingy/blender/blender"
+
+
+def _find_blender() -> str:
+    import shutil
+    return shutil.which("blender") or BLENDER_CMD
+
+
 def build(blend_path: str, config: dict, output_dir: str) -> List[str]:
-    """Render the animated .blend to PNG frames via BlenderRunner.
+    """Render the animated .blend to PNG frames via blender --background.
 
     Returns list of rendered frame paths.
     """
-    from genesis_tools.blender_runner import BlenderRunner
-    import tempfile, os
+    import os, subprocess, tempfile
 
     output_dir = Path(output_dir)
     frames_dir = output_dir / "frames"
@@ -38,12 +45,14 @@ def build(blend_path: str, config: dict, output_dir: str) -> List[str]:
     json.dump(render_config, tf)
     tf.close()
     try:
-        runner = BlenderRunner()
-        runner.run(
-            blend_path=blend_path,
-            script=str(render_script),
-            extra_args=["--", "--config", tf.name],
-        )
+        cmd = [
+            _find_blender(), "--background", str(blend_path),
+            "--python", str(render_script),
+            "--", "--config", tf.name,
+        ]
+        result = subprocess.run(cmd, capture_output=False)
+        if result.returncode != 0:
+            raise RuntimeError(f"Render step failed (exit {result.returncode})")
     finally:
         os.unlink(tf.name)
 
