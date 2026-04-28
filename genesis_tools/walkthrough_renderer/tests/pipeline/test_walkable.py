@@ -63,13 +63,46 @@ class TestFloodFill:
 # ---------------------------------------------------------------------------
 
 class TestCheckWalkable:
-    def test_returns_all_candidates(self):
+    def test_iz0_always_passes(self):
+        # iz=0 passes regardless of solid (scene-bottom boundary)
         candidates = {(0, 0, 0), (1, 0, 0), (2, 0, 0)}
-        result = _check_walkable_v2(candidates, (0, 0, 3, 3, 0, 3), {})
+        result = _check_walkable_v2(candidates, set(), (0, 0, 3, 3, 0, 3), {})
         assert result == candidates
 
+    def test_mid_air_excluded_when_floor_exists(self):
+        # iz=1 without solid below is excluded when floor-level voxels exist
+        solid = set()
+        candidates = {(0, 0, 0), (1, 0, 1)}  # (0,0,0) is iz=0 (floor), (1,0,1) is mid-air
+        result = _check_walkable_v2(candidates, solid, (0, 0, 3, 3, 0, 3), {})
+        assert result == {(0, 0, 0)}          # mid-air excluded; iz=0 passes
+
+    def test_solid_below_passes(self):
+        # iz=2 with solid at iz=1 directly below passes
+        solid = {(0, 0, 1)}
+        candidates = {(0, 0, 2)}
+        result = _check_walkable_v2(candidates, solid, (0, 0, 3, 3, 0, 3), {})
+        assert result == candidates
+
+    def test_floor_filter_mixed(self):
+        # iz=0 passes, iz=1 passes if solid below, iz=2 without solid excluded
+        solid = {(0, 0, 0)}        # floor at iz=0 for column (0,0)
+        candidates = {
+            (0, 0, 0),             # iz=0 → passes (iz==0)
+            (0, 0, 1),             # iz=1, solid at (0,0,0) → passes
+            (0, 0, 2),             # iz=2, solid at (0,0,1)? No → excluded
+            (1, 0, 1),             # iz=1, solid at (1,0,0)? No → excluded
+        }
+        result = _check_walkable_v2(candidates, solid, (0, 0, 3, 3, 0, 3), {})
+        assert result == {(0, 0, 0), (0, 0, 1)}
+
+    def test_fallback_on_empty_result(self):
+        # If no floor-level voxels found, returns all candidates
+        candidates = {(0, 0, 3), (1, 0, 3)}   # iz=3, no solid below
+        result = _check_walkable_v2(candidates, set(), (0, 0, 3, 3, 0, 3), {})
+        assert result == candidates             # fallback
+
     def test_empty_candidates(self):
-        result = _check_walkable_v2(set(), (0, 0, 3, 3, 0, 3), {})
+        result = _check_walkable_v2(set(), set(), (0, 0, 3, 3, 0, 3), {})
         assert result == set()
 
 
@@ -78,27 +111,40 @@ class TestCheckWalkable:
 # ---------------------------------------------------------------------------
 
 class TestBuild:
-    def test_build_basic(self):
-        # 3×3×3 grid, no solid → all voxels walkable
+    def test_build_basic_no_solid(self):
+        # 3×3×3 grid, no solid → only iz=0 voxels pass floor filter (9 cells)
         vg = _make_vg(set(), nx=3, ny=3, nz=3)
         result = build(vg, {})
         assert isinstance(result, WalkableData)
         assert result.walkable.shape[1] == 3
-        assert len(result.walkable) == 27
+        walkable_set = {tuple(r) for r in result.walkable}
+        assert all(iz == 0 for _, _, iz in walkable_set)
+        assert len(result.walkable) == 9
 
-    def test_build_with_solid(self):
-        # Solid wall cuts off part of grid
+    def test_build_with_floor_solid(self):
+        # Floor solid at iz=0 → iz=1 voxels are walkable (standing on floor)
+        solid = {(x, y, 0) for x in range(3) for y in range(3)}   # solid floor
+        vg = _make_vg(solid, nx=3, ny=3, nz=3)
+        result = build(vg, {}, camera_ijk=(1, 1, 1))
+        walkable_set = {tuple(r) for r in result.walkable}
+        # iz=1 voxels have solid below (iz=0 is solid) → all 9 pass
+        assert all(iz == 1 for _, _, iz in walkable_set)
+        assert len(result.walkable) == 9
+
+    def test_build_wall_blocks_bfs(self):
+        # Solid wall at z=2 cuts off z=3; only z=0 from floor filter (no solid floor)
         solid = {(x, y, 2) for x in range(3) for y in range(3)}
         vg = _make_vg(solid, nx=3, ny=3, nz=4)
         result = build(vg, {}, camera_ijk=(1, 1, 0))
-        # z=0,1 reachable (18 cells), not z=2 (solid) or z=3 (disconnected)
-        assert len(result.walkable) == 18
-        assert all(k <= 1 for _, _, k in result.walkable)
+        # BFS reaches z=0,1 (18 cells); floor filter: only iz=0 passes (no solid below z=0-1)
+        assert len(result.walkable) == 9
+        assert all(iz == 0 for _, _, iz in result.walkable)
 
     def test_build_explicit_camera_ijk(self):
+        # 2×2×2, no solid → only iz=0 (4 cells)
         vg = _make_vg(set(), nx=2, ny=2, nz=2)
         result = build(vg, {}, camera_ijk=(0, 0, 0))
-        assert len(result.walkable) == 8
+        assert len(result.walkable) == 4
 
     def test_build_returns_int32(self):
         vg = _make_vg(set(), nx=2, ny=2, nz=2)

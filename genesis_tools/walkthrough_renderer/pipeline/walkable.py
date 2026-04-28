@@ -58,9 +58,23 @@ def _flood_fill_free_from_camera(solid: set, camera_ijk: tuple,
     return visited
 
 
-def _check_walkable_v2(candidates: set, bounds: tuple, config: dict) -> set:
-    """Floor-based walkable filter — all BFS-reachable candidates are walkable."""
-    print(f"[Walkable] Floor check skipped — all {len(candidates)} candidates walkable")
+def _check_walkable_v2(candidates: set, solid: set, bounds: tuple, config: dict) -> set:
+    """Return only floor-surface walkable voxels: those with solid directly below.
+
+    A walkable voxel must have either iz==0 (scene bottom) or a solid voxel at
+    (ix, iy, iz-1) — meaning the camera can stand on solid geometry there.
+    Without this filter the set includes mid-air and ceiling-level voxels, which
+    causes the path to route through floors when path_plan picks the minimum iz.
+    """
+    floor_level = set()
+    for (ix, iy, iz) in candidates:
+        if iz == 0 or (ix, iy, iz - 1) in solid:
+            floor_level.add((ix, iy, iz))
+    if floor_level:
+        print(f"[Walkable] Floor filter: {len(floor_level)} floor-level voxels "
+              f"(from {len(candidates)} free candidates)")
+        return floor_level
+    print(f"[Walkable] Floor filter found 0 — falling back to all {len(candidates)} candidates")
     return set(candidates)
 
 
@@ -87,7 +101,7 @@ def build(vg, config: dict, camera_ijk: tuple | None = None) -> WalkableData:
             camera_ijk = (vg.nx // 2, vg.ny // 2, vg.nz // 2)
 
     free = _flood_fill_free_from_camera(solid_set, camera_ijk, vg.nx, vg.ny, vg.nz)
-    walkable_set = _check_walkable_v2(free, vg.bounds, config)
+    walkable_set = _check_walkable_v2(free, solid_set, vg.bounds, config)
 
     if walkable_set:
         walkable_arr = np.array(sorted(walkable_set), dtype=np.int32)
