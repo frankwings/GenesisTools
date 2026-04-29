@@ -244,7 +244,12 @@ def _cli():
     parser.add_argument("--voxel-grid", required=True, help="Path to voxel_grid.npz")
     parser.add_argument("--config", required=True, help="Path to config JSON")
     parser.add_argument("--output", required=True, help="Path to output walkable.npz")
+    parser.add_argument("--blend", default=None, help="Path to .blend file (opens scene for ray_cast)")
     args = parser.parse_args()
+
+    if args.blend:
+        import bpy
+        bpy.ops.wm.open_mainfile(filepath=args.blend)
 
     from genesis_tools.walkthrough_renderer.pipeline.voxel_grid import load as vg_load
     vg = vg_load(args.voxel_grid)

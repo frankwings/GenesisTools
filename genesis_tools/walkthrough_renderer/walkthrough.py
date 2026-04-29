@@ -111,8 +111,12 @@ def run(blend_path: str, config: dict, output_dir: str,
             wk = wk_load(str(wk_path))
         else:
             print("[Walkthrough] Step 2: walkable")
-            wk = wk_build(vg, config)
-            wk_save(wk, str(wk_path))
+            _run_bpy_module(
+                "genesis_tools.walkthrough_renderer.pipeline.walkable",
+                ["--blend", blend_path, "--voxel-grid", str(vg_path),
+                 "--config", config_path, "--output", str(wk_path)],
+            )
+            wk = wk_load(str(wk_path))
 
         # ----- Step 3: path -----
         if pd_path.exists():
