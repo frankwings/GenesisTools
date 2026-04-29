@@ -61,8 +61,15 @@ def _flood_fill_free_from_camera(solid: set, camera_ijk: tuple,
 def _check_voxel_free_by_edges(raw: set, vg) -> set:
     """Snake mode step 2a: filter raw voxels by edge-mesh intersection (bpy).
 
-    Fires rays along each of the 12 edges of the voxel against scene geometry.
-    A voxel with no edge hits is entirely free (no geometry passes through it).
+    Each of the 12 edges of a voxel is shared by up to 4 neighbouring voxels.
+    Results are cached by edge key so each edge is ray-cast at most once.
+
+    Edge keys:
+      ("x", ix, jy, jz) — ray from (ix, jy, jz) corner in +X for length res
+      ("y", jx, iy, jz) — ray from (jx, iy, jz) corner in +Y for length res
+      ("z", jx, jy, iz) — ray from (jx, jy, iz) corner in +Z for length res
+    where ix/iy/iz are cell indices and jy/jz etc. are corner indices (cell ± 1).
+
     Requires bpy — call only after a .blend file is open.
     """
     import bpy
@@ -77,6 +84,14 @@ def _check_voxel_free_by_edges(raw: set, vg) -> set:
     DY = Vector((0.0, 1.0, 0.0))
     DZ = Vector((0.0, 0.0, 1.0))
 
+    edge_cache: dict = {}
+
+    def _hit(key, origin, direction) -> bool:
+        if key not in edge_cache:
+            h, *_ = scene.ray_cast(depsgraph, origin, direction, distance=res)
+            edge_cache[key] = h
+        return edge_cache[key]
+
     free = set()
     for (ix, iy, iz) in raw:
         x0 = min_x + ix * res;  x1 = x0 + res
@@ -84,25 +99,33 @@ def _check_voxel_free_by_edges(raw: set, vg) -> set:
         z0 = min_z + iz * res;  z1 = z0 + res
 
         hit = False
-        # 4 edges along X
-        for (y, z) in ((y0, z0), (y1, z0), (y0, z1), (y1, z1)):
-            h, *_ = scene.ray_cast(depsgraph, Vector((x0, y, z)), DX, distance=res)
-            if h: hit = True; break
-        # 4 edges along Y
+        # 4 X-edges: corners at (jy, jz) = (iy/iy+1, iz/iz+1)
+        for jy, y in ((iy, y0), (iy + 1, y1)):
+            for jz, z in ((iz, z0), (iz + 1, z1)):
+                if _hit(("x", ix, jy, jz), Vector((x0, y, z)), DX):
+                    hit = True; break
+            if hit: break
+        # 4 Y-edges: corners at (jx, jz) = (ix/ix+1, iz/iz+1)
         if not hit:
-            for (x, z) in ((x0, z0), (x1, z0), (x0, z1), (x1, z1)):
-                h, *_ = scene.ray_cast(depsgraph, Vector((x, y0, z)), DY, distance=res)
-                if h: hit = True; break
-        # 4 edges along Z
+            for jx, x in ((ix, x0), (ix + 1, x1)):
+                for jz, z in ((iz, z0), (iz + 1, z1)):
+                    if _hit(("y", jx, iy, jz), Vector((x, y0, z)), DY):
+                        hit = True; break
+                if hit: break
+        # 4 Z-edges: corners at (jx, jy) = (ix/ix+1, iy/iy+1)
         if not hit:
-            for (x, y) in ((x0, y0), (x1, y0), (x0, y1), (x1, y1)):
-                h, *_ = scene.ray_cast(depsgraph, Vector((x, y, z0)), DZ, distance=res)
-                if h: hit = True; break
+            for jx, x in ((ix, x0), (ix + 1, x1)):
+                for jy, y in ((iy, y0), (iy + 1, y1)):
+                    if _hit(("z", jx, jy, iz), Vector((x, y, z0)), DZ):
+                        hit = True; break
+                if hit: break
 
         if not hit:
             free.add((ix, iy, iz))
 
-    print(f"[Walkable] Edge check: {len(free)} free voxels (from {len(raw)} raw)")
+    print(f"[Walkable] Edge check: {len(free)} free / {len(raw)} raw "
+          f"({len(edge_cache)} unique ray casts, "
+          f"{12 * len(raw) - len(edge_cache)} cache hits)")
     return free
 
 
