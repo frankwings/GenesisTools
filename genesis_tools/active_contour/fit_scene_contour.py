@@ -321,7 +321,7 @@ def fit_scene_active_contour(
     dt: float = 0.05,
     sampling_resolution: float = 0.5,
     max_iter: int = 300,
-    subdivision_levels: int = 2,
+    subdivision_levels: int = 0,
     max_tris: int = 500_000,
     blender_command: str = "blender",
     reuse_npz: bool = False,
@@ -419,7 +419,7 @@ def parse_args():
     p.add_argument("--dt", type=float, default=0.05)
     p.add_argument("--sampling-res", type=float, default=0.5)
     p.add_argument("--max-iter", type=int, default=300)
-    p.add_argument("--subdivision-levels", type=int, default=2)
+    p.add_argument("--subdivision-levels", type=int, default=0)
     p.add_argument("--max-tris", type=int, default=500_000)
     p.add_argument("--blender", default="blender")
     p.add_argument("--render-engine", default="WORKBENCH",

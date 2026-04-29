@@ -210,7 +210,7 @@ class Snake3D:
         dt: float = 0.15,
         max_iterations: int = 300,
         convergence_threshold: float = 1e-4,
-        subdivision_levels: int = 2,
+        subdivision_levels: int = 0,
     ) -> None:
         self.sampled_points = np.asarray(sampled_points, dtype=np.float64)
         self.alpha = alpha
@@ -222,11 +222,26 @@ class Snake3D:
         self._kd = KDTree(self.sampled_points)
 
         hull = ConvexHull(self.sampled_points)
-        init_verts = self.sampled_points[hull.vertices].copy()
-        vmap = {old: new for new, old in enumerate(hull.vertices)}
+        # Use only vertices actually referenced by simplices — hull.vertices may
+        # include coplanar points that appear in no face, causing isolated vertices.
+        simplex_verts = np.unique(hull.simplices.ravel())
+        init_verts = self.sampled_points[simplex_verts].copy()
+        vmap = {int(old): new for new, old in enumerate(simplex_verts)}
         init_faces = np.array(
             [[vmap[int(i)] for i in s] for s in hull.simplices], dtype=np.int64
         )
+
+        # Ensure all face normals point outward (away from centroid).
+        # scipy ConvexHull.simplices has no guaranteed winding order, so some
+        # faces may be inward-facing — Blender's backface culling hides them,
+        # creating apparent holes in the mesh.
+        centroid = init_verts.mean(axis=0)
+        for i, f in enumerate(init_faces):
+            v0, v1, v2 = init_verts[f[0]], init_verts[f[1]], init_verts[f[2]]
+            normal = np.cross(v1 - v0, v2 - v0)
+            if np.dot(normal, (v0 + v1 + v2) / 3 - centroid) < 0:
+                init_faces[i, 1], init_faces[i, 2] = init_faces[i, 2], init_faces[i, 1]
+
         self.vertices, self.faces = subdivide_mesh(
             init_verts, init_faces, levels=subdivision_levels
         )

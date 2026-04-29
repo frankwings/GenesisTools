@@ -292,7 +292,10 @@ def main():
                                    snake_obj=snake_obj)
 
     print("[overlay] Saving blend …")
-    bpy.ops.wm.save_as_mainfile(filepath=str(output_blend))
+    try:
+        bpy.ops.wm.save_as_mainfile(filepath=str(output_blend))
+    except RuntimeError as e:
+        print(f"  [overlay] save warning (non-fatal): {e}")
 
     result = {"blend": str(output_blend), "renders": rendered}
     print(f"OVERLAY_RESULT:{json.dumps(result)}")
