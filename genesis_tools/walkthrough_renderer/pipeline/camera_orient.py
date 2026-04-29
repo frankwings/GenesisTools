@@ -23,42 +23,49 @@ class OrientData:
 # ---------------------------------------------------------------------------
 
 def _compute_waypoint_orientations(tour, cam_height, scene, depsgraph):
-    """For each tour waypoint, find the horizontal direction toward visible waypoints."""
+    """For each tour waypoint i, gaze toward visible unvisited waypoints i+1..n-1.
+
+    Waypoint n-1 (last) looks toward waypoint 0 (first).
+    Only future waypoints in tour order are candidates — already-visited
+    waypoints are excluded. LOS ray_cast filters to those with clear sightlines.
+    Falls back to the next waypoint direction if nothing is visible.
+    """
     from mathutils import Vector
     n = len(tour)
     if n < 2:
         return [Vector((1, 0, 0))] * n
 
     eyes = [Vector(w) + Vector((0, 0, cam_height)) for w in tour]
-    vis = [[False] * n for _ in range(n)]
-    for i in range(n):
-        for j in range(i + 1, n):
-            d = eyes[j] - eyes[i]
-            dist = d.length
-            if dist < 0.1:
-                vis[i][j] = vis[j][i] = True
-                continue
-            hit, *_ = scene.ray_cast(depsgraph, eyes[i], d.normalized(),
-                                     distance=dist - 0.1)
-            if not hit:
-                vis[i][j] = vis[j][i] = True
+
+    def _visible(i, j) -> bool:
+        d = eyes[j] - eyes[i]
+        dist = d.length
+        if dist < 0.1:
+            return True
+        hit, *_ = scene.ray_cast(depsgraph, eyes[i], d.normalized(),
+                                 distance=dist - 0.1)
+        return not hit
 
     orientations = []
     for i in range(n):
-        visible_eyes = [eyes[j] for j in range(n) if j != i and vis[i][j]]
-        if not visible_eyes:
-            nxt = (i + 1) % n
-            fwd = eyes[nxt] - eyes[i]; fwd.z = 0
-            orientations.append(fwd.normalized() if fwd.length > 0.01
-                                else Vector((1, 0, 0)))
-            continue
+        # future candidates: i+1..n-1, wrapping last→first
+        if i < n - 1:
+            candidates = list(range(i + 1, n))
+        else:
+            candidates = [0]
+
+        visible = [j for j in candidates if _visible(i, j)]
+        targets = visible if visible else [candidates[0]]
+
         avg = Vector((0.0, 0.0, 0.0))
-        for vp in visible_eyes:
-            to_vp = vp - eyes[i]; to_vp.z = 0.0
-            if to_vp.length > 0.01:
-                avg += to_vp.normalized()
+        for j in targets:
+            to_j = eyes[j] - eyes[i]; to_j.z = 0.0
+            if to_j.length > 0.01:
+                avg += to_j.normalized()
         orientations.append(avg.normalized() if avg.length > 0.01
                             else Vector((1, 0, 0)))
+
+    print(f"[CameraOrient] Waypoint gazes computed ({n} waypoints, future-only LOS)")
     return orientations
 
 
