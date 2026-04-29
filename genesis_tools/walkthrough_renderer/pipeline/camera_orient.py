@@ -94,20 +94,20 @@ def _dir_to_quat(direction):
 # ---------------------------------------------------------------------------
 
 def build(blend_path: str, path_data, config: dict) -> OrientData:
-    """Compute waypoint orientations from path data.
+    """Compute waypoint orientations via LOS-based visible-waypoint averaging.
 
-    If waypoint_gaze_mode is "free" (default), returns an empty schedule
-    and camera_animate will use travel-direction gaze.
+    For each waypoint, casts rays to all other waypoints; averages horizontal
+    directions toward the visible ones. camera_animate interpolates between
+    these quaternions along the path with slerp smoothing.
     """
     import bpy
     from mathutils import Vector
     bpy.ops.wm.open_mainfile(filepath=blend_path)
 
-    wp_gaze_mode = config.get("waypoint_gaze_mode", "free")
     unit_scale = float(bpy.context.scene.unit_settings.scale_length or 1.0)
     cam_h_bu = config.get("camera_height", 1.7) / unit_scale
 
-    if wp_gaze_mode not in ("force_only", "constrained") or len(path_data.waypoints) < 2:
+    if len(path_data.waypoints) < 2:
         return OrientData(wp_schedule=[])
 
     dg = bpy.context.evaluated_depsgraph_get()

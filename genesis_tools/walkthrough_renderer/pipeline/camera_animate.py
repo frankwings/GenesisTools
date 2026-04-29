@@ -110,7 +110,7 @@ def build(blend_path: str, path_data, orient: "OrientData",
         path_pt = _sample_path(t)
         cam_pos = path_pt + Vector((0, 0, cam_h))
 
-        if wp_schedule and wp_gaze_mode in ("force_only", "constrained"):
+        if wp_schedule:
             target_quat = _get_base_quat(t)
         else:
             floor_ahead = _sample_path(min(1.0, t + 0.15))
