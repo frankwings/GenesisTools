@@ -119,63 +119,79 @@ def _collect_hits_bidir(origin, direction, max_dist):
     return list(_cast_all_hits_bidir(origin, direction, max_dist))
 
 
-def _load_snake_data(config):
+def _load_snake_mesh(config):
+    """Load AC snake mesh (vertices + faces only). No voxel_grid_npz needed."""
     path = config.get("snake_npz")
     if not path:
         return None
     data = np.load(path)
-    verts = data["vertices"].astype(np.float64)
-    faces = data["faces"].astype(np.int64)
+    return {
+        "verts": data["vertices"].astype(np.float64),
+        "faces": data["faces"].astype(np.int64),
+    }
+
+
+def _build_raw_voxels_from_snake(snake_mesh, config):
+    """Step 1 (snake mode): mark raw voxels by inside-AC test.
+
+    Builds a grid from the AC mesh AABB, then for each voxel centre fires a
+    +X ray through the BVHTree of the AC mesh and counts intersections.
+    Odd count → inside → raw voxel.  No scene ray-cast used here.
+    """
+    from mathutils import Vector
+    from mathutils.bvhtree import BVHTree
+
+    verts = snake_mesh["verts"]
+    faces = snake_mesh["faces"]
     lo = verts.min(axis=0)
     hi = verts.max(axis=0)
-    centers = None; grid_shape = None; voxel_size = None
-    gp = config.get("voxel_grid_npz")
-    if gp:
-        gdata = np.load(gp)
-        voxel_size = float(gdata["voxel_size"])
-        centers = gdata["centers"].astype(np.float64)
-        grid_shape = tuple(int(x) for x in gdata["grid_shape"].tolist())
-    return {"verts": verts, "faces": faces, "lo": lo, "hi": hi,
-            "voxel_size": voxel_size, "centers": centers, "grid_shape": grid_shape}
 
+    unit_scale = _get_unit_scale()
+    res = config.get("grid_resolution", 0.5) / unit_scale
+    span = hi - lo
+    max_xy = config.get("max_grid_cells_xy", 80)
+    max_nz = config.get("max_grid_cells_z", 40)
+    res = max(res, span[0] / max_xy, span[1] / max_xy, span[2] / max_nz)
 
-def _build_voxel_grid_from_snake(snake_data):
-    """Build solid set from pre-computed VoxelGrid snake centres."""
-    import bpy
-    from mathutils import Vector
-    centers    = snake_data["centers"]
-    res        = snake_data["voxel_size"]
-    nx, ny, nz = snake_data["grid_shape"]
-    lo         = snake_data["lo"]
-    bounds = (lo[0], lo[1], lo[0]+nx*res, lo[1]+ny*res, lo[2], lo[2]+nz*res)
+    nx = max(1, int(math.ceil(span[0] / res)))
+    ny = max(1, int(math.ceil(span[1] / res)))
+    nz = max(1, int(math.ceil(span[2] / res)))
+    bounds = (lo[0], lo[1], lo[0] + nx * res, lo[1] + ny * res, lo[2], lo[2] + nz * res)
 
-    scene     = bpy.context.scene
-    depsgraph = bpy.context.evaluated_depsgraph_get()
-    half      = res * 0.5
-    DIRS = [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)]
+    bvh = BVHTree.FromPolygons(
+        [Vector(v) for v in verts.tolist()],
+        [tuple(int(i) for i in f) for f in faces.tolist()],
+    )
 
-    center_world = {}
-    for cx, cy, cz in centers.tolist():
-        ix = max(0, min(nx-1, int((cx-lo[0])/res)))
-        iy = max(0, min(ny-1, int((cy-lo[1])/res)))
-        iz = max(0, min(nz-1, int((cz-lo[2])/res)))
-        center_world[(ix,iy,iz)] = (cx,cy,cz)
+    direction = Vector((1.0, 0.0, 0.0))
+    # Total X span of mesh + margin — enough for the ray to exit the mesh
+    x_span = float(hi[0]) - float(lo[0]) + res * 2.0
+    step = res * 0.01  # step past each surface to count the next one
 
-    solid = set()
-    for (ix,iy,iz),(cx,cy,cz) in center_world.items():
-        for dx,dy,dz in DIRS:
-            hit,*_ = scene.ray_cast(depsgraph, Vector((cx,cy,cz)),
-                                    Vector((dx,dy,dz)), distance=half)
-            if hit:
-                solid.add((ix,iy,iz)); break
+    raw = set()
+    for ix in range(nx):
+        for iy in range(ny):
+            for iz in range(nz):
+                cx = float(lo[0]) + (ix + 0.5) * res
+                cy = float(lo[1]) + (iy + 0.5) * res
+                cz = float(lo[2]) + (iz + 0.5) * res
+                cur = Vector((cx, cy, cz))
+                count = 0
+                rem = x_span
+                while rem > step:
+                    loc, _, _, dist = bvh.ray_cast(cur, direction, rem)
+                    if loc is None:
+                        break
+                    count += 1
+                    advance = max(dist, 0.0) + step
+                    cur = loc + direction * step
+                    rem -= advance
+                if count % 2 == 1:
+                    raw.add((ix, iy, iz))
 
-    for iix in range(nx):
-        for iiy in range(ny):
-            for iiz in range(nz):
-                if (iix,iiy,iiz) not in center_world:
-                    solid.add((iix,iiy,iiz))
-
-    return solid, nx, ny, nz, res, bounds
+    print(f"[VoxelGrid] Snake inside-test: {len(raw)}/{nx*ny*nz} raw voxels "
+          f"in {nx}×{ny}×{nz} grid (res={res:.2f} BU)")
+    return raw, nx, ny, nz, res, bounds
 
 
 def _build_local_voxel_grid(config, center, hit_collector=None):
@@ -351,12 +367,24 @@ def build(blend_path: str, config: dict) -> VoxelGridData:
 
     unit_scale = _get_unit_scale()
     hit_collector = [] if config.get("debug_viz") else None
-    snake_data = _load_snake_data(config)
+    snake_mesh = _load_snake_mesh(config)
 
-    if snake_data is not None and snake_data.get("centers") is not None:
-        solid, nx, ny, nz, res, bounds = _build_voxel_grid_from_snake(snake_data)
+    if snake_mesh is not None:
+        # Snake mode: inside-AC test → raw voxels.
+        # solid is empty — geometry intersection is handled in walkable step 2.
+        # candidates = raw (inside AC) voxels passed to walkable.py.
+        raw, nx, ny, nz, res, bounds = _build_raw_voxels_from_snake(snake_mesh, config)
         mode = "snake"
-        center_ijk = (nx//2, ny//2, nz//2)
+        solid_arr = np.empty((0, 3), dtype=np.int32)
+        candidates = np.array(sorted(raw), dtype=np.int32) if raw else np.empty((0, 3), dtype=np.int32)
+        hits_arr = None
+        return VoxelGridData(
+            solid=solid_arr, candidates=candidates,
+            nx=nx, ny=ny, nz=nz,
+            res=float(res), bounds=tuple(float(b) for b in bounds),
+            unit_scale=float(unit_scale),
+            mode=mode, hits=hits_arr,
+        )
     elif config.get("local_area_ratio"):
         center = _find_local_center(config)
         scene_bds = _scene_bounds()
