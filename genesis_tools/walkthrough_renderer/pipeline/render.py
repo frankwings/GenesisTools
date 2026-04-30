@@ -45,11 +45,8 @@ def build(blend_path: str, config: dict, output_dir: str) -> List[str]:
     json.dump(render_config, tf)
     tf.close()
     try:
-        cmd = [
-            _find_blender(), "--background", str(blend_path),
-            "--python", str(render_script),
-            "--", "--config", tf.name,
-        ]
+        cmd = [_find_blender(), "--background", str(blend_path),
+               "--python", str(render_script), "--", "--config", tf.name]
         result = subprocess.run(cmd, capture_output=False)
         if result.returncode != 0:
             raise RuntimeError(f"Render step failed (exit {result.returncode})")

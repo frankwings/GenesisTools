@@ -33,6 +33,7 @@ else:
     scene.cycles.adaptive_threshold = 0.01
     scene.cycles.adaptive_min_samples = 4
     scene.view_layers[0].cycles.use_denoising = True
+    # GPU device is set via --cycles-device CLI arg by render.py
 
 if config.get("panoramic"):
     cam_data = scene.camera.data
