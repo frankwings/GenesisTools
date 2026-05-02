@@ -54,11 +54,17 @@ tour_list       = _greedy_tsp_tour(waypoints_list,
 
 ---
 
-## GIFs + Debug Side Views
+## GIFs + Debug Views
 
 **v41** — XYZ FPS, XY TSP (path stays low despite high waypoints):
 
 ![v41](assets/ai33_001_walkthrough_v41/ai33_v41_aerial.gif)
+
+**XY plane (top view):**
+
+![v41 top](assets/ai33_001_walkthrough_v41/debug_top.png)
+
+**XZ plane (side view):**
 
 ![v41 side](assets/ai33_001_walkthrough_v41/debug_side.png)
 
@@ -69,6 +75,12 @@ tour_list       = _greedy_tsp_tour(waypoints_list,
 **v42** — XYZ FPS + XYZ TSP (path traverses 0.29–4.79m):
 
 ![v42](assets/ai33_001_walkthrough_v42/ai33_v42_aerial.gif)
+
+**XY plane (top view):**
+
+![v42 top](assets/ai33_001_walkthrough_v42/debug_top.png)
+
+**XZ plane (side view):**
 
 ![v42 side](assets/ai33_001_walkthrough_v42/debug_side.png)
 

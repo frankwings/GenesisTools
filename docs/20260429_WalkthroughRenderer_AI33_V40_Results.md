@@ -96,10 +96,16 @@ config = {
 
 ---
 
-## Debug Visualization (Side View)
+## Debug Visualization
 
-Voxel grid + walkable layer + camera path + camera axes rendered from the south (XZ plane).
+Voxel grid + walkable layer + camera path + camera axes.
 Yellow = free voxels, cyan = walkable, pink = camera path, RGB arrows = camera orientation per second.
+
+**XY plane (top view):**
+
+![v40 top](assets/ai33_001_walkthrough_v40/debug_top.png)
+
+**XZ plane (side view):**
 
 ![v40 side](assets/ai33_001_walkthrough_v40/debug_side.png)
 
