@@ -192,15 +192,20 @@ def _build_smooth_path(tour: list, walkable: set, config: dict, bounds: tuple) -
     if not cell_path:
         return []
 
-    # walkable_xy: lowest free voxel Z per XY cell — used only for XY reachability check
+    # walkable_xy: Z index range (lo, hi) per XY cell — XY reachability + Z clamping
     walkable_xy = {}
     for (ix, iy, iz) in walkable:
-        if (ix, iy) not in walkable_xy or iz < walkable_xy[(ix, iy)]:
-            walkable_xy[(ix, iy)] = iz
+        if (ix, iy) not in walkable_xy:
+            walkable_xy[(ix, iy)] = (iz, iz)
+        else:
+            lo, hi = walkable_xy[(ix, iy)]
+            walkable_xy[(ix, iy)] = (min(lo, iz), max(hi, iz))
 
     def c2w(cell):
+        # Place path at voxel centre on all three axes so it aligns with the
+        # voxel spheres in the debug visualisation (primitives.py uses +0.5 everywhere).
         ix, iy, iz = cell
-        return [min_x+(ix+0.5)*res, min_y+(iy+0.5)*res, min_z+iz*res]
+        return [min_x+(ix+0.5)*res, min_y+(iy+0.5)*res, min_z+(iz+0.5)*res]
 
     def _los_clear(p0, p1):
         origin = _V((p0[0], p0[1], p0[2]+cam_h_bu))
@@ -226,6 +231,12 @@ def _build_smooth_path(tour: list, walkable: set, config: dict, bounds: tuple) -
             sz = (points[i-1][2]+points[i][2]+points[i+1][2])/3.0
             ix = int((sx-min_x)/res); iy = int((sy-min_y)/res)
             if (ix, iy) in walkable_xy:
+                # Clamp Z to the walkable voxel range at this XY cell so the
+                # path cannot drift above the scene ceiling or below the floor.
+                lo_iz, hi_iz = walkable_xy[(ix, iy)]
+                sz_min = min_z + (lo_iz + 0.5) * res
+                sz_max = min_z + (hi_iz + 0.5) * res
+                sz = max(sz_min, min(sz, sz_max))
                 candidate = [sx, sy, sz]
                 if not _los_clear(new_pts[-1], candidate):
                     candidate = points[i]
@@ -482,7 +493,7 @@ def build(vg, wk, config: dict) -> PathData:
             seg = _bfs_path(tour_list[i], tour_list[i+1], walkable_set)
             cell_path.extend(seg if i == 0 else seg[1:])
         path_points_arr = np.array([
-            [min_x+(c[0]+0.5)*res, min_y+(c[1]+0.5)*res, min_z+c[2]*res]
+            [min_x+(c[0]+0.5)*res, min_y+(c[1]+0.5)*res, min_z+(c[2]+0.5)*res]
             for c in cell_path
         ], dtype=np.float64) if cell_path else np.empty((0,3), dtype=np.float64)
 

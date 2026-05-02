@@ -85,7 +85,7 @@ def add_path_layer(path_data, config: dict) -> None:
     for i, wp in enumerate(path_data.waypoints):
         cx = min_x + (wp[0]+0.5)*res
         cy = min_y + (wp[1]+0.5)*res
-        cz = min_z + wp[2]*res
+        cz = min_z + (wp[2]+0.5)*res
         obj = make_sphere(f"dbg_waypoint_{i:02d}", Vector((cx, cy, cz)),
                           wp_r, (0.1, 1.0, 0.2))
         _debug_collection().objects.unlink(obj)
