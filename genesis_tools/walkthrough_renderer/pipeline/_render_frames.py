@@ -21,6 +21,7 @@ with open(config_path) as f:
 
 scene = bpy.context.scene
 engine = config.get("render_engine", "CYCLES").upper()
+use_windows_blender = config.get("_windows_blender", False)
 
 if engine == "WORKBENCH":
     scene.render.engine = "BLENDER_WORKBENCH"
@@ -28,12 +29,12 @@ elif engine in ("EEVEE", "BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"):
     scene.render.engine = "BLENDER_EEVEE_NEXT"
 else:
     scene.render.engine = "CYCLES"
+    scene.cycles.device = "CPU"
     scene.cycles.samples = config.get("render_samples", 32)
     scene.cycles.use_adaptive_sampling = True
     scene.cycles.adaptive_threshold = 0.01
     scene.cycles.adaptive_min_samples = 4
     scene.view_layers[0].cycles.use_denoising = True
-    # GPU device is set via --cycles-device CLI arg by render.py
 
 if config.get("panoramic"):
     cam_data = scene.camera.data
@@ -42,7 +43,8 @@ if config.get("panoramic"):
 
 scene.render.resolution_x = config.get("render_width", 1280)
 scene.render.resolution_y = config.get("render_height", 720)
-scene.render.filepath = config["frames_dir"] + "/frame_"
+sep = "\\" if use_windows_blender else "/"
+scene.render.filepath = config["frames_dir"] + sep + "frame_"
 scene.render.image_settings.file_format = "PNG"
 scene.render.use_persistent_data = True
 

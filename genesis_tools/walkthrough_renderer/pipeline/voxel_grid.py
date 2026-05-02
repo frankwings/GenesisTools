@@ -206,14 +206,7 @@ def _build_local_voxel_grid(config, center, hit_collector=None):
     min_x = center.x - radius_xy; max_x = center.x + radius_xy
     min_y = center.y - radius_xy; max_y = center.y + radius_xy
 
-    depsgraph = bpy.context.evaluated_depsgraph_get()
-    _hit, floor_loc, *_ = bpy.context.scene.ray_cast(
-        depsgraph, Vector((center.x, center.y, center.z+height)),
-        Vector((0,0,-1)), distance=height*3.0)
-    if _hit:
-        min_z = floor_loc.z - 0.5; max_z = floor_loc.z + height
-    else:
-        min_z = center.z - 1.0;    max_z = center.z + height
+    min_z = center.z - height; max_z = center.z + height
 
     local_bounds = (min_x, min_y, max_x, max_y, min_z, max_z)
     span_x = max_x-min_x; span_y = max_y-min_y; span_z = max_z-min_z

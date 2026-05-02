@@ -59,8 +59,12 @@ def _bfs_largest_component(walkable: set) -> set:
 
 
 def _farthest_point_sample(cells: set, n: int, rng_seed: int,
-                            fixed_first=None) -> list:
-    """Return n cells using farthest-point sampling (XY distance)."""
+                            fixed_first=None, use_xyz: bool = False) -> list:
+    """Return n cells using farthest-point sampling.
+
+    use_xyz=False: XY distance only (default, ground-level walking).
+    use_xyz=True:  XYZ distance (aerial mode, spreads waypoints in 3D).
+    """
     import random
     rng = random.Random(rng_seed)
     cells_list = list(cells)
@@ -72,27 +76,41 @@ def _farthest_point_sample(cells: set, n: int, rng_seed: int,
     first = fixed_first if (fixed_first is not None and fixed_first in cells) \
             else rng.choice(cells_list)
     selected = [first]
-    dist = {c: (c[0]-first[0])**2 + (c[1]-first[1])**2 for c in cells_list}
+    if use_xyz:
+        dist = {c: (c[0]-first[0])**2 + (c[1]-first[1])**2 + (c[2]-first[2])**2 for c in cells_list}
+    else:
+        dist = {c: (c[0]-first[0])**2 + (c[1]-first[1])**2 for c in cells_list}
     for _ in range(n - 1):
         farthest = max(cells_list, key=lambda c: dist[c])
         selected.append(farthest)
         for c in cells_list:
-            d = (c[0]-farthest[0])**2 + (c[1]-farthest[1])**2
+            if use_xyz:
+                d = (c[0]-farthest[0])**2 + (c[1]-farthest[1])**2 + (c[2]-farthest[2])**2
+            else:
+                d = (c[0]-farthest[0])**2 + (c[1]-farthest[1])**2
             if d < dist[c]:
                 dist[c] = d
     return selected
 
 
-def _greedy_tsp_tour(waypoints: list) -> list:
-    """Nearest-neighbour greedy path (XY distance); visits each waypoint once."""
+def _greedy_tsp_tour(waypoints: list, use_xyz: bool = False) -> list:
+    """Nearest-neighbour greedy path; visits each waypoint once.
+
+    use_xyz=False: XY distance only (default).
+    use_xyz=True:  XYZ distance (aerial mode, respects altitude in ordering).
+    """
     if not waypoints:
         return []
     remaining = list(waypoints)
     tour = [remaining.pop(0)]
     while remaining:
         last = tour[-1]
-        nearest = min(remaining,
-                      key=lambda c: (c[0]-last[0])**2 + (c[1]-last[1])**2)
+        if use_xyz:
+            nearest = min(remaining,
+                          key=lambda c: (c[0]-last[0])**2 + (c[1]-last[1])**2 + (c[2]-last[2])**2)
+        else:
+            nearest = min(remaining,
+                          key=lambda c: (c[0]-last[0])**2 + (c[1]-last[1])**2)
         remaining.remove(nearest)
         tour.append(nearest)
     return tour
@@ -432,8 +450,8 @@ def build(vg, wk, config: dict) -> PathData:
     component = _bfs_largest_component(walkable_set)
     n_wp = config.get("num_waypoints", 20)
     seed = config.get("seed", 42)
-    waypoints_list = _farthest_point_sample(component, n_wp, seed)
-    tour_list = _greedy_tsp_tour(waypoints_list)
+    waypoints_list = _farthest_point_sample(component, n_wp, seed, use_xyz=config.get("aerial", False))
+    tour_list = _greedy_tsp_tour(waypoints_list, use_xyz=config.get("aerial", False))
 
     # Convert waypoints to array
     waypoints_arr = np.array(waypoints_list, dtype=np.int32)
@@ -448,7 +466,8 @@ def build(vg, wk, config: dict) -> PathData:
         config["_effective_grid_resolution"] = res
         config["_unit_scale"] = vg.unit_scale
         path_vecs = _build_smooth_path(tour_list, walkable_set, config, vg.bounds)
-        path_vecs, _ = _snap_path_to_floor(path_vecs, config)
+        if not config.get("aerial"):
+            path_vecs, _ = _snap_path_to_floor(path_vecs, config)
         path_vecs = _fine_adjust_path(path_vecs, config)
         path_points_arr = np.array([[p.x, p.y, p.z] for p in path_vecs], dtype=np.float64)
     except ImportError:

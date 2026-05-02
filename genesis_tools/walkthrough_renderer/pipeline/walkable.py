@@ -215,7 +215,11 @@ def build(vg, config: dict, camera_ijk: tuple | None = None) -> WalkableData:
             else:
                 camera_ijk = (vg.nx // 2, vg.ny // 2, vg.nz // 2)
         free = _flood_fill_free_from_camera(solid_set, camera_ijk, vg.nx, vg.ny, vg.nz)
-        walkable_set = _check_walkable_v2(free, solid_set, vg.bounds, config)
+        if config.get("aerial"):
+            print(f"[Walkable] Aerial mode: skipping floor filter, {len(free)} free voxels all walkable")
+            walkable_set = free
+        else:
+            walkable_set = _check_walkable_v2(free, solid_set, vg.bounds, config)
 
     if walkable_set:
         walkable_arr = np.array(sorted(walkable_set), dtype=np.int32)
