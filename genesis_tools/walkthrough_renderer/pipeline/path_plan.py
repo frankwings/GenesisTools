@@ -192,6 +192,7 @@ def _build_smooth_path(tour: list, walkable: set, config: dict, bounds: tuple) -
     if not cell_path:
         return []
 
+    # walkable_xy: lowest free voxel Z per XY cell — used only for XY reachability check
     walkable_xy = {}
     for (ix, iy, iz) in walkable:
         if (ix, iy) not in walkable_xy or iz < walkable_xy[(ix, iy)]:
@@ -217,11 +218,14 @@ def _build_smooth_path(tour: list, walkable: set, config: dict, bounds: tuple) -
     for _ in range(5):
         new_pts = [points[0]]
         for i in range(1, len(points)-1):
+            # Average all three axes — previously only XY was averaged and Z was
+            # snapped to the floor voxel, which destroyed aerial height information
+            # and caused large dZ jumps at voxel-cell boundaries.
             sx = (points[i-1][0]+points[i][0]+points[i+1][0])/3.0
             sy = (points[i-1][1]+points[i][1]+points[i+1][1])/3.0
+            sz = (points[i-1][2]+points[i][2]+points[i+1][2])/3.0
             ix = int((sx-min_x)/res); iy = int((sy-min_y)/res)
             if (ix, iy) in walkable_xy:
-                sz = min_z+walkable_xy[(ix,iy)]*res
                 candidate = [sx, sy, sz]
                 if not _los_clear(new_pts[-1], candidate):
                     candidate = points[i]
