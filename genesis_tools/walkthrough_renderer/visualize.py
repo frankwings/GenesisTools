@@ -41,6 +41,15 @@ def visualize(
     if config is None:
         config = {}
 
+    # Pre-read camera poses BEFORE opening the main blend (open_mainfile replaces
+    # the current scene, so we must read the animated blend first if provided).
+    camera_poses = None
+    if camera_blend is not None:
+        from genesis_tools.walkthrough_renderer.viz.layers import read_camera_poses
+        fps = config.get("fps", 12)
+        camera_poses = read_camera_poses(camera_blend, fps)
+        print(f"[Visualize] pre-read {len(camera_poses)} camera poses from {camera_blend}")
+
     bpy.ops.wm.open_mainfile(filepath=str(blend_path))
     reset_collections()
 
@@ -73,12 +82,11 @@ def visualize(
         print(f"[Visualize] path layer added ({len(pd.waypoints)} waypoints, "
               f"{len(pd.path_points)} path points)")
 
-    if camera_blend is not None:
-        from genesis_tools.walkthrough_renderer.viz.layers import add_camera_layer
-        fps = config.get("fps", 12)
-        res = config.get("grid_resolution", 0.5)
-        add_camera_layer(camera_blend, fps, res)
-        print(f"[Visualize] camera layer added from {camera_blend}")
+    if camera_poses is not None:
+        from genesis_tools.walkthrough_renderer.viz.layers import add_camera_arrows
+        res_bu = config.get("grid_resolution", 0.5) / config.get("_unit_scale", 1.0)
+        add_camera_arrows(camera_poses, res_bu)
+        print(f"[Visualize] camera layer added ({len(camera_poses)} poses)")
 
     Path(output_blend).parent.mkdir(parents=True, exist_ok=True)
     bpy.data.use_autopack = False

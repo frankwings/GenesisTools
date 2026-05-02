@@ -71,14 +71,14 @@ def add_walkable_layer(vg, wk, config: dict) -> None:
 def add_path_layer(path_data, config: dict) -> None:
     """Add path layer: green=waypoints, pink=path line."""
     from mathutils import Vector
-    res_hint = 0.5  # display size fallback if no bounds info
 
     bounds = path_data.bounds
-    res = config.get("grid_resolution", res_hint)
+    unit_scale = config.get("_unit_scale", 1.0)
+    # grid_resolution is in metres; convert to BU for all geometry sizing
+    res = config.get("grid_resolution", 0.5) / unit_scale
     min_x, min_y, min_z = bounds[0], bounds[1], bounds[4]
     wp_r = res * 0.25
     cam_h = config.get("camera_height", 1.7)
-    unit_scale = config.get("_unit_scale", 1.0)
     cam_h_bu = cam_h / unit_scale
 
     # Green -- waypoints
@@ -91,36 +91,75 @@ def add_path_layer(path_data, config: dict) -> None:
         _debug_collection().objects.unlink(obj)
         _spheres_col().objects.link(obj)
 
-    # Pink -- path line at camera height
+    # Pink -- path line at camera height (thickness 0.3*res so it's visible in overview renders)
     if len(path_data.path_points) >= 2:
         pts = [Vector((p[0], p[1], p[2] + cam_h_bu)) for p in path_data.path_points]
-        make_line("dbg_path", pts, (1.0, 0.3, 0.6), thickness=res * 0.05)
+        make_line("dbg_path", pts, (1.0, 0.3, 0.6), thickness=res * 0.3)
 
 
-def add_camera_layer(camera_blend: str, fps: int, res: float) -> None:
-    """Add camera axes layer: RGB arrows at each 1-second frame."""
+def read_camera_poses(camera_blend: str, fps: int) -> list:
+    """Read (pos, right, up, forward) tuples from an animated .blend without
+    modifying the current bpy scene.  Call this BEFORE opening the main blend.
+
+    Returns a list of (pos, right, up, forward) each as plain tuples so no
+    mathutils objects survive across scene loads.
+    """
     import bpy
     from mathutils import Vector
 
     bpy.ops.wm.open_mainfile(filepath=camera_blend)
     cam_obj = bpy.context.scene.camera
     if cam_obj is None:
-        print("[CameraLayer] No camera found in blend file, skipping.")
-        return
+        return []
 
     total_frames = bpy.context.scene.frame_end
-    axis_len = res * 0.6
-    shaft_r  = res * 0.015
-    head_r   = res * 0.05
     step = max(1, fps)
-
+    poses = []
     for fi in range(0, total_frames, step):
         bpy.context.scene.frame_set(fi + 1)
-        pos  = Vector(cam_obj.location)
-        mat4 = cam_obj.matrix_world.to_3x3()
-        right   = Vector(mat4.col[0]).normalized()
-        up      = Vector(mat4.col[1]).normalized()
-        forward = -Vector(mat4.col[2]).normalized()
-        make_arrow(f"dbg_cam_x_{fi:04d}", pos, right,   axis_len, (1,0,0), shaft_r, head_r)
-        make_arrow(f"dbg_cam_y_{fi:04d}", pos, up,      axis_len, (0,1,0), shaft_r, head_r)
-        make_arrow(f"dbg_cam_z_{fi:04d}", pos, forward, axis_len, (0,0.4,1), shaft_r, head_r)
+        pos = tuple(cam_obj.location)
+        m   = cam_obj.matrix_world.to_3x3()
+        right   = tuple(Vector(m.col[0]).normalized())
+        up      = tuple(Vector(m.col[1]).normalized())
+        forward = tuple((-Vector(m.col[2])).normalized())
+        poses.append((pos, right, up, forward))
+    return poses
+
+
+def add_camera_layer(camera_blend: str, fps: int, res: float) -> None:
+    """Add camera axes layer: RGB arrows at each 1-second frame.
+
+    NOTE: this must be called AFTER the main blend is open (i.e. after all
+    other layers are added).  It pre-reads poses via read_camera_poses when
+    the caller passes camera_blend=None and poses directly, but external
+    callers should use visualize() which handles the ordering.
+    """
+    from mathutils import Vector
+
+    # Poses should have been pre-read by visualize() before opening main blend.
+    # This function is kept for API compat; actual drawing is done by
+    # _add_camera_arrows_from_poses().
+    raise RuntimeError(
+        "add_camera_layer() must not be called directly; "
+        "use visualize() which pre-reads poses before opening the main blend."
+    )
+
+
+def add_camera_arrows(poses: list, res_bu: float) -> None:
+    """Draw RGB camera-axis arrows from pre-read poses into the current scene.
+
+    Args:
+        poses:  list of (pos, right, up, forward) plain-tuple camera poses
+        res_bu: voxel grid resolution in Blender units (not metres)
+    """
+    from mathutils import Vector
+
+    axis_len = res_bu * 2.0
+    shaft_r  = res_bu * 0.05
+    head_r   = res_bu * 0.15
+
+    for i, (pos, right, up, forward) in enumerate(poses):
+        p = Vector(pos)
+        make_arrow(f"dbg_cam_x_{i:04d}", p, Vector(right),   axis_len, (1,0,0), shaft_r, head_r)
+        make_arrow(f"dbg_cam_y_{i:04d}", p, Vector(up),      axis_len, (0,1,0), shaft_r, head_r)
+        make_arrow(f"dbg_cam_z_{i:04d}", p, Vector(forward), axis_len, (0,0.4,1), shaft_r, head_r)
