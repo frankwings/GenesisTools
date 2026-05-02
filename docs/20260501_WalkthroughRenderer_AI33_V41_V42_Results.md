@@ -54,15 +54,25 @@ tour_list       = _greedy_tsp_tour(waypoints_list,
 
 ---
 
-## GIFs
+## GIFs + Debug Side Views
 
 **v41** — XYZ FPS, XY TSP (path stays low despite high waypoints):
 
 ![v41](assets/ai33_001_walkthrough_v41/ai33_v41_aerial.gif)
 
+![v41 side](assets/ai33_001_walkthrough_v41/debug_side.png)
+
+*Side view (XZ): path barely rises — XY-only TSP chains waypoints in floor order.*
+
+---
+
 **v42** — XYZ FPS + XYZ TSP (path traverses 0.29–4.79m):
 
 ![v42](assets/ai33_001_walkthrough_v42/ai33_v42_aerial.gif)
+
+![v42 side](assets/ai33_001_walkthrough_v42/debug_side.png)
+
+*Side view (XZ): path clearly climbs through the full height range — XYZ TSP chains nearby-in-3D waypoints first.*
 
 ---
 

@@ -96,6 +96,17 @@ config = {
 
 ---
 
+## Debug Visualization (Side View)
+
+Voxel grid + walkable layer + camera path + camera axes rendered from the south (XZ plane).
+Yellow = free voxels, cyan = walkable, pink = camera path, RGB arrows = camera orientation per second.
+
+![v40 side](assets/ai33_001_walkthrough_v40/debug_side.png)
+
+The path hugs the floor (Z ≈ 0.3 m) throughout — confirming XY-only TSP keeps the tour at ground level even with aerial flag enabled.
+
+---
+
 ## Comparison vs v39
 
 | Metric | v39 | v40 |
