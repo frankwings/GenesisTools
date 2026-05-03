@@ -582,20 +582,20 @@ def build(vg, wk, config: dict) -> PathData:
     min_x = vg.bounds[0]; min_y = vg.bounds[1]; min_z = vg.bounds[4]
 
     if config.get("path_planner") == "theta_star":
-        # BFS + string-pull smoothing (pure Python, no bpy).
-        # BFS provides wall-safe base path; string-pull shortcuts corners via voxel LOS.
-        # max_dz limits Z-change in shortcuts to prevent ceiling/floor penetration.
+        # Pure BFS (no smoothing). Adjacent-voxel steps (50 BU max) + 4× upsample
+        # guarantee the world-space path never crosses a wall. Diagonal shortcuts
+        # between non-adjacent walkable voxels (string-pull / Theta*) create
+        # world-space segments that slice through walls even when both endpoints
+        # are walkable — see v48/v49 post-mortem.
         config["_effective_grid_resolution"] = res
-        max_dz = config.get("theta_max_dz", 2)
         t0 = time.time()
         cell_path = []
         n = len(tour_list)
         for i in range(n - 1):
-            bfs_seg = _bfs_path(tour_list[i], tour_list[i+1], walkable_set)
-            seg = _smooth_path(bfs_seg, walkable_set, max_dz=max_dz)
+            seg = _bfs_path(tour_list[i], tour_list[i+1], walkable_set)
             cell_path.extend(seg if i == 0 else seg[1:])
         elapsed = time.time() - t0
-        print(f"[PathPlan] BFS+smooth: {len(cell_path)} cells, {elapsed:.2f}s")
+        print(f"[PathPlan] BFS (pure): {len(cell_path)} cells, {elapsed:.2f}s")
         if cell_path:
             pts = [[min_x+(c[0]+0.5)*res, min_y+(c[1]+0.5)*res, min_z+(c[2]+0.5)*res]
                    for c in cell_path]
