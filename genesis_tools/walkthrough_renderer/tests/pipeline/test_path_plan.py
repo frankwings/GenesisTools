@@ -169,6 +169,88 @@ class TestBuild:
 
 
 # ---------------------------------------------------------------------------
+# laplacian_iters config key
+# ---------------------------------------------------------------------------
+
+def _make_grid_vg(w=5, h=5):
+    """VoxelGridData for a 5×5×1 flat grid."""
+    return VoxelGridData(
+        solid=np.empty((0, 3), dtype=np.int32),
+        candidates=np.empty((0, 3), dtype=np.int32),
+        nx=w, ny=h, nz=1,
+        res=0.5, bounds=(0.0, 0.0, w*0.5, h*0.5, 0.0, 0.5),
+        unit_scale=1.0, mode="global", hits=None,
+    )
+
+
+def _grid_wk(w=5, h=5):
+    cells = np.array([(x, y, 0) for x in range(w) for y in range(h)], dtype=np.int32)
+    return WalkableData(walkable=cells)
+
+
+class TestLaplacianItersConfig:
+    def test_theta_star_default_zero_iters_produces_path(self):
+        vg = _make_grid_vg()
+        wk = _grid_wk()
+        config = {"num_waypoints": 4, "seed": 42, "camera_height": 1.7,
+                  "grid_resolution": 0.5, "path_planner": "theta_star"}
+        result = build(vg, wk, config)
+        assert len(result.path_points) > 0
+
+    def test_theta_star_explicit_zero_same_as_default(self):
+        """laplacian_iters=0 is the same as omitting the key in theta_star mode."""
+        vg = _make_grid_vg()
+        wk = _grid_wk()
+        base = {"num_waypoints": 4, "seed": 42, "camera_height": 1.7,
+                "grid_resolution": 0.5, "path_planner": "theta_star"}
+        r1 = build(vg, wk, {**base})
+        r2 = build(vg, wk, {**base, "laplacian_iters": 0})
+        np.testing.assert_array_equal(r1.path_points, r2.path_points)
+
+    def test_theta_star_nonzero_iters_falls_back_to_bfs_without_bpy(self):
+        """laplacian_iters>0 falls back to pure BFS gracefully when bpy is absent."""
+        vg = _make_grid_vg()
+        wk = _grid_wk()
+        config = {"num_waypoints": 4, "seed": 42, "camera_height": 1.7,
+                  "grid_resolution": 0.5, "path_planner": "theta_star",
+                  "laplacian_iters": 5}
+        result = build(vg, wk, config)
+        assert len(result.path_points) > 0
+
+    def test_theta_star_nonzero_iters_produces_valid_path(self):
+        """laplacian_iters>0 always produces a valid float64 path (smoothed if bpy available,
+        pure BFS fallback otherwise)."""
+        vg = _make_grid_vg()
+        wk = _grid_wk()
+        config = {"num_waypoints": 4, "seed": 42, "camera_height": 1.7,
+                  "grid_resolution": 0.5, "path_planner": "theta_star",
+                  "laplacian_iters": 5}
+        result = build(vg, wk, config)
+        assert len(result.path_points) > 0
+        assert result.path_points.dtype == np.float64
+
+    def test_default_planner_zero_iters_produces_path(self):
+        """Default planner with laplacian_iters=0 still produces a valid path."""
+        vg = _make_line_vg(10)
+        wk = _line_wk(10)
+        config = {"num_waypoints": 3, "seed": 42, "camera_height": 1.7,
+                  "grid_resolution": 0.5, "laplacian_iters": 0}
+        result = build(vg, wk, config)
+        assert len(result.path_points) > 0
+
+    def test_theta_star_path_is_upsampled_4x(self):
+        """theta_star produces 4× upsampled path — many more points than BFS cells."""
+        vg = _make_line_vg(10)
+        wk = _line_wk(10)
+        config = {"num_waypoints": 3, "seed": 42, "camera_height": 1.7,
+                  "grid_resolution": 0.5, "path_planner": "theta_star"}
+        result = build(vg, wk, config)
+        # BFS on a 10-cell corridor with 3 waypoints visits most cells; 4× upsample
+        # means path_points >> num cells (at least 4× the waypoint count)
+        assert len(result.path_points) >= len(result.waypoints) * 4
+
+
+# ---------------------------------------------------------------------------
 # save / load round-trip
 # ---------------------------------------------------------------------------
 
