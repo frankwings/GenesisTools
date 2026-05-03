@@ -22,13 +22,16 @@ class OrientData:
 # bpy-dependent helpers
 # ---------------------------------------------------------------------------
 
-def _compute_waypoint_orientations(tour, cam_height, scene, depsgraph):
+def _compute_waypoint_orientations(tour, cam_height, scene, depsgraph, aerial=False):
     """For each tour waypoint i, gaze toward visible unvisited waypoints i+1..n-1.
 
     Waypoint n-1 (last) looks toward waypoint 0 (first).
     Only future waypoints in tour order are candidates — already-visited
     waypoints are excluded. LOS ray_cast filters to those with clear sightlines.
     Falls back to the next waypoint direction if nothing is visible.
+
+    aerial=True: full 3D gaze direction (camera tilts up/down toward target).
+    aerial=False: horizontal gaze only (to_j.z zeroed; camera looks flat).
     """
     from mathutils import Vector
     n = len(tour)
@@ -59,7 +62,9 @@ def _compute_waypoint_orientations(tour, cam_height, scene, depsgraph):
 
         avg = Vector((0.0, 0.0, 0.0))
         for j in targets:
-            to_j = eyes[j] - eyes[i]; to_j.z = 0.0
+            to_j = eyes[j] - eyes[i]
+            if not aerial:
+                to_j.z = 0.0   # walking: keep gaze horizontal
             if to_j.length > 0.01:
                 avg += to_j.normalized()
         orientations.append(avg.normalized() if avg.length > 0.01
@@ -84,15 +89,26 @@ def _map_tour_to_path(tour, path_points):
     return indices
 
 
-def _dir_to_quat(direction):
-    """Convert a horizontal look direction to a Blender camera quaternion [w,x,y,z]."""
+def _dir_to_quat(direction, aerial=False):
+    """Convert a look direction to a Blender camera quaternion [w,x,y,z].
+
+    aerial=False: flatten to XY plane then apply fixed -0.3 downward tilt
+                  (walking — camera always looks horizontally into the scene).
+    aerial=True:  use full 3D direction so camera tilts up/down toward targets
+                  at different Z levels (drone flight through multi-story space).
+    """
     from mathutils import Vector
-    d = Vector((direction.x, direction.y, 0.0)).normalized()
-    if d.length < 0.01:
-        d = Vector((1.0, 0.0, 0.0))
-    # Camera points along -Z in local space, track toward -Z with Y as up
-    target = Vector((d.x, d.y, -0.3)).normalized()
-    q = target.to_track_quat("-Z", "Y")
+    if aerial:
+        d = Vector((direction.x, direction.y, direction.z)).normalized()
+        if d.length < 0.01:
+            d = Vector((1.0, 0.0, 0.0))
+    else:
+        d = Vector((direction.x, direction.y, 0.0)).normalized()
+        if d.length < 0.01:
+            d = Vector((1.0, 0.0, 0.0))
+        # Camera points along -Z in local space, track toward -Z with Y as up
+        d = Vector((d.x, d.y, -0.3)).normalized()
+    q = d.to_track_quat("-Z", "Y")
     return [q.w, q.x, q.y, q.z]
 
 
@@ -133,7 +149,8 @@ def build(blend_path: str, path_data, config: dict) -> OrientData:
         Vector((min_x+(wp[0]+0.5)*res, min_y+(wp[1]+0.5)*res, min_z+(wp[2]+0.5)*res))
         for wp in path_data.waypoints
     ]
-    wp_oris = _compute_waypoint_orientations(tour_world, cam_h_bu, scene, dg)
+    aerial = config.get("aerial", False)
+    wp_oris = _compute_waypoint_orientations(tour_world, cam_h_bu, scene, dg, aerial=aerial)
 
     # Build path_points as Vector list and compute arc lengths
     path_vecs = [Vector(tuple(p)) for p in path_data.path_points]
@@ -150,7 +167,7 @@ def build(blend_path: str, path_data, config: dict) -> OrientData:
         key=lambda x: x[0],
     )
 
-    wp_schedule = [{"t": float(t), "quat": _dir_to_quat(d)}
+    wp_schedule = [{"t": float(t), "quat": _dir_to_quat(d, aerial=aerial)}
                    for t, d in schedule_raw]
     return OrientData(wp_schedule=wp_schedule)
 
