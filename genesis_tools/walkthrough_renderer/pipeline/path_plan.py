@@ -33,8 +33,11 @@ class PathData:
 # Pure-Python helpers (no bpy)
 # ---------------------------------------------------------------------------
 
+_FACE_NEIGHBORS = ((1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1))
+
+
 def _bfs_largest_component(walkable: set) -> set:
-    """Return the largest 4-connected XY component (+-1 Z) of walkable voxels."""
+    """Return the largest 6-connected (face-adjacent) component of walkable voxels."""
     remaining = set(walkable)
     best: set = set()
     while remaining:
@@ -47,11 +50,10 @@ def _bfs_largest_component(walkable: set) -> set:
                 continue
             component.add(cell)
             cx, cy, cz = cell
-            for dx, dy in ((1,0),(-1,0),(0,1),(0,-1)):
-                for dz in (-1, 0, 1):
-                    nb = (cx+dx, cy+dy, cz+dz)
-                    if nb in remaining and nb not in component:
-                        queue.append(nb)
+            for dx, dy, dz in _FACE_NEIGHBORS:
+                nb = (cx+dx, cy+dy, cz+dz)
+                if nb in remaining and nb not in component:
+                    queue.append(nb)
         remaining -= component
         if len(component) > len(best):
             best = component
@@ -117,7 +119,12 @@ def _greedy_tsp_tour(waypoints: list, use_xyz: bool = False) -> list:
 
 
 def _bfs_path(start: tuple, goal: tuple, walkable: set) -> list:
-    """BFS shortest path between two walkable voxels (4-connected XY, +-1 Z)."""
+    """BFS shortest path in walkable voxels using 6-connected face-adjacent movement.
+
+    Each step moves along exactly one axis (±X, ±Y, or ±Z) by one voxel.
+    No diagonal moves — every world-space segment is axis-aligned and ≤ res BU,
+    which prevents the camera path from clipping through walls or floors.
+    """
     if start == goal:
         return [start]
     parent = {start: None}
@@ -132,11 +139,10 @@ def _bfs_path(start: tuple, goal: tuple, walkable: set) -> list:
             path.reverse()
             return path
         cx, cy, cz = cell
-        for dx, dy in ((1,0),(-1,0),(0,1),(0,-1)):
-            for dz in (-1, 0, 1):
-                nb = (cx+dx, cy+dy, cz+dz)
-                if nb in walkable and nb not in parent:
-                    parent[nb] = cell; queue.append(nb)
+        for dx, dy, dz in _FACE_NEIGHBORS:
+            nb = (cx+dx, cy+dy, cz+dz)
+            if nb in walkable and nb not in parent:
+                parent[nb] = cell; queue.append(nb)
     return [start, goal]
 
 
