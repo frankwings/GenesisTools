@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from collections import deque
 from dataclasses import dataclass
 
@@ -171,6 +172,25 @@ def _check_walkable_v2(candidates: set, solid: set, bounds: tuple, config: dict)
     return set(candidates)
 
 
+def _filter_aerial_ceiling(walkable: set, cam_h_voxels: int) -> set:
+    """Aerial mode: remove voxels that lack cam_h_voxels of free space above.
+
+    camera_animate places the camera at path_pt + camera_height. If a walkable
+    voxel is at iz and the next cam_h_voxels voxels above it are not free, the
+    camera will end up inside or above the ceiling.
+
+    Checks against the walkable set itself (pre-filter), so no chain-filtering.
+    Falls back to the unfiltered set if nothing survives (avoids empty path).
+    """
+    result = {
+        (ix, iy, iz) for (ix, iy, iz) in walkable
+        if all((ix, iy, iz + k) in walkable for k in range(1, cam_h_voxels + 1))
+    }
+    print(f"[Walkable] Aerial ceiling filter ({cam_h_voxels} vox): "
+          f"{len(result)}/{len(walkable)} kept")
+    return result if result else walkable
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -205,6 +225,10 @@ def build(vg, config: dict, camera_ijk: tuple | None = None) -> WalkableData:
             # Pure-Python fallback for test environments (no bpy)
             free_set = raw_set
         walkable_set = _flood_fill_through(free_set, camera_ijk, vg.nx, vg.ny, vg.nz)
+        if config.get("aerial"):
+            cam_h_vox = max(1, math.ceil(
+                config.get("camera_height", 1.7) / vg.unit_scale / vg.res))
+            walkable_set = _filter_aerial_ceiling(walkable_set, cam_h_vox)
     else:
         # Local / global mode: vg.solid = scene geometry, vg.candidates = flood-filled.
         solid_set = {tuple(r) for r in vg.solid}
@@ -216,8 +240,10 @@ def build(vg, config: dict, camera_ijk: tuple | None = None) -> WalkableData:
                 camera_ijk = (vg.nx // 2, vg.ny // 2, vg.nz // 2)
         free = _flood_fill_free_from_camera(solid_set, camera_ijk, vg.nx, vg.ny, vg.nz)
         if config.get("aerial"):
-            print(f"[Walkable] Aerial mode: skipping floor filter, {len(free)} free voxels all walkable")
-            walkable_set = free
+            print(f"[Walkable] Aerial mode: {len(free)} free voxels, applying ceiling filter")
+            cam_h_vox = max(1, math.ceil(
+                config.get("camera_height", 1.7) / vg.unit_scale / vg.res))
+            walkable_set = _filter_aerial_ceiling(free, cam_h_vox)
         else:
             walkable_set = _check_walkable_v2(free, solid_set, vg.bounds, config)
 
