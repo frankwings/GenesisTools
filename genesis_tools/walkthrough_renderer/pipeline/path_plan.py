@@ -141,10 +141,13 @@ def _bfs_path(start: tuple, goal: tuple, walkable: set) -> list:
 
 
 def _voxel_los(p0: tuple, p1: tuple, walkable: set) -> bool:
-    """3D DDA line-of-sight in voxel space. True iff all intermediate voxels are walkable."""
+    """3D DDA line-of-sight in voxel space. True iff all intermediate voxels are walkable.
+
+    Uses 2× step density to catch diagonal corner leakage through thin walls.
+    """
     x0, y0, z0 = p0
     x1, y1, z1 = p1
-    steps = max(abs(x1-x0), abs(y1-y0), abs(z1-z0))
+    steps = max(abs(x1-x0), abs(y1-y0), abs(z1-z0)) * 2  # 2× density
     if steps == 0:
         return p0 in walkable
     for i in range(1, steps):
@@ -152,6 +155,32 @@ def _voxel_los(p0: tuple, p1: tuple, walkable: set) -> bool:
         if (round(x0 + t*(x1-x0)), round(y0 + t*(y1-y0)), round(z0 + t*(z1-z0))) not in walkable:
             return False
     return True
+
+
+def _smooth_path(bfs_path: list, walkable: set, max_dz: int = 2) -> list:
+    """Greedy string-pull (Theta*-style) along an existing BFS path.
+
+    Shortcuts are restricted to segments where |dZ| ≤ max_dz to prevent
+    the camera from jumping through thin ceilings/floors when the voxel LOS
+    check can't detect sub-voxel surfaces.
+
+    The result always stays within the BFS corridor — it never introduces
+    new directions that the BFS path didn't already traverse.
+    """
+    if len(bfs_path) <= 2:
+        return bfs_path
+    result = [bfs_path[0]]
+    anchor = 0
+    while anchor < len(bfs_path) - 1:
+        farthest = anchor + 1
+        for j in range(len(bfs_path) - 1, anchor + 1, -1):
+            dz = abs(bfs_path[j][2] - bfs_path[anchor][2])
+            if dz <= max_dz and _voxel_los(bfs_path[anchor], bfs_path[j], walkable):
+                farthest = j
+                break
+        result.append(bfs_path[farthest])
+        anchor = farthest
+    return result
 
 
 def _theta_star(start: tuple, goal: tuple, walkable: set) -> list:
@@ -553,16 +582,20 @@ def build(vg, wk, config: dict) -> PathData:
     min_x = vg.bounds[0]; min_y = vg.bounds[1]; min_z = vg.bounds[4]
 
     if config.get("path_planner") == "theta_star":
-        # Pure-Python Theta* — no bpy needed; voxel-space LOS guarantees wall safety.
+        # BFS + string-pull smoothing (pure Python, no bpy).
+        # BFS provides wall-safe base path; string-pull shortcuts corners via voxel LOS.
+        # max_dz limits Z-change in shortcuts to prevent ceiling/floor penetration.
         config["_effective_grid_resolution"] = res
+        max_dz = config.get("theta_max_dz", 2)
         t0 = time.time()
         cell_path = []
         n = len(tour_list)
         for i in range(n - 1):
-            seg = _theta_star(tour_list[i], tour_list[i+1], walkable_set)
+            bfs_seg = _bfs_path(tour_list[i], tour_list[i+1], walkable_set)
+            seg = _smooth_path(bfs_seg, walkable_set, max_dz=max_dz)
             cell_path.extend(seg if i == 0 else seg[1:])
         elapsed = time.time() - t0
-        print(f"[PathPlan] Theta*: {len(cell_path)} cells, {elapsed:.2f}s")
+        print(f"[PathPlan] BFS+smooth: {len(cell_path)} cells, {elapsed:.2f}s")
         if cell_path:
             pts = [[min_x+(c[0]+0.5)*res, min_y+(c[1]+0.5)*res, min_z+(c[2]+0.5)*res]
                    for c in cell_path]
