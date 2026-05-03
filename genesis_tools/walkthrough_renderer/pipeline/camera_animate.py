@@ -26,7 +26,13 @@ def build(blend_path: str, path_data, orient: "OrientData",
     bpy.ops.wm.open_mainfile(filepath=blend_path)
 
     unit_scale = float(bpy.context.scene.unit_settings.scale_length or 1.0)
-    cam_h = config.get("camera_height", 1.7) / unit_scale
+    # In aerial mode path points are 3D flying positions — the camera IS at the
+    # path point. camera_height is a walking metaphor (eye above floor) and must
+    # not be added in aerial mode or it pushes the camera above the ceiling.
+    if config.get("aerial"):
+        cam_h = 0.0
+    else:
+        cam_h = config.get("camera_height", 1.7) / unit_scale
     fps = config.get("fps", 12)
 
     path_vecs = [Vector(tuple(p)) for p in path_data.path_points]

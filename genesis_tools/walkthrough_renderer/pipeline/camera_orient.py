@@ -112,7 +112,11 @@ def build(blend_path: str, path_data, config: dict) -> OrientData:
     bpy.ops.wm.open_mainfile(filepath=blend_path)
 
     unit_scale = float(bpy.context.scene.unit_settings.scale_length or 1.0)
-    cam_h_bu = config.get("camera_height", 1.7) / unit_scale
+    # In aerial mode path points are camera positions; no height offset applies.
+    if config.get("aerial"):
+        cam_h_bu = 0.0
+    else:
+        cam_h_bu = config.get("camera_height", 1.7) / unit_scale
 
     if len(path_data.waypoints) < 2:
         return OrientData(wp_schedule=[])
