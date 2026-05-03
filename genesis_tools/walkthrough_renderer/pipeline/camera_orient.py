@@ -126,18 +126,23 @@ def build(blend_path: str, path_data, config: dict) -> OrientData:
     min_x, min_y, min_z = bounds[0], bounds[1], bounds[4]
 
     tour_world = [
-        Vector((min_x+(wp[0]+0.5)*res, min_y+(wp[1]+0.5)*res, min_z+wp[2]*res))
+        Vector((min_x+(wp[0]+0.5)*res, min_y+(wp[1]+0.5)*res, min_z+(wp[2]+0.5)*res))
         for wp in path_data.waypoints
     ]
     wp_oris = _compute_waypoint_orientations(tour_world, cam_h_bu, scene, dg)
 
-    # Build path_points as Vector list
+    # Build path_points as Vector list and compute arc lengths
     path_vecs = [Vector(tuple(p)) for p in path_data.path_points]
-    wp_path_idx = _map_tour_to_path(tour_world, path_vecs)
-    n_pp = max(1, len(path_vecs) - 1)
+    arc_lens = [0.0]
+    for i in range(len(path_vecs) - 1):
+        arc_lens.append(arc_lens[-1] + (path_vecs[i+1] - path_vecs[i]).length)
+    total_arc = max(1e-10, arc_lens[-1])
 
+    # Map each waypoint to its arc-length t so camera_animate slerps uniformly in space
+    wp_path_idx = _map_tour_to_path(tour_world, path_vecs)
     schedule_raw = sorted(
-        [(wp_path_idx[k] / n_pp, wp_oris[k]) for k in range(len(tour_world))],
+        [(arc_lens[idx] / total_arc, wp_oris[k])
+         for k, idx in enumerate(wp_path_idx)],
         key=lambda x: x[0],
     )
 

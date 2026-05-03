@@ -33,6 +33,12 @@ def build(blend_path: str, path_data, orient: "OrientData",
     if not path_vecs:
         raise RuntimeError("PathData has no path_points — cannot animate camera.")
 
+    # Precompute cumulative arc lengths for uniform-speed sampling
+    arc_lengths = [0.0]
+    for i in range(len(path_vecs) - 1):
+        arc_lengths.append(arc_lengths[-1] + (path_vecs[i+1] - path_vecs[i]).length)
+    total_arc = max(1e-10, arc_lengths[-1])
+
     # Auto-calculate duration
     if not config.get("duration_seconds"):
         path_length = sum(
@@ -71,13 +77,20 @@ def build(blend_path: str, path_data, orient: "OrientData",
         return wp_schedule[-1][1]
 
     def _sample_path(t_val):
+        """Sample path at arc-length fraction t_val ∈ [0, 1] — uniform speed."""
         if not path_vecs:
             return Vector((0, 0, 0))
-        idx = t_val * (len(path_vecs) - 1)
-        i = int(idx); frac = idx - i
-        if i >= len(path_vecs) - 1:
-            return path_vecs[-1]
-        return path_vecs[i].lerp(path_vecs[i+1], frac)
+        target = t_val * total_arc
+        lo, hi = 0, len(arc_lengths) - 1
+        while lo < hi - 1:
+            mid = (lo + hi) // 2
+            if arc_lengths[mid] <= target:
+                lo = mid
+            else:
+                hi = mid
+        seg = arc_lengths[hi] - arc_lengths[lo]
+        frac = (target - arc_lengths[lo]) / max(1e-10, seg)
+        return path_vecs[lo].lerp(path_vecs[min(hi, len(path_vecs) - 1)], frac)
 
     def _look_at_quat(frm, to):
         direction = (to - frm).normalized()
@@ -110,10 +123,13 @@ def build(blend_path: str, path_data, orient: "OrientData",
         path_pt = _sample_path(t)
         cam_pos = path_pt + Vector((0, 0, cam_h))
 
-        if wp_schedule:
+        if wp_gaze_mode == "waypoint" and wp_schedule:
+            # Slerp between pre-computed waypoint quaternions (future-WP average gaze)
             target_quat = _get_base_quat(t)
         else:
-            floor_ahead = _sample_path(min(1.0, t + 0.15))
+            # Look-ahead along travel direction: sample a fixed spatial distance ahead
+            lookahead_t = min(1.0, t + config.get("lookahead_fraction", 0.05))
+            floor_ahead = _sample_path(lookahead_t)
             look_target = cam_pos + (floor_ahead - path_pt)
             target_quat = _look_at_quat(cam_pos, look_target)
 
