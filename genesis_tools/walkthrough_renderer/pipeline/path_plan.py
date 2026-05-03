@@ -283,7 +283,8 @@ def _cast_all_hits_bidir(origin, direction, max_dist):
     yield from all_hits
 
 
-def _build_smooth_path(tour: list, walkable: set, config: dict, bounds: tuple) -> list:
+def _build_smooth_path(tour: list, walkable: set, config: dict, bounds: tuple,
+                       n_iters: int = 5) -> list:
     """BFS corridor + Laplacian smoothing + 4x upsample (requires bpy)."""
     import bpy
     from mathutils import Vector as _V
@@ -331,7 +332,7 @@ def _build_smooth_path(tour: list, walkable: set, config: dict, bounds: tuple) -
         return not hit_rev
 
     points = [c2w(c) for c in cell_path]
-    for _ in range(5):
+    for _ in range(n_iters):
         new_pts = [points[0]]
         for i in range(1, len(points)-1):
             # Average all three axes — previously only XY was averaged and Z was
@@ -588,41 +589,62 @@ def build(vg, wk, config: dict) -> PathData:
     min_x = vg.bounds[0]; min_y = vg.bounds[1]; min_z = vg.bounds[4]
 
     if config.get("path_planner") == "theta_star":
-        # Pure BFS (no smoothing). Adjacent-voxel steps (50 BU max) + 4× upsample
+        # BFS (6-connected, no diagonal). Adjacent-voxel steps (≤ res BU) + 4× upsample
         # guarantee the world-space path never crosses a wall. Diagonal shortcuts
         # between non-adjacent walkable voxels (string-pull / Theta*) create
         # world-space segments that slice through walls even when both endpoints
         # are walkable — see v48/v49 post-mortem.
+        # Optional Laplacian smoothing: set "laplacian_iters" > 0 in config (default 0).
         config["_effective_grid_resolution"] = res
-        t0 = time.time()
-        cell_path = []
-        n = len(tour_list)
-        for i in range(n - 1):
-            seg = _bfs_path(tour_list[i], tour_list[i+1], walkable_set)
-            cell_path.extend(seg if i == 0 else seg[1:])
-        elapsed = time.time() - t0
-        print(f"[PathPlan] BFS (pure): {len(cell_path)} cells, {elapsed:.2f}s")
-        if cell_path:
-            pts = [[min_x+(c[0]+0.5)*res, min_y+(c[1]+0.5)*res, min_z+(c[2]+0.5)*res]
-                   for c in cell_path]
-            upsampled = []
-            for i in range(len(pts) - 1):
-                p0, p1 = pts[i], pts[i+1]
-                for j in range(4):
-                    t = j / 4
-                    upsampled.append([p0[0]+t*(p1[0]-p0[0]),
-                                      p0[1]+t*(p1[1]-p0[1]),
-                                      p0[2]+t*(p1[2]-p0[2])])
-            upsampled.append(pts[-1])
-            path_points_arr = np.array(upsampled, dtype=np.float64)
-        else:
-            path_points_arr = np.empty((0, 3), dtype=np.float64)
+        laplacian_iters = config.get("laplacian_iters", 0)
+        if laplacian_iters > 0:
+            try:
+                import bpy
+                config["_unit_scale"] = vg.unit_scale
+                t0 = time.time()
+                path_vecs = _build_smooth_path(tour_list, walkable_set, config, vg.bounds,
+                                               n_iters=laplacian_iters)
+                if not config.get("aerial"):
+                    path_vecs, _ = _snap_path_to_floor(path_vecs, config)
+                elapsed = time.time() - t0
+                print(f"[PathPlan] BFS + Laplacian({laplacian_iters} iters): "
+                      f"{len(path_vecs)} pts, {elapsed:.2f}s")
+                path_points_arr = np.array([[p.x, p.y, p.z] for p in path_vecs],
+                                           dtype=np.float64)
+            except ImportError:
+                laplacian_iters = 0  # fall through to pure BFS below
+        if laplacian_iters == 0:
+            t0 = time.time()
+            cell_path = []
+            n = len(tour_list)
+            for i in range(n - 1):
+                seg = _bfs_path(tour_list[i], tour_list[i+1], walkable_set)
+                cell_path.extend(seg if i == 0 else seg[1:])
+            elapsed = time.time() - t0
+            print(f"[PathPlan] BFS (pure): {len(cell_path)} cells, {elapsed:.2f}s")
+            if cell_path:
+                pts = [[min_x+(c[0]+0.5)*res, min_y+(c[1]+0.5)*res, min_z+(c[2]+0.5)*res]
+                       for c in cell_path]
+                upsampled = []
+                for i in range(len(pts) - 1):
+                    p0, p1 = pts[i], pts[i+1]
+                    for j in range(4):
+                        t = j / 4
+                        upsampled.append([p0[0]+t*(p1[0]-p0[0]),
+                                          p0[1]+t*(p1[1]-p0[1]),
+                                          p0[2]+t*(p1[2]-p0[2])])
+                upsampled.append(pts[-1])
+                path_points_arr = np.array(upsampled, dtype=np.float64)
+            else:
+                path_points_arr = np.empty((0, 3), dtype=np.float64)
     else:
         try:
             import bpy
             config["_effective_grid_resolution"] = res
             config["_unit_scale"] = vg.unit_scale
-            path_vecs = _build_smooth_path(tour_list, walkable_set, config, vg.bounds)
+            n_iters = config.get("laplacian_iters", 5)
+            path_vecs = _build_smooth_path(tour_list, walkable_set, config, vg.bounds,
+                                           n_iters=n_iters)
             if not config.get("aerial"):
                 path_vecs, _ = _snap_path_to_floor(path_vecs, config)
             path_vecs = _fine_adjust_path(path_vecs, config)
