@@ -140,6 +140,82 @@ def _bfs_path(start: tuple, goal: tuple, walkable: set) -> list:
     return [start, goal]
 
 
+def _voxel_los(p0: tuple, p1: tuple, walkable: set) -> bool:
+    """3D DDA line-of-sight in voxel space. True iff all intermediate voxels are walkable."""
+    x0, y0, z0 = p0
+    x1, y1, z1 = p1
+    steps = max(abs(x1-x0), abs(y1-y0), abs(z1-z0))
+    if steps == 0:
+        return p0 in walkable
+    for i in range(1, steps):
+        t = i / steps
+        if (round(x0 + t*(x1-x0)), round(y0 + t*(y1-y0)), round(z0 + t*(z1-z0))) not in walkable:
+            return False
+    return True
+
+
+def _theta_star(start: tuple, goal: tuple, walkable: set) -> list:
+    """Theta* any-angle path in voxel space (26-connected, voxel LOS shortcuts).
+
+    Returns list of voxel cells from start to goal. Falls back to BFS if unreachable.
+    """
+    import heapq
+
+    if start == goal:
+        return [start]
+
+    def h(a, b):
+        return math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2)
+
+    g = {start: 0.0}
+    parent = {start: start}
+    open_heap = [(h(start, goal), start)]
+    closed: set = set()
+
+    while open_heap:
+        _, s = heapq.heappop(open_heap)
+        if s in closed:
+            continue
+        if s == goal:
+            path = []
+            cur = goal
+            while True:
+                path.append(cur)
+                p = parent[cur]
+                if p == cur:
+                    break
+                cur = p
+            path.reverse()
+            return path
+        closed.add(s)
+
+        sx, sy, sz = s
+        ps = parent[s]
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    if dx == dy == dz == 0:
+                        continue
+                    nb = (sx+dx, sy+dy, sz+dz)
+                    if nb not in walkable or nb in closed:
+                        continue
+                    if _voxel_los(ps, nb, walkable):
+                        new_g = g[ps] + h(ps, nb)
+                        if new_g < g.get(nb, float('inf')):
+                            g[nb] = new_g
+                            parent[nb] = ps
+                            heapq.heappush(open_heap, (new_g + h(nb, goal), nb))
+                    else:
+                        new_g = g[s] + h(s, nb)
+                        if new_g < g.get(nb, float('inf')):
+                            g[nb] = new_g
+                            parent[nb] = s
+                            heapq.heappush(open_heap, (new_g + h(nb, goal), nb))
+
+    print(f"[PathPlan] Theta* no path {start}→{goal}, falling back to BFS")
+    return _bfs_path(start, goal, walkable)
+
+
 # ---------------------------------------------------------------------------
 # bpy-dependent helpers (must run under bpy Python)
 # ---------------------------------------------------------------------------
@@ -476,26 +552,53 @@ def build(vg, wk, config: dict) -> PathData:
     res = vg.res
     min_x = vg.bounds[0]; min_y = vg.bounds[1]; min_z = vg.bounds[4]
 
-    try:
-        import bpy
+    if config.get("path_planner") == "theta_star":
+        # Pure-Python Theta* — no bpy needed; voxel-space LOS guarantees wall safety.
         config["_effective_grid_resolution"] = res
-        config["_unit_scale"] = vg.unit_scale
-        path_vecs = _build_smooth_path(tour_list, walkable_set, config, vg.bounds)
-        if not config.get("aerial"):
-            path_vecs, _ = _snap_path_to_floor(path_vecs, config)
-        path_vecs = _fine_adjust_path(path_vecs, config)
-        path_points_arr = np.array([[p.x, p.y, p.z] for p in path_vecs], dtype=np.float64)
-    except ImportError:
-        # Running outside bpy: emit voxel centres along BFS corridor
+        t0 = time.time()
         cell_path = []
         n = len(tour_list)
         for i in range(n - 1):
-            seg = _bfs_path(tour_list[i], tour_list[i+1], walkable_set)
+            seg = _theta_star(tour_list[i], tour_list[i+1], walkable_set)
             cell_path.extend(seg if i == 0 else seg[1:])
-        path_points_arr = np.array([
-            [min_x+(c[0]+0.5)*res, min_y+(c[1]+0.5)*res, min_z+(c[2]+0.5)*res]
-            for c in cell_path
-        ], dtype=np.float64) if cell_path else np.empty((0,3), dtype=np.float64)
+        elapsed = time.time() - t0
+        print(f"[PathPlan] Theta*: {len(cell_path)} cells, {elapsed:.2f}s")
+        if cell_path:
+            pts = [[min_x+(c[0]+0.5)*res, min_y+(c[1]+0.5)*res, min_z+(c[2]+0.5)*res]
+                   for c in cell_path]
+            upsampled = []
+            for i in range(len(pts) - 1):
+                p0, p1 = pts[i], pts[i+1]
+                for j in range(4):
+                    t = j / 4
+                    upsampled.append([p0[0]+t*(p1[0]-p0[0]),
+                                      p0[1]+t*(p1[1]-p0[1]),
+                                      p0[2]+t*(p1[2]-p0[2])])
+            upsampled.append(pts[-1])
+            path_points_arr = np.array(upsampled, dtype=np.float64)
+        else:
+            path_points_arr = np.empty((0, 3), dtype=np.float64)
+    else:
+        try:
+            import bpy
+            config["_effective_grid_resolution"] = res
+            config["_unit_scale"] = vg.unit_scale
+            path_vecs = _build_smooth_path(tour_list, walkable_set, config, vg.bounds)
+            if not config.get("aerial"):
+                path_vecs, _ = _snap_path_to_floor(path_vecs, config)
+            path_vecs = _fine_adjust_path(path_vecs, config)
+            path_points_arr = np.array([[p.x, p.y, p.z] for p in path_vecs], dtype=np.float64)
+        except ImportError:
+            # Running outside bpy: emit voxel centres along BFS corridor
+            cell_path = []
+            n = len(tour_list)
+            for i in range(n - 1):
+                seg = _bfs_path(tour_list[i], tour_list[i+1], walkable_set)
+                cell_path.extend(seg if i == 0 else seg[1:])
+            path_points_arr = np.array([
+                [min_x+(c[0]+0.5)*res, min_y+(c[1]+0.5)*res, min_z+(c[2]+0.5)*res]
+                for c in cell_path
+            ], dtype=np.float64) if cell_path else np.empty((0, 3), dtype=np.float64)
 
     return PathData(
         waypoints=waypoints_arr,
