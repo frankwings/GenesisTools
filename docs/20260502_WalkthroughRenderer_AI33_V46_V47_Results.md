@@ -114,15 +114,31 @@ look_target = cam_pos + look_dir.normalized() * some_dist
 
 ---
 
+## v45 vs v46 对比：arc-length 的实际效果
+
+v45 和 v46 路径完全相同，gaze mode 行为也相同（v45 的 `"free"` 是 dead code，实际走的也是 waypoint slerp 分支）。唯一变量是 arc-length 采样。
+
+**同一帧号，摄像机位置不同：**
+
+| 帧 | v45 (index 采样) | v46 (arc-length 采样) |
+|----|-----------------|----------------------|
+| 300 | 近距离拍天窗格子（卡在密集段） | 已前进，看向门廊柱子 |
+| 600 | 平视办公桌 | 从更高处俯视同一片桌子 |
+
+index 采样下，Laplacian 后段长密集的地方摄像机"卡住"慢走，稀疏处猛冲。arc-length 后同样帧数里摄像机空间位移均匀，所以 frame 300 到达的位置比 v45 更靠前。
+
+**结论：arc-length 改动影响的不只是速度感，而是同一帧对应的空间位置完全不同。**
+
+---
+
 ## 结果指标
 
-| 指标 | v46 | v47 |
-|------|-----|-----|
-| gaze mode | waypoint | lookahead |
-| arc-length sampling | ✓ | ✓ |
-| Frames | 1,078 | 1,078 |
-| Path | 同 v45 | 同 v45 |
-| lookahead_fraction | — | 0.05 |
+| 指标 | v45 | v46 | v47 |
+|------|-----|-----|-----|
+| gaze mode | free (→ waypoint) | waypoint | lookahead |
+| arc-length sampling | ✗ | ✓ | ✓ |
+| Frames | 1,078 | 1,078 | 1,078 |
+| lookahead_fraction | — | — | 0.05 |
 
 ---
 
