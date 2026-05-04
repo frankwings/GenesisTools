@@ -118,21 +118,32 @@ def fit_terrain_contour(
             if all_hits_flat else min_z)
     print(f"[TerrainSnake] env-sphere threshold (p{env_sphere_percentile}) = {z_lo:.2f}")
 
-    valid_flat = [z for z in all_hits_flat if z > z_lo]
-    # Bin width = res/4 (e.g. 5 m for a 20 m grid).  Wide enough that the main
-    # terrain surface aggregates its hits into fewer bins and dominates the
-    # histogram over narrowly-concentrated geometry (ocean floor, sphere surfaces).
+    # Bin width = res/4 (e.g. 5 m for a 20 m grid).
     bin_w = max(1.0, res_bu / 4.0)
     bins = np.arange(z_lo, max_z + bin_w * 2, bin_w)
-    hist, bin_edges = np.histogram(valid_flat, bins=bins)
-    peak_idx = int(np.argmax(hist))
-    z_dominant = float((bin_edges[peak_idx] + bin_edges[peak_idx + 1]) / 2.0)
-    # Default band = one bin width: tight enough to exclude geometry one bin
-    # away from the dominant surface (e.g. a sky-sphere top sitting 8-10 m above
-    # the tundra), wide enough to capture slight terrain relief within the band.
+    n_bins = len(bins) - 1
+
+    # Count distinct COLUMNS with at least one hit in each bin (not total hits).
+    # Dense geometry (e.g. ocean floor with many ray bounces per column) would
+    # otherwise inflate its bin count and beat the main terrain surface.
+    col_coverage = np.zeros(n_bins, dtype=int)
+    for ix in range(nx):
+        for iy in range(ny):
+            occupied = set()
+            for z in column_hits[(ix, iy)]:
+                if z > z_lo:
+                    b = int((z - z_lo) / bin_w)
+                    if 0 <= b < n_bins:
+                        occupied.add(b)
+            for b in occupied:
+                col_coverage[b] += 1
+
+    peak_idx = int(np.argmax(col_coverage))
+    z_dominant = float((bins[peak_idx] + bins[peak_idx + 1]) / 2.0)
+    # Default band = one bin width.
     band = float(terrain_band_tolerance) if terrain_band_tolerance is not None else bin_w
     print(f"[TerrainSnake] dominant terrain Z = {z_dominant:.2f} m "
-          f"({hist[peak_idx]} hits in peak bin, bin_w={bin_w:.1f} m), band ±{band:.1f} m")
+          f"({col_coverage[peak_idx]} columns in peak bin, bin_w={bin_w:.1f} m), band ±{band:.1f} m")
 
     terrain_z_floor = np.full((nx, ny), np.nan, dtype=np.float64)
     for ix in range(nx):
