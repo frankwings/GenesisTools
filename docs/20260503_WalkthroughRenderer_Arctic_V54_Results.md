@@ -53,12 +53,12 @@ The arctic scene has a perfectly flat ground plane at Z ≈ 110 m. All downward 
 |------|--------|
 | voxel_grid (terrain mode) | 32,400 walkable voxels — one per column, 180×180×32 grid |
 | walkable | 32,400 ground voxels (no flood-fill; snake found surface directly) |
-| path | 5,729 path points, 20 waypoints, spanning ±1790 m XY |
+| path | 5,821 path points, 20 waypoints, spanning ±1790 m XY |
 | camera_animate | 1,440 frames @ 12 fps = 120 s walkthrough |
 | render | WORKBENCH, 1280×720, ~0.28 s/frame |
 
-**Camera**: height 1.7 m above ground, lookahead gaze (`waypoint_gaze_mode="free"`),
-walk speed 5.0 m/s.
+**Camera**: height 1.7 m above ground (eye Z ≈ 111.7 m), lookahead gaze
+(`waypoint_gaze_mode="free"`), walk speed 5.0 m/s.
 
 ---
 
