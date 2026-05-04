@@ -72,7 +72,7 @@ walk speed 5.0 m/s.
 
 ## Bugs Fixed During This Run
 
-Two bugs in `fit_terrain_contour.py` were discovered and fixed:
+Four bugs were discovered and fixed during this run:
 
 **1. scipy import via `__init__.py`** — Importing `TerrainSnake` through the
 `genesis_tools.active_contour` package triggers `__init__.py` which imports `snake_3d`,
@@ -88,6 +88,13 @@ Fix: add `--python-exit-code 1` to the Blender command.
 `--python script.py -- --arg value`, `sys.argv` contains `['script.py', '--', '--arg', 'value']`.
 `argparse.parse_args()` sees the bare `--` and misinterprets the remaining arguments.
 Fix: strip everything before `--` before passing to `parse_args`.
+
+**4. `round()` in terrain voxel mapping → camera above scene** — `_build_terrain_candidates`
+used `iz = int(round((z - min_z) / res))`. For arctic terrain at Z=110 m with res=20 m,
+this rounded 30.5 → iz=31, placing the walkable voxel at the very top of the scene
+(center Z=130 m = max_z). The camera at max_z sees only sky — white empty frames.
+Fix: use `int(...)` (floor division). iz=30 has center Z=110 m; camera eye at 111.7 m,
+1.7 m above the terrain surface.
 
 ---
 
