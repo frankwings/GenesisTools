@@ -125,10 +125,42 @@ def fit_terrain_contour(
     n_valid = int(np.sum(~np.isnan(terrain_z_floor)))
     print(f"[TerrainSnake] {n_valid}/{nx*ny} columns have valid terrain hits")
 
+    # --- Step 2b: upward ray from camera eye per valid column → ceiling ---
+    # For each valid column shoot one ray upward from (x, y, terrain_z_floor + start_height)
+    # — the expected camera eye position.  The lowest intersection going up is the
+    # first geometry above the camera (canopy, ceiling, env-sphere inner surface).
+    # The cloth starts at this ceiling + start_height rather than at z_max, so it
+    # only needs to fall from the nearest overhead geometry to the terrain floor.
+    terrain_z_ceil = np.full((nx, ny), float(max_z), dtype=np.float64)
+    print("[TerrainSnake] Casting upward rays from camera eye to find per-column ceiling …")
+    for ix in range(nx):
+        for iy in range(ny):
+            if np.isnan(terrain_z_floor[ix, iy]):
+                continue  # NaN columns: cloth uses z_max (Laplacian bridging only)
+            x = min_x + (ix + 0.5) * res_bu
+            y = min_y + (iy + 0.5) * res_bu
+            origin_z = terrain_z_floor[ix, iy] + start_height
+            cur = Vector((x, y, origin_z))
+            direction_up = Vector((0.0, 0.0, 1.0))
+            rem = (max_z + 2.0) - origin_z
+            while rem > step_past:
+                hit, loc, _n, *_ = scene.ray_cast(
+                    depsgraph, cur, direction_up, distance=rem)
+                if not hit:
+                    break
+                if loc.z > origin_z:
+                    terrain_z_ceil[ix, iy] = min(terrain_z_ceil[ix, iy], loc.z)
+                rem -= (loc - cur).length + step_past
+                cur = loc + direction_up * step_past
+
+    n_ceil = int(np.sum(terrain_z_ceil < max_z))
+    print(f"[TerrainSnake] {n_ceil}/{n_valid} valid columns found a ceiling below z_max")
+
     # --- Step 3: fit TerrainSnake ---
     bounds = (min_x, min_y, max_x, max_y, min_z, max_z)
     snake = TerrainSnake(
         terrain_z_floor=terrain_z_floor,
+        terrain_z_ceil=terrain_z_ceil,
         bounds=bounds,
         res=res_bu,
         alpha=alpha,
@@ -150,6 +182,7 @@ def fit_terrain_contour(
         out_path,
         heightmap=heightmap.astype(np.float32),
         terrain_z_floor=terrain_z_floor.astype(np.float32),
+        terrain_z_ceil=terrain_z_ceil.astype(np.float32),
         max_displacements=np.array(snake.max_displacements, dtype=np.float32),
         bounds=np.array(bounds, dtype=np.float64),
         res=np.float64(res_bu),

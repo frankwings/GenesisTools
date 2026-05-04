@@ -18,17 +18,18 @@ class TerrainSnake:
 
     def __init__(
         self,
-        terrain_z_floor: np.ndarray,   # (nx, ny) float64, NaN = no valid hit
-        bounds: tuple,                  # (min_x, min_y, max_x, max_y, min_z, max_z)
+        terrain_z_floor: np.ndarray,          # (nx, ny) float64, NaN = no valid hit
+        bounds: tuple,                         # (min_x, min_y, max_x, max_y, min_z, max_z)
         res: float,
-        alpha: float = 0.5,            # Laplacian smoothness weight
-        gravity: float = 0.1,          # downward force per step
-        dt: float = 1.0,               # integration step size
+        alpha: float = 0.5,                   # Laplacian smoothness weight
+        gravity: float = 0.1,                 # downward force per step
+        dt: float = 1.0,                      # integration step size
         max_iterations: int = 200,
         convergence_threshold: float = 1e-3,
         plateau_window: int = 20,
         plateau_rtol: float = 0.02,
-        start_height: float = 1.7,     # valid columns init this far above terrain_z_floor
+        terrain_z_ceil: "np.ndarray | None" = None,  # (nx, ny) first upward hit from camera eye; cloth starts here + start_height
+        start_height: float = 1.7,            # cloth offset above terrain_z_ceil (or terrain_z_floor if ceil not provided)
     ) -> None:
         self.terrain_z_floor = np.asarray(terrain_z_floor, dtype=np.float64)
         self.bounds = bounds
@@ -54,13 +55,19 @@ class TerrainSnake:
         ys = min_y + (np.arange(self.ny) + 0.5) * self.res
         XX, YY = np.meshgrid(xs, ys, indexing="ij")
 
-        # Valid columns: start just above their terrain floor so the cloth only
-        # needs to fall start_height metres (not the full z_max − terrain gap).
-        # NaN columns: start at z_max and converge toward valid neighbours via
-        # Laplacian.  They are excluded from the heightmap in voxel_grid.
+        # Cloth initialization height per valid column.
+        # If terrain_z_ceil is provided (first upward hit from camera eye), start
+        # the cloth at ceil + start_height.  This anchors the cloth to the lowest
+        # geometry above the camera rather than to an arbitrary z_max, so scenes
+        # with a nearby ceiling (jungle canopy, indoor ceiling) converge faster.
+        # Falls back to terrain_z_floor + start_height when no ceil is provided.
+        if terrain_z_ceil is not None:
+            z_ref_valid = np.asarray(terrain_z_ceil, dtype=np.float64)
+        else:
+            z_ref_valid = self.terrain_z_floor
         z_init = np.where(
             self.valid_mask,
-            self.terrain_z_floor + self.start_height,
+            z_ref_valid + self.start_height,
             float(max_z),
         )
 
