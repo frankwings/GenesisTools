@@ -35,6 +35,45 @@ def build(blend_path: str, path_data, orient: "OrientData",
         cam_h = config.get("camera_height", 1.7) / unit_scale
     fps = config.get("fps", 12)
 
+    # Optional: per-frame ground Z from the cloth heightmap (terrain_snake.npz).
+    # The path is built from voxel centres which are quantised to res (e.g. 20 m).
+    # If we have the cloth heightmap, look up the actual ground Z at each path
+    # point's (x, y) via bilinear interpolation — the camera then walks at exactly
+    # cloth_z + camera_height, eliminating voxel-quantisation clipping into hills.
+    cloth_z_lookup = None
+    terrain_npz = config.get("terrain_npz")
+    if terrain_npz and not config.get("aerial"):
+        import numpy as _np
+        from pathlib import Path as _Path
+        if _Path(terrain_npz).exists():
+            _td = _np.load(terrain_npz)
+            _hm = _np.asarray(_td["heightmap"], dtype=_np.float64)
+            _bounds = _td["bounds"]
+            _res = float(_td["res"])
+            _min_x, _min_y = float(_bounds[0]), float(_bounds[1])
+            _nx, _ny = _hm.shape
+            _floor_mask = ~_np.isnan(_np.asarray(_td["terrain_z_floor"], dtype=_np.float64))
+
+            def cloth_z_lookup(world_x: float, world_y: float) -> "float | None":
+                fx = (world_x - _min_x) / _res - 0.5  # to cell-centre coords
+                fy = (world_y - _min_y) / _res - 0.5
+                ix = max(0, min(_nx - 2, int(fx)))
+                iy = max(0, min(_ny - 2, int(fy)))
+                tx = max(0.0, min(1.0, fx - ix))
+                ty = max(0.0, min(1.0, fy - iy))
+                # Skip lookup if any of the 4 neighbours is NaN-domain (off-island)
+                if not (_floor_mask[ix, iy] and _floor_mask[ix+1, iy]
+                        and _floor_mask[ix, iy+1] and _floor_mask[ix+1, iy+1]):
+                    return None
+                z00 = _hm[ix, iy]
+                z10 = _hm[ix+1, iy]
+                z01 = _hm[ix, iy+1]
+                z11 = _hm[ix+1, iy+1]
+                return float((1-tx)*(1-ty)*z00 + tx*(1-ty)*z10
+                             + (1-tx)*ty*z01 + tx*ty*z11)
+            print(f"[CameraAnimate] Using cloth heightmap from {terrain_npz} "
+                  f"for per-frame ground Z (eliminates voxel-Z quantisation)")
+
     path_vecs = [Vector(tuple(p)) for p in path_data.path_points]
     if not path_vecs:
         raise RuntimeError("PathData has no path_points — cannot animate camera.")
@@ -127,6 +166,12 @@ def build(blend_path: str, path_data, orient: "OrientData",
     for fi in range(total_frames):
         t = fi / max(1, total_frames - 1)
         path_pt = _sample_path(t)
+        # Override path Z with cloth-heightmap lookup at (x, y) when available.
+        # Falls back to the path point's own Z if the lookup is out of domain.
+        if cloth_z_lookup is not None:
+            ground_z = cloth_z_lookup(path_pt.x, path_pt.y)
+            if ground_z is not None:
+                path_pt = Vector((path_pt.x, path_pt.y, ground_z))
         cam_pos = path_pt + Vector((0, 0, cam_h))
 
         if wp_gaze_mode == "waypoint" and wp_schedule:
