@@ -40,6 +40,7 @@ def fit_terrain_contour(
     grid_resolution: float = 5.0,
     max_grid_cells_xy: int = 200,
     env_sphere_percentile: float = 5.0,
+    terrain_band_tolerance: "float | None" = None,
     ray_samples: int = 1,
     alpha: float = 0.5,
     gravity: float = 0.1,
@@ -106,21 +107,35 @@ def fit_terrain_contour(
                         cur = loc + direction * step_past
             column_hits[(ix, iy)] = hits_z
 
-    # --- Step 2: global percentile filter to remove env sphere hits ---
-    z_threshold = (np.percentile(all_hits_flat, env_sphere_percentile)
-                   if all_hits_flat else min_z)
-    print(f"[TerrainSnake] env-sphere threshold (p{env_sphere_percentile})"
-          f" = {z_threshold:.2f}")
+    # --- Step 2: histogram-based dominant terrain height ---
+    # (1) Bottom-percentile filter removes env-sphere inner-surface hits.
+    # (2) Histogram over the surviving hits finds the dominant terrain band —
+    #     the Z where the most rays concentrate = the main walkable surface.
+    # (3) Per-column floor = topmost hit within ±band of that dominant height.
+    # This rejects sky-sphere outer-surface hits (above terrain) and low-lying
+    # geometry hits (below terrain) without scene-specific hardcoded thresholds.
+    z_lo = (np.percentile(all_hits_flat, env_sphere_percentile)
+            if all_hits_flat else min_z)
+    print(f"[TerrainSnake] env-sphere threshold (p{env_sphere_percentile}) = {z_lo:.2f}")
+
+    valid_flat = [z for z in all_hits_flat if z > z_lo]
+    bin_w = 1.0  # 1 m bins
+    bins = np.arange(z_lo, max_z + bin_w * 2, bin_w)
+    hist, bin_edges = np.histogram(valid_flat, bins=bins)
+    peak_idx = int(np.argmax(hist))
+    z_dominant = float((bin_edges[peak_idx] + bin_edges[peak_idx + 1]) / 2.0)
+    band = float(terrain_band_tolerance) if terrain_band_tolerance is not None else res_bu / 2.0
+    print(f"[TerrainSnake] dominant terrain Z = {z_dominant:.2f} m "
+          f"({hist[peak_idx]} hits in peak bin), band ±{band:.1f} m")
 
     terrain_z_floor = np.full((nx, ny), np.nan, dtype=np.float64)
     for ix in range(nx):
         for iy in range(ny):
-            valid = [z for z in column_hits[(ix, iy)] if z > z_threshold]
-            if valid:
-                # Topmost valid hit = first surface seen from above = terrain surface.
-                # max() is used rather than min() because min() picks up env-sphere
-                # inner-surface hits that slip just above the percentile threshold.
-                terrain_z_floor[ix, iy] = max(valid)
+            in_band = [z for z in column_hits[(ix, iy)]
+                       if z > z_lo and abs(z - z_dominant) < band]
+            if in_band:
+                # Topmost hit within the dominant band = walking surface.
+                terrain_z_floor[ix, iy] = max(in_band)
 
     n_valid = int(np.sum(~np.isnan(terrain_z_floor)))
     print(f"[TerrainSnake] {n_valid}/{nx*ny} columns have valid terrain hits")
@@ -199,6 +214,7 @@ def _parse_args():
     p.add_argument("--grid-resolution", type=float, default=5.0)
     p.add_argument("--max-grid-cells-xy", type=int, default=200)
     p.add_argument("--env-sphere-percentile", type=float, default=5.0)
+    p.add_argument("--terrain-band-tolerance", type=float, default=None)
     p.add_argument("--ray-samples", type=int, default=1)
     p.add_argument("--alpha", type=float, default=0.5)
     p.add_argument("--gravity", type=float, default=0.1)
@@ -219,6 +235,7 @@ if __name__ == "__main__":
         grid_resolution=args.grid_resolution,
         max_grid_cells_xy=args.max_grid_cells_xy,
         env_sphere_percentile=args.env_sphere_percentile,
+        terrain_band_tolerance=args.terrain_band_tolerance,
         ray_samples=args.ray_samples,
         alpha=args.alpha,
         gravity=args.gravity,
