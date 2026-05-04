@@ -373,7 +373,7 @@ def _build_terrain_candidates(config: dict) -> VoxelGridData:
         for iy in range(ny):
             z_val = float(heightmap[ix, iy])
             if not math.isnan(z_val):
-                iz = int(round((z_val - min_z) / res))
+                iz = int((z_val - min_z) / res)  # floor: voxel that contains terrain surface
                 iz = max(0, min(nz - 1, iz))
                 candidates.append((ix, iy, iz))
 
