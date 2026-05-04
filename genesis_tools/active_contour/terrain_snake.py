@@ -1,10 +1,10 @@
-from __future__ import annotations
 """Cloth-simulation snake for outdoor terrain surface detection.
 
 Fits a flat grid cloth to a terrain by iterating gravity + Laplacian
 smoothness energy with per-column hard floor constraints from ray-cast hits.
 Analogous to CSF (Cloth Simulation Filter) for lidar ground extraction.
 """
+from __future__ import annotations
 import numpy as np
 
 

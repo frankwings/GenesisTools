@@ -44,7 +44,7 @@ if not os.path.exists(NPZ):
         "--max-iterations", "200",
         "--convergence-threshold", "1e-3",
     ]
-    result = subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True)
     print(f"[v3] terrain_snake.npz saved → {NPZ}")
 else:
     print(f"[v3] Reusing existing {NPZ}")
