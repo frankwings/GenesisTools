@@ -38,6 +38,7 @@ if not os.path.exists(NPZ):
         "--grid-resolution", "20.0",
         "--max-grid-cells-xy", "180",
         "--env-sphere-percentile", "5.0",
+        "--sky-sphere-percentile", "95.0",
         "--ray-samples", "1",
         "--alpha", "0.5",
         "--gravity", "0.1",

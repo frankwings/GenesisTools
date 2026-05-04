@@ -40,6 +40,7 @@ def fit_terrain_contour(
     grid_resolution: float = 5.0,
     max_grid_cells_xy: int = 200,
     env_sphere_percentile: float = 5.0,
+    sky_sphere_percentile: float = 95.0,
     ray_samples: int = 1,
     alpha: float = 0.5,
     gravity: float = 0.1,
@@ -106,20 +107,24 @@ def fit_terrain_contour(
                         cur = loc + direction * step_past
             column_hits[(ix, iy)] = hits_z
 
-    # --- Step 2: global percentile filter to remove env sphere hits ---
-    z_threshold = (np.percentile(all_hits_flat, env_sphere_percentile)
-                   if all_hits_flat else min_z)
-    print(f"[TerrainSnake] env-sphere threshold (p{env_sphere_percentile})"
-          f" = {z_threshold:.2f}")
+    # --- Step 2: global percentile filter to remove env/sky sphere hits ---
+    # Bottom filter (p5): removes inner-surface hits from the lower env sphere.
+    # Top filter (p95): removes outer-surface hits from the upper sky sphere.
+    # Scenes with two concentric spheres (atmosphere + sky dome) produce hits both
+    # above and below the terrain; both filters together isolate the terrain band.
+    z_lo = (np.percentile(all_hits_flat, env_sphere_percentile)
+            if all_hits_flat else min_z)
+    z_hi = (np.percentile(all_hits_flat, sky_sphere_percentile)
+            if all_hits_flat else max_z)
+    print(f"[TerrainSnake] env-sphere threshold (p{env_sphere_percentile}) = {z_lo:.2f}")
+    print(f"[TerrainSnake] sky-sphere threshold (p{sky_sphere_percentile}) = {z_hi:.2f}")
 
     terrain_z_floor = np.full((nx, ny), np.nan, dtype=np.float64)
     for ix in range(nx):
         for iy in range(ny):
-            valid = [z for z in column_hits[(ix, iy)] if z > z_threshold]
+            valid = [z for z in column_hits[(ix, iy)] if z_lo < z < z_hi]
             if valid:
-                # Topmost valid hit = first surface seen from above = terrain surface.
-                # max() is used rather than min() because min() picks up env-sphere
-                # inner-surface hits that slip just above the percentile threshold.
+                # Topmost valid hit within the terrain band = walking surface.
                 terrain_z_floor[ix, iy] = max(valid)
 
     n_valid = int(np.sum(~np.isnan(terrain_z_floor)))
@@ -199,6 +204,7 @@ def _parse_args():
     p.add_argument("--grid-resolution", type=float, default=5.0)
     p.add_argument("--max-grid-cells-xy", type=int, default=200)
     p.add_argument("--env-sphere-percentile", type=float, default=5.0)
+    p.add_argument("--sky-sphere-percentile", type=float, default=95.0)
     p.add_argument("--ray-samples", type=int, default=1)
     p.add_argument("--alpha", type=float, default=0.5)
     p.add_argument("--gravity", type=float, default=0.1)
@@ -219,6 +225,7 @@ if __name__ == "__main__":
         grid_resolution=args.grid_resolution,
         max_grid_cells_xy=args.max_grid_cells_xy,
         env_sphere_percentile=args.env_sphere_percentile,
+        sky_sphere_percentile=args.sky_sphere_percentile,
         ray_samples=args.ray_samples,
         alpha=args.alpha,
         gravity=args.gravity,
