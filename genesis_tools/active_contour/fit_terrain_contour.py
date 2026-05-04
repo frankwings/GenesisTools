@@ -40,7 +40,6 @@ def fit_terrain_contour(
     grid_resolution: float = 5.0,
     max_grid_cells_xy: int = 200,
     env_sphere_percentile: float = 5.0,
-    terrain_band_tolerance: "float | None" = None,
     ray_samples: int = 1,
     alpha: float = 0.5,
     gravity: float = 0.1,
@@ -107,92 +106,44 @@ def fit_terrain_contour(
                         cur = loc + direction * step_past
             column_hits[(ix, iy)] = hits_z
 
-    # --- Step 2: histogram-based dominant terrain height ---
-    # (1) Bottom-percentile filter removes env-sphere inner-surface hits.
-    # (2) Histogram over the surviving hits finds the dominant terrain band —
-    #     the Z where the most rays concentrate = the main walkable surface.
-    # (3) Per-column floor = topmost hit within ±band of that dominant height.
-    # This rejects sky-sphere outer-surface hits (above terrain) and low-lying
-    # geometry hits (below terrain) without scene-specific hardcoded thresholds.
+    # --- Step 2: terrain floor = topmost valid hit per column ---
+    # Bottom-percentile filter removes env-sphere inner-surface hits below the scene.
+    # Topmost remaining hit = first surface seen from above = terrain walking surface.
     z_lo = (np.percentile(all_hits_flat, env_sphere_percentile)
             if all_hits_flat else min_z)
     print(f"[TerrainSnake] env-sphere threshold (p{env_sphere_percentile}) = {z_lo:.2f}")
 
-    # Bin width = res/4 (e.g. 5 m for a 20 m grid).
-    bin_w = max(1.0, res_bu / 4.0)
-    bins = np.arange(z_lo, max_z + bin_w * 2, bin_w)
-    n_bins = len(bins) - 1
-
-    # Count distinct COLUMNS with at least one hit in each bin (not total hits).
-    # Dense geometry (e.g. ocean floor with many ray bounces per column) would
-    # otherwise inflate its bin count and beat the main terrain surface.
-    col_coverage = np.zeros(n_bins, dtype=int)
-    for ix in range(nx):
-        for iy in range(ny):
-            occupied = set()
-            for z in column_hits[(ix, iy)]:
-                if z > z_lo:
-                    b = int((z - z_lo) / bin_w)
-                    if 0 <= b < n_bins:
-                        occupied.add(b)
-            for b in occupied:
-                col_coverage[b] += 1
-
-    peak_idx = int(np.argmax(col_coverage))
-    z_dominant = float((bins[peak_idx] + bins[peak_idx + 1]) / 2.0)
-    # Default band = one bin width.
-    band = float(terrain_band_tolerance) if terrain_band_tolerance is not None else bin_w
-    print(f"[TerrainSnake] dominant terrain Z = {z_dominant:.2f} m "
-          f"({col_coverage[peak_idx]} columns in peak bin, bin_w={bin_w:.1f} m), band ±{band:.1f} m")
-
     terrain_z_floor = np.full((nx, ny), np.nan, dtype=np.float64)
     for ix in range(nx):
         for iy in range(ny):
-            in_band = [z for z in column_hits[(ix, iy)]
-                       if z > z_lo and abs(z - z_dominant) < band]
-            if in_band:
-                # Topmost hit within the dominant band = walking surface.
-                terrain_z_floor[ix, iy] = max(in_band)
+            valid = [z for z in column_hits[(ix, iy)] if z > z_lo]
+            if valid:
+                terrain_z_floor[ix, iy] = max(valid)
 
     n_valid = int(np.sum(~np.isnan(terrain_z_floor)))
     print(f"[TerrainSnake] {n_valid}/{nx*ny} columns have valid terrain hits")
 
-    # --- Step 2b: upward ray from camera eye per valid column → ceiling ---
-    # For each valid column shoot one ray upward from (x, y, terrain_z_floor + start_height)
-    # — the expected camera eye position.  The lowest intersection going up is the
-    # first geometry above the camera (canopy, ceiling, env-sphere inner surface).
-    # The cloth starts at this ceiling + start_height rather than at z_max, so it
-    # only needs to fall from the nearest overhead geometry to the terrain floor.
-    terrain_z_ceil = np.full((nx, ny), float(max_z), dtype=np.float64)
-    print("[TerrainSnake] Casting upward rays from camera eye to find per-column ceiling …")
-    for ix in range(nx):
-        for iy in range(ny):
-            if np.isnan(terrain_z_floor[ix, iy]):
-                continue  # NaN columns: cloth uses z_max (Laplacian bridging only)
-            x = min_x + (ix + 0.5) * res_bu
-            y = min_y + (iy + 0.5) * res_bu
-            origin_z = terrain_z_floor[ix, iy] + start_height
-            cur = Vector((x, y, origin_z))
-            direction_up = Vector((0.0, 0.0, 1.0))
-            rem = (max_z + 2.0) - origin_z
-            while rem > step_past:
-                hit, loc, _n, *_ = scene.ray_cast(
-                    depsgraph, cur, direction_up, distance=rem)
-                if not hit:
-                    break
-                if loc.z > origin_z:
-                    terrain_z_ceil[ix, iy] = min(terrain_z_ceil[ix, iy], loc.z)
-                rem -= (loc - cur).length + step_past
-                cur = loc + direction_up * step_past
-
-    n_ceil = int(np.sum(terrain_z_ceil < max_z))
-    print(f"[TerrainSnake] {n_ceil}/{n_valid} valid columns found a ceiling below z_max")
+    # --- Step 2b: read original camera Z from the scene ---
+    # The blend file already has a camera positioned at a sensible eye height.
+    # Use that absolute Z as the uniform cloth init height — every column starts
+    # there and either falls to its terrain floor under gravity, or is lifted
+    # by the floor constraint if its terrain is above the camera.
+    cam_z = None
+    for obj in scene.objects:
+        if obj.type == "CAMERA":
+            cam_z = float((obj.matrix_world @ Vector((0.0, 0.0, 0.0))).z)
+            print(f"[TerrainSnake] original camera '{obj.name}' Z = {cam_z:.2f} m"
+                  f" → cloth init Z")
+            break
+    if cam_z is None:
+        cam_z = float(max_z)
+        print(f"[TerrainSnake] no camera in scene, falling back to z_max = {cam_z:.2f}")
 
     # --- Step 3: fit TerrainSnake ---
     bounds = (min_x, min_y, max_x, max_y, min_z, max_z)
     snake = TerrainSnake(
         terrain_z_floor=terrain_z_floor,
-        terrain_z_ceil=terrain_z_ceil,
+        cloth_init_z=cam_z,
         bounds=bounds,
         res=res_bu,
         alpha=alpha,
@@ -214,11 +165,11 @@ def fit_terrain_contour(
         out_path,
         heightmap=heightmap.astype(np.float32),
         terrain_z_floor=terrain_z_floor.astype(np.float32),
-        terrain_z_ceil=terrain_z_ceil.astype(np.float32),
         max_displacements=np.array(snake.max_displacements, dtype=np.float32),
         bounds=np.array(bounds, dtype=np.float64),
         res=np.float64(res_bu),
         unit_scale=np.float64(unit_scale),
+        cloth_init_z=np.float64(cam_z),
     )
     print(f"[TerrainSnake] Saved → {out_path}")
     return out_path
@@ -231,7 +182,6 @@ def _parse_args():
     p.add_argument("--grid-resolution", type=float, default=5.0)
     p.add_argument("--max-grid-cells-xy", type=int, default=200)
     p.add_argument("--env-sphere-percentile", type=float, default=5.0)
-    p.add_argument("--terrain-band-tolerance", type=float, default=None)
     p.add_argument("--ray-samples", type=int, default=1)
     p.add_argument("--alpha", type=float, default=0.5)
     p.add_argument("--gravity", type=float, default=0.1)
@@ -252,7 +202,6 @@ if __name__ == "__main__":
         grid_resolution=args.grid_resolution,
         max_grid_cells_xy=args.max_grid_cells_xy,
         env_sphere_percentile=args.env_sphere_percentile,
-        terrain_band_tolerance=args.terrain_band_tolerance,
         ray_samples=args.ray_samples,
         alpha=args.alpha,
         gravity=args.gravity,

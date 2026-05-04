@@ -28,8 +28,8 @@ class TerrainSnake:
         convergence_threshold: float = 1e-3,
         plateau_window: int = 20,
         plateau_rtol: float = 0.02,
-        terrain_z_ceil: "np.ndarray | None" = None,  # (nx, ny) first upward hit from camera eye; cloth starts here + start_height
-        start_height: float = 1.7,            # cloth offset above terrain_z_ceil (or terrain_z_floor if ceil not provided)
+        cloth_init_z: "float | None" = None,  # uniform absolute Z to start cloth at (e.g. original camera Z); falls back to terrain_z_floor + start_height per column
+        start_height: float = 1.7,            # per-column offset above terrain_z_floor when cloth_init_z is not set
     ) -> None:
         self.terrain_z_floor = np.asarray(terrain_z_floor, dtype=np.float64)
         self.bounds = bounds
@@ -55,21 +55,20 @@ class TerrainSnake:
         ys = min_y + (np.arange(self.ny) + 0.5) * self.res
         XX, YY = np.meshgrid(xs, ys, indexing="ij")
 
-        # Cloth initialization height per valid column.
-        # If terrain_z_ceil is provided (first upward hit from camera eye), start
-        # the cloth at ceil + start_height.  This anchors the cloth to the lowest
-        # geometry above the camera rather than to an arbitrary z_max, so scenes
-        # with a nearby ceiling (jungle canopy, indoor ceiling) converge faster.
-        # Falls back to terrain_z_floor + start_height when no ceil is provided.
-        if terrain_z_ceil is not None:
-            z_ref_valid = np.asarray(terrain_z_ceil, dtype=np.float64)
+        # Cloth initialization.
+        # If cloth_init_z is provided (typically the original scene camera's Z),
+        # every cloth vertex starts at that single absolute Z.  Each valid column
+        # then either falls under gravity to its terrain_z_floor, or is pushed up
+        # to floor by the constraint if its terrain sits above the camera.
+        # Otherwise fall back to per-column terrain_z_floor + start_height.
+        if cloth_init_z is not None:
+            z_init = np.full((self.nx, self.ny), float(cloth_init_z), dtype=np.float64)
         else:
-            z_ref_valid = self.terrain_z_floor
-        z_init = np.where(
-            self.valid_mask,
-            z_ref_valid + self.start_height,
-            float(max_z),
-        )
+            z_init = np.where(
+                self.valid_mask,
+                self.terrain_z_floor + self.start_height,
+                float(max_z),
+            )
 
         # vertices: (nx*ny, 3) — XY fixed, only Z updated
         self.vertices = np.column_stack([XX.ravel(), YY.ravel(), z_init.ravel()])
