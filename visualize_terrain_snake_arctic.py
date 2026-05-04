@@ -1,6 +1,7 @@
 """Visualize TerrainSnake results for arctic_midnight_sun_v1.
 
-4 figures (same style as Snake3D visualizations):
+5 figures (same style as Snake3D visualizations):
+  fig0 -- initial cloth (flat at z_max) vs final cloth (settled on terrain)
   fig1 -- top-down: raw terrain hits vs snake heightmap
   fig2 -- XZ and YZ side profiles: hits, snake cloth, camera path
   fig3 -- bridging demo: conceptual 2D cross-section showing gap bridging
@@ -43,6 +44,73 @@ XX, YY = np.meshgrid(xs, ys, indexing="ij")
 valid_floor = ~np.isnan(floor_raw)
 valid_hmap  = ~np.isnan(heightmap)
 bridged     = valid_hmap & ~valid_floor   # columns where snake filled NaN
+
+# ── Figure 0: initial cloth vs final cloth (equivalent of figure_2_contour) ──
+fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+fig.suptitle(
+    "TerrainSnake — Arctic Midnight Sun\n"
+    "Initial Cloth (orange, flat at z_max=130 m)  vs  Final Cloth (blue, settled at z=110 m)",
+    fontsize=12,
+)
+
+# Subsample grid for scatter legibility
+step = 4
+xx_s = XX[::step, ::step].ravel()
+yy_s = YY[::step, ::step].ravel()
+init_z = np.full_like(xx_s, max_z)           # initial: flat at z_max
+final_z = heightmap[::step, ::step].ravel()  # final: terrain surface
+vh_s = valid_hmap[::step, ::step].ravel()
+
+# Panel A: Top (XY) — both cloths collapsed to same XY, show which columns were bridged
+ax = axes[0]
+ax.scatter(xx_s[~valid_floor[::step, ::step].ravel()],
+           yy_s[~valid_floor[::step, ::step].ravel()],
+           s=4, c="orange", alpha=0.5, label="bridged by Laplacian (NaN hit)")
+ax.scatter(xx_s[valid_floor[::step, ::step].ravel()],
+           yy_s[valid_floor[::step, ::step].ravel()],
+           s=4, c="steelblue", alpha=0.3, label="direct ray-cast hit")
+ax.set_title("Top (XY) — hit coverage\norange = Laplacian-bridged, blue = direct hit", fontsize=9)
+ax.set_xlabel("X (m)"); ax.set_ylabel("Y (m)")
+ax.set_aspect("equal"); ax.legend(fontsize=8, markerscale=3)
+
+# Panel B: Front (XZ) — shows the fall from z_max to terrain
+ax = axes[1]
+ax.scatter(xx_s, init_z, s=3, c="darkorange", alpha=0.15, label=f"initial cloth (z={max_z:.0f} m)")
+ax.scatter(xx_s[vh_s], final_z[vh_s], s=3, c="steelblue", alpha=0.3,
+           label=f"final cloth (z≈{np.nanmean(heightmap):.1f} m)")
+ax.axhline(max_z, color="darkorange", lw=1.2, ls="--", alpha=0.6)
+ax.axhline(float(np.nanmean(heightmap)), color="steelblue", lw=1.2, ls="--", alpha=0.6)
+arrow_x = float(min_x) * 0.3
+ax.annotate("", xy=(arrow_x, float(np.nanmean(heightmap)) + 1),
+            xytext=(arrow_x, max_z - 1),
+            arrowprops=dict(arrowstyle="->", color="black", lw=1.5))
+ax.text(arrow_x + res * 2, (max_z + float(np.nanmean(heightmap))) / 2,
+        f"falls {max_z - float(np.nanmean(heightmap)):.0f} m\n"
+        f"({int((max_z - float(np.nanmean(heightmap))) / 0.1)} steps\n"
+        f"@ gravity=0.1/step)",
+        fontsize=8, va="center")
+ax.set_title("Front (XZ) — cloth fall from z_max to terrain", fontsize=9)
+ax.set_xlabel("X (m)"); ax.set_ylabel("Z (m)")
+ax.set_ylim(max_z - 30, max_z + 5)
+ax.legend(fontsize=8, markerscale=3)
+
+# Panel C: Side (YZ)
+ax = axes[2]
+ax.scatter(yy_s, init_z, s=3, c="darkorange", alpha=0.15, label=f"initial cloth (flat, z={max_z:.0f} m)")
+ax.scatter(yy_s[vh_s], final_z[vh_s], s=3, c="steelblue", alpha=0.3,
+           label=f"final cloth (z≈{np.nanmean(heightmap):.1f} m)")
+ax.axhline(max_z, color="darkorange", lw=1.2, ls="--", alpha=0.6)
+ax.axhline(float(np.nanmean(heightmap)), color="steelblue", lw=1.2, ls="--", alpha=0.6)
+ax.set_title("Side (YZ) — cloth fall from z_max to terrain", fontsize=9)
+ax.set_xlabel("Y (m)"); ax.set_ylabel("Z (m)")
+ax.set_ylim(max_z - 30, max_z + 5)
+ax.legend(fontsize=8, markerscale=3)
+
+plt.tight_layout()
+out0 = OUT_DIR / "figure_0_initial_vs_final.png"
+fig.savefig(out0, dpi=150); plt.close(fig)
+print(f"Saved {out0}")
+
 
 # ── Figure 1: top-down comparison ─────────────────────────────────────────
 fig, axes = plt.subplots(1, 3, figsize=(18, 6))

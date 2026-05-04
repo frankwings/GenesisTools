@@ -77,6 +77,21 @@ limit is barely sufficient for this scene (see convergence figure).
 
 ## TerrainSnake Visualizations
 
+### Figure 0 — Initial Cloth vs Final Cloth
+
+Equivalent of the indoor Snake3D "initial hull (green) → final snake (blue)" figure.
+
+![figure 0](assets/arctic_midnight_sun_v1/figure_0_initial_vs_final.png)
+
+- **Left (XY top)**: Blue dots = columns with direct ray-cast hits (circular terrain disk).
+  Orange dots = corners bridged by Laplacian (no geometry, NaN hit).
+- **Centre/Right (XZ / YZ front+side)**: Orange line = initial cloth, flat at z_max=130 m.
+  Blue line = final cloth, settled at terrain Z=110 m. Arrow shows the 20 m free-fall
+  (200 steps at gravity=0.1 m/step). Both the initial and final cloths are perfectly flat
+  — arctic tundra has no relief.
+
+---
+
 ### Figure 1 — Top-Down: Ray Hits vs Snake Heightmap vs Bridged Columns
 
 ![figure 1](assets/arctic_midnight_sun_v1/figure_1_top_down.png)
@@ -134,6 +149,40 @@ suppresses a false early-stop during the constant-velocity free-fall phase.
 
 ---
 
+## How the Snake Contour Becomes Walkable Voxels
+
+**Terrain mode** (this scene) and **indoor snake mode** use different strategies:
+
+### Terrain mode (`terrain_npz` set)
+
+No ray-cast into the scene at all. The heightmap already encodes the ground surface:
+
+```
+for each (ix, iy) column:
+    iz = int((heightmap[ix, iy] - min_z) / res)   # floor division → voxel that contains terrain Z
+    → one candidate voxel (ix, iy, iz) per column
+```
+
+`walkable.py` uses these candidates directly as the walkable set — no flood-fill, no floor
+filter. The snake already found the surface; there is no solid array to check against.
+
+### Indoor snake mode (`snake_npz` set)
+
+The fitted snake mesh is loaded and turned into a BVHTree. For every voxel centre in the
+snake's AABB grid, a +X ray is fired through the BVHTree:
+
+```
+ray hits snake surface N times:
+  N odd  → voxel centre is inside the snake  → candidate
+  N even → voxel centre is outside           → discard
+```
+
+`walkable.py` then applies the floor filter: keep only candidates that have a solid
+(scene-geometry) voxel directly below them — i.e. standing on a floor, not floating
+inside empty space.
+
+---
+
 ## Bugs Fixed During This Run
 
 Four bugs were discovered and fixed during this run:
@@ -167,6 +216,7 @@ Fix: use `int(...)` (floor division). iz=30 has center Z=110 m; camera eye at 11
 | Content | Path |
 |---------|------|
 | GIF | `docs/assets/arctic_midnight_sun_v1/arctic_v1_walkthrough.gif` |
+| Fig 0 — initial vs final cloth | `docs/assets/arctic_midnight_sun_v1/figure_0_initial_vs_final.png` |
 | Fig 1 — top-down | `docs/assets/arctic_midnight_sun_v1/figure_1_top_down.png` |
 | Fig 2 — side profiles | `docs/assets/arctic_midnight_sun_v1/figure_2_side_profiles.png` |
 | Fig 3 — bridging demo | `docs/assets/arctic_midnight_sun_v1/figure_3_bridging_demo.png` |
