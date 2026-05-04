@@ -37,13 +37,18 @@ travel through.
 | Scene XY span | ±1800 m (3600 m × 3600 m) |
 | Z range | −500 m … +130 m |
 | env-sphere percentile | p5 = −116.36 m (env-sphere dome filtered) |
-| Valid terrain columns | 32,400 / 32,400 (100%) |
+| Raw hit columns | 25,448 / 32,400 (79%) |
+| Bridged columns (Laplacian) | 6,952 (21%) — corners outside terrain disk |
+| Valid heightmap columns | 32,400 / 32,400 (100%) |
 | Terrain Z (all columns) | 110.02 m |
-| Snake iterations | 200 (hit max — cloth at flat floor) |
+| Snake iterations | 200 (hit max — cloth still in free-fall at last step) |
 | Output | `terrain_snake.npz` |
 
-The arctic scene has a perfectly flat ground plane at Z ≈ 110 m. All downward rays from
-32,400 grid columns hit the same elevation — consistent with arctic tundra geometry.
+The arctic scene has a circular terrain disk at Z ≈ 110 m. The 4 corners of the 180×180
+grid have no geometry (outside the disk) — those 6,952 columns are NaN in the raw hits
+and bridged by the snake's Laplacian smoothness. The cloth starts at z_max=130 m and
+falls 20 m at gravity=0.1 m/step, reaching the floor at iteration ~200 — the max_iterations
+limit is barely sufficient for this scene (see convergence figure).
 
 ---
 
@@ -67,6 +72,65 @@ The arctic scene has a perfectly flat ground plane at Z ≈ 110 m. All downward 
 ![arctic v1 walkthrough](assets/arctic_midnight_sun_v1/arctic_v1_walkthrough.gif)
 
 *(120 frames sampled every 12th frame, 83 ms/frame ≈ 12 fps)*
+
+---
+
+## TerrainSnake Visualizations
+
+### Figure 1 — Top-Down: Ray Hits vs Snake Heightmap vs Bridged Columns
+
+![figure 1](assets/arctic_midnight_sun_v1/figure_1_top_down.png)
+
+- **Left**: Raw ray-cast coverage — green = valid hit, red = no hit. The terrain is a circular
+  disk; the 4 grid corners have no geometry.
+- **Centre**: Snake heightmap (uniform yellow = flat Z≈110 m) + camera path (red) + waypoints
+  (yellow dots). Path tours the full ±1790 m XY extent.
+- **Right**: Bridged columns (orange) — the 6,952 corner cells where the Laplacian filled in
+  the NaN gaps left by missing ray hits.
+
+---
+
+### Figure 2 — Side Profiles: Hits vs Cloth vs Camera Eye
+
+![figure 2](assets/arctic_midnight_sun_v1/figure_2_side_profiles.png)
+
+Orange = raw ray hits, blue = snake cloth Z, red = camera eye (cloth + 1.7 m).
+Terrain is perfectly flat — all three layers sit on the same horizontal line at Z≈110 m.
+Camera eye is consistently 1.7 m above the terrain surface across the full ±1790 m sweep.
+
+---
+
+### Figure 3 — How the Cloth Bridges Vegetation Gaps (synthetic demo)
+
+![figure 3](assets/arctic_midnight_sun_v1/figure_3_bridging_demo.png)
+
+Synthetic 2-D profile demonstrating the core snake behaviour on a scene with varied terrain
+and 3 vegetation patches (green shading) where downward rays return no hit:
+
+- **Orange dots**: ray-cast hits (sampling points) — only outside the gap patches.
+- **Blue gradient lines**: cloth evolution from iter 0 (flat at top) through iters 5, 20, 80
+  as gravity pulls it down toward the floor constraint.
+- **Solid blue**: final converged cloth — tracks the terrain on hit columns, smoothly
+  interpolates across the gaps using Laplacian energy.
+- **Red dashed**: camera eye = cloth + 1.7 m, always just above the surface.
+
+The key relationship: **sampling points are hard floor constraints; the snake cloth is pulled
+toward them by gravity and held by the floor, while Laplacian smoothness bridges any gaps**.
+
+---
+
+### Figure 4 — Convergence
+
+![figure 4](assets/arctic_midnight_sun_v1/figure_4_convergence.png)
+
+Max displacement is constant at 0.1 m/iter throughout all 200 iterations — the cloth is in
+free-fall the entire run. This is expected: the terrain floor is at Z=110 m, the cloth starts
+at Z=130 m (z_max), and with `gravity=0.1, dt=1.0` it takes exactly 200 steps to fall 20 m.
+The floor is reached right at the iteration limit.
+
+**Implication**: for this scene, `max_iterations=200` is barely sufficient. Setting it to 400
+would give the cloth time to settle after reaching the floor. The plateau guard correctly
+suppresses a false early-stop during the constant-velocity free-fall phase.
 
 ---
 
@@ -103,6 +167,11 @@ Fix: use `int(...)` (floor division). iz=30 has center Z=110 m; camera eye at 11
 | Content | Path |
 |---------|------|
 | GIF | `docs/assets/arctic_midnight_sun_v1/arctic_v1_walkthrough.gif` |
+| Fig 1 — top-down | `docs/assets/arctic_midnight_sun_v1/figure_1_top_down.png` |
+| Fig 2 — side profiles | `docs/assets/arctic_midnight_sun_v1/figure_2_side_profiles.png` |
+| Fig 3 — bridging demo | `docs/assets/arctic_midnight_sun_v1/figure_3_bridging_demo.png` |
+| Fig 4 — convergence | `docs/assets/arctic_midnight_sun_v1/figure_4_convergence.png` |
+| Viz script | `visualize_terrain_snake_arctic.py` |
 | Run script | `run_arctic_midnight_sun_v1.py` |
 | Terrain NPZ | `results/arctic_midnight_sun_v1/terrain_snake.npz` |
 | Walkthrough blend | `results/arctic_midnight_sun_v1/fine_scene_walkthrough.blend` |
