@@ -1,6 +1,5 @@
 """Unit tests for TerrainSnake — pure NumPy, no bpy dependency."""
 import numpy as np
-import pytest
 
 from genesis_tools.active_contour.terrain_snake import TerrainSnake
 

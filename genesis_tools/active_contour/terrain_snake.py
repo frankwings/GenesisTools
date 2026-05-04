@@ -1,4 +1,10 @@
 from __future__ import annotations
+"""Cloth-simulation snake for outdoor terrain surface detection.
+
+Fits a flat grid cloth to a terrain by iterating gravity + Laplacian
+smoothness energy with per-column hard floor constraints from ray-cast hits.
+Analogous to CSF (Cloth Simulation Filter) for lidar ground extraction.
+"""
 import numpy as np
 
 
@@ -67,6 +73,8 @@ class TerrainSnake:
         lap_z = self._laplacian_force_z()
         F_z = self.alpha * lap_z - self.gravity
         delta_z = self.dt * F_z
+
+        z_before = self.vertices[:, 2].copy()
         self.vertices[:, 2] += delta_z
 
         # Hard floor: cloth cannot pass through terrain
@@ -77,12 +85,19 @@ class TerrainSnake:
         self.vertices[:, 2] = np.maximum(self.vertices[:, 2], self.min_z)
 
         self.iterations_run += 1
-        max_d = float(np.max(np.abs(delta_z)))
+        max_d = float(np.max(np.abs(self.vertices[:, 2] - z_before)))
         self.max_displacements.append(max_d)
         return max_d
 
     def fit(self) -> "TerrainSnake":
-        """Run until convergence or plateau. Returns self."""
+        """Run until convergence or plateau. Returns self.
+
+        Stops when max displacement drops below convergence_threshold, OR when
+        displacement plateaus (stable and small). The plateau check also requires
+        recent displacement to be below convergence_threshold * 10 — constant-
+        velocity free-fall has zero relative change but is not converged, and a
+        typical gravity*dt step (~0.1) is well above this guard threshold (0.01).
+        """
         for _ in range(self.max_iterations):
             max_d = self.step()
             if max_d < self.convergence_threshold:
@@ -93,8 +108,10 @@ class TerrainSnake:
                 older = sum(w[-pw * 2:-pw]) / pw
                 recent = sum(w[-pw:]) / pw
                 # Only stop on plateau when displacement is genuinely small
-                # (free-fall at constant velocity is not a plateau)
-                if (recent < self.convergence_threshold * 100 and
+                # (free-fall at constant velocity is not a plateau).
+                # Factor of 10× gives margin above convergence_threshold while
+                # staying well below a typical gravity*dt step (~0.1).
+                if (recent < self.convergence_threshold * 10 and
                         abs(older - recent) / (older + 1e-12) < self.plateau_rtol):
                     break
         return self
