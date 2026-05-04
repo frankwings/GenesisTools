@@ -1,12 +1,12 @@
-# run_jungle_swamp_v3.py
-"""v3 — jungle_swamp terrain-snake walkthrough.
+# run_arctic_midnight_sun_v1.py
+"""v1 — arctic_midnight_sun terrain-snake walkthrough.
 
 Two-phase pipeline:
   Phase 1 (bpy): fit_terrain_contour → terrain_snake.npz
   Phase 2 (pip bpy walkthrough): use terrain_npz → one walkable voxel per column
 
-Scene: infinigen coarse, unit_scale=1.0, 3600m × 3600m.
-Grid: 20m/voxel → 180×180 columns. Gravity + Laplacian bridges vegetation.
+Scene: infinigen fine scene, arctic midnight sun.
+Grid: 20m/voxel, up to 180×180 columns.
 """
 import subprocess
 import sys
@@ -15,11 +15,11 @@ from pathlib import Path
 
 sys.path.insert(0, "/home/kingy/Projects/Genesis/GenesisTools")
 
-BLEND   = "/home/kingy/Projects/Genesis/GenesisExp/GenesisCode2Worlds/results/jungle_swamp/coarse_scene.blend"
-OUT_DIR = "/home/kingy/Projects/Genesis/GenesisTools/results/jungle_swamp_v3"
+BLEND   = "/home/kingy/Projects/Genesis/GenesisExp/GenesisCode2Worlds/results/arctic_midnight_sun/fine_scene.blend"
+OUT_DIR = "/home/kingy/Projects/Genesis/GenesisTools/results/arctic_midnight_sun_v1"
 NPZ     = f"{OUT_DIR}/terrain_snake.npz"
 
-BLENDER = "/home/kingy/blender/blender"   # adjust if blender is elsewhere
+BLENDER    = "/home/kingy/blender/blender"
 FIT_SCRIPT = str(
     Path("/home/kingy/Projects/Genesis/GenesisTools")
     / "genesis_tools/active_contour/fit_terrain_contour.py"
@@ -27,7 +27,7 @@ FIT_SCRIPT = str(
 
 # --- Phase 1: terrain snake (must run under system Blender's Python) ---
 if not os.path.exists(NPZ):
-    print("[v3] Phase 1: fitting terrain snake …")
+    print("[arctic v1] Phase 1: fitting terrain snake …")
     cmd = [
         BLENDER, "--background", BLEND,
         "--python-exit-code", "1",
@@ -46,9 +46,9 @@ if not os.path.exists(NPZ):
         "--convergence-threshold", "1e-3",
     ]
     subprocess.run(cmd, check=True)
-    print(f"[v3] terrain_snake.npz saved → {NPZ}")
+    print(f"[arctic v1] terrain_snake.npz saved → {NPZ}")
 else:
-    print(f"[v3] Reusing existing {NPZ}")
+    print(f"[arctic v1] Reusing existing {NPZ}")
 
 # --- Phase 2: walkthrough pipeline (pip bpy) ---
 from genesis_tools.walkthrough_renderer.walkthrough import run
@@ -56,7 +56,7 @@ from genesis_tools.walkthrough_renderer.walkthrough import run
 config = {
     "terrain_npz": NPZ,
 
-    # TerrainSnake params (used in Phase 1 above; echoed here for reference)
+    # TerrainSnake params (echoed for reference)
     "grid_resolution": 20.0,
     "max_grid_cells_xy": 180,
     "env_sphere_percentile": 5.0,
@@ -86,6 +86,6 @@ config = {
     "aerial": False,
 }
 
-print(f"[v3] Phase 2: walkthrough → {OUT_DIR}")
+print(f"[arctic v1] Phase 2: walkthrough → {OUT_DIR}")
 result = run(BLEND, config, OUT_DIR, render=True)
-print("[v3] done:", result)
+print("[arctic v1] done:", result)

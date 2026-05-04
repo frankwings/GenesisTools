@@ -19,10 +19,19 @@ import math
 import sys
 from pathlib import Path
 
+import importlib.util
+
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-from genesis_tools.active_contour.terrain_snake import TerrainSnake
+# Load TerrainSnake directly from its file to avoid importing the package
+# __init__.py, which pulls in snake_3d (requires scipy — not available in
+# Blender's bundled Python).
+_spec = importlib.util.spec_from_file_location(
+    "terrain_snake", Path(__file__).parent / "terrain_snake.py"
+)
+_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_mod)
+TerrainSnake = _mod.TerrainSnake
 
 
 def fit_terrain_contour(
@@ -156,7 +165,9 @@ def _parse_args():
     p.add_argument("--dt", type=float, default=1.0)
     p.add_argument("--max-iterations", type=int, default=200)
     p.add_argument("--convergence-threshold", type=float, default=1e-3)
-    return p.parse_args()
+    # Blender passes script args after "--" in sys.argv; strip everything before it.
+    argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else sys.argv[1:]
+    return p.parse_args(argv)
 
 
 if __name__ == "__main__":
