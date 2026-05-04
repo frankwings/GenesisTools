@@ -144,6 +144,8 @@ def fit_terrain_contour(
     np.savez_compressed(
         out_path,
         heightmap=heightmap.astype(np.float32),
+        terrain_z_floor=terrain_z_floor.astype(np.float32),
+        max_displacements=np.array(snake.max_displacements, dtype=np.float32),
         bounds=np.array(bounds, dtype=np.float64),
         res=np.float64(res_bu),
         unit_scale=np.float64(unit_scale),
