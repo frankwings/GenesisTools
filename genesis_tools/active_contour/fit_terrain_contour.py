@@ -33,8 +33,8 @@ def _load_module(name: str):
     spec.loader.exec_module(mod)
     return mod
 
-TerrainSnake      = _load_module("terrain_snake").TerrainSnake
-VolumeClassifier  = _load_module("volume_classifier").VolumeClassifier
+TerrainSnake           = _load_module("terrain_snake").TerrainSnake
+SceneObjectClassifier  = _load_module("scene_object_classifier").SceneObjectClassifier
 
 
 def fit_terrain_contour(
@@ -97,8 +97,8 @@ def fit_terrain_contour(
         cam_z = float(max_z)
         print(f"[TerrainSnake] no camera in scene, falling back to z_max = {cam_z:.2f}")
 
-    # --- Volume classifier: skip ray hits on atmospheric volumes (clouds, etc.) ---
-    classifier = VolumeClassifier(camera_z=cam_z)
+    # --- Scene object classifier: skip ray hits on atmospheric volumes etc. ---
+    classifier = SceneObjectClassifier(camera_z=cam_z)
     classifier.report(scene)
 
     # --- Step 1: downward ray-cast per column ---
