@@ -4,6 +4,7 @@ import pytest
 
 from genesis_tools.walkthrough_renderer.pipeline.voxel_grid import (
     VoxelGridData,
+    _build_terrain_candidates,
     _flood_fill_candidates,
     load,
     save,
@@ -107,3 +108,69 @@ class TestFloodFillCandidates:
     def test_returns_int32(self):
         result = _flood_fill_candidates(set(), (0,0,0), 2,2,2)
         assert result.dtype == np.int32
+
+
+# ---------------------------------------------------------------------------
+# Terrain mode
+# ---------------------------------------------------------------------------
+
+class TestTerrainMode:
+    def test_basic_candidates(self, tmp_path):
+        """_build_terrain_candidates maps each valid heightmap cell to one voxel."""
+        nx, ny = 4, 5
+        heightmap = np.full((nx, ny), 3.0, dtype=np.float32)
+        bounds = np.array([0.0, 0.0, 4.0, 5.0, 0.0, 10.0])
+        npz_path = str(tmp_path / "terrain.npz")
+        np.savez_compressed(npz_path, heightmap=heightmap, bounds=bounds,
+                            res=np.float64(1.0), unit_scale=np.float64(1.0))
+
+        from genesis_tools.walkthrough_renderer.pipeline.voxel_grid import (
+            _build_terrain_candidates,
+        )
+        vg = _build_terrain_candidates({"terrain_npz": npz_path})
+        assert vg.mode == "terrain"
+        assert len(vg.candidates) == nx * ny
+        assert vg.nx == nx and vg.ny == ny
+
+    def test_nan_columns_excluded(self, tmp_path):
+        """NaN heightmap cells produce no candidate voxel."""
+        nx, ny = 3, 3
+        heightmap = np.full((nx, ny), np.nan, dtype=np.float32)
+        heightmap[1, 1] = 2.0  # one valid cell
+        bounds = np.array([0.0, 0.0, 3.0, 3.0, 0.0, 10.0])
+        npz_path = str(tmp_path / "terrain_nan.npz")
+        np.savez_compressed(npz_path, heightmap=heightmap, bounds=bounds,
+                            res=np.float64(1.0), unit_scale=np.float64(1.0))
+
+        from genesis_tools.walkthrough_renderer.pipeline.voxel_grid import (
+            _build_terrain_candidates,
+        )
+        vg = _build_terrain_candidates({"terrain_npz": npz_path})
+        assert len(vg.candidates) == 1
+        assert tuple(vg.candidates[0]) == (1, 1, 2)  # iz = round((2.0 - 0.0) / 1.0) = 2
+
+    def test_candidates_within_grid_bounds(self, tmp_path):
+        """All candidate iz values are within [0, nz-1]."""
+        nx, ny = 3, 3
+        heightmap = np.array(
+            [[0.5, 1.0, 9.9], [2.0, 5.0, 7.0], [8.0, 9.0, 0.1]], dtype=np.float32
+        )
+        bounds = np.array([0.0, 0.0, 3.0, 3.0, 0.0, 10.0])
+        npz_path = str(tmp_path / "terrain_b.npz")
+        np.savez_compressed(npz_path, heightmap=heightmap, bounds=bounds,
+                            res=np.float64(1.0), unit_scale=np.float64(1.0))
+
+        from genesis_tools.walkthrough_renderer.pipeline.voxel_grid import (
+            _build_terrain_candidates,
+        )
+        vg = _build_terrain_candidates({"terrain_npz": npz_path})
+        assert np.all(vg.candidates[:, 2] >= 0)
+        assert np.all(vg.candidates[:, 2] < vg.nz)
+
+    def test_mode_roundtrip(self, tmp_path):
+        """terrain mode string is preserved through save/load."""
+        data = _make_vg(mode="terrain")
+        path = str(tmp_path / "vg_terrain.npz")
+        save(data, path)
+        loaded = load(path)
+        assert loaded.mode == "terrain"

@@ -347,6 +347,52 @@ def _flood_fill_candidates(solid: set, center_ijk: tuple,
 
 
 # ---------------------------------------------------------------------------
+# Terrain mode (no bpy required)
+# ---------------------------------------------------------------------------
+
+def _build_terrain_candidates(config: dict) -> VoxelGridData:
+    """Load terrain_snake.npz and map heightmap Z → one walkable voxel per column.
+
+    No bpy required — reads the pre-computed terrain_snake.npz produced by
+    genesis_tools.active_contour.fit_terrain_contour.
+    """
+    data = np.load(config["terrain_npz"])
+    heightmap = data["heightmap"].astype(np.float64)   # (nx, ny)
+    bounds = tuple(float(b) for b in data["bounds"])   # 6-tuple
+    res = float(data["res"])
+    unit_scale = float(data["unit_scale"]) if "unit_scale" in data else 1.0
+
+    nx, ny = heightmap.shape
+    min_z = bounds[4]
+    max_z = bounds[5]
+    nz = max(1, int(math.ceil((max_z - min_z) / res)))
+
+    candidates = []
+    for ix in range(nx):
+        for iy in range(ny):
+            z_val = float(heightmap[ix, iy])
+            if not math.isnan(z_val):
+                iz = int(round((z_val - min_z) / res))
+                iz = max(0, min(nz - 1, iz))
+                candidates.append((ix, iy, iz))
+
+    candidates_arr = (np.array(sorted(candidates), dtype=np.int32)
+                      if candidates else np.empty((0, 3), dtype=np.int32))
+    print(f"[VoxelGrid] Terrain mode: {len(candidates)}/{nx*ny} columns have "
+          f"walkable voxels ({nx}×{ny}×{nz} grid, res={res:.2f} BU)")
+    return VoxelGridData(
+        solid=np.empty((0, 3), dtype=np.int32),
+        candidates=candidates_arr,
+        nx=nx, ny=ny, nz=nz,
+        res=res,
+        bounds=bounds,
+        unit_scale=unit_scale,
+        mode="terrain",
+        hits=None,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -355,6 +401,9 @@ def build(blend_path: str, config: dict) -> VoxelGridData:
 
     Must be called under /home/kingy/blender/4.5/python/bin/python3.11.
     """
+    if config.get("terrain_npz"):
+        return _build_terrain_candidates(config)
+
     import bpy
     bpy.ops.wm.open_mainfile(filepath=blend_path)
 
