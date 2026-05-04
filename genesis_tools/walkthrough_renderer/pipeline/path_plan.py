@@ -577,7 +577,31 @@ def build(vg, wk, config: dict) -> PathData:
     component = _bfs_largest_component(walkable_set)
     n_wp = config.get("num_waypoints", 20)
     seed = config.get("seed", 42)
-    waypoints_list = _farthest_point_sample(component, n_wp, seed, use_xyz=config.get("aerial", False))
+
+    # Seed first waypoint from the original scene camera position when available.
+    # The camera Z (e.g. ice level at 2.7 m) is usually NOT on the walkable iz
+    # plane (e.g. plateau at 110 m), so snap by XY only — pick the walkable cell
+    # whose (ix, iy) is closest to the camera's (cam_ix, cam_iy).
+    fixed_first = None
+    terrain_npz = config.get("terrain_npz")
+    if terrain_npz and component:
+        try:
+            tdata = np.load(terrain_npz)
+            if "camera_xyz" in tdata.files:
+                cx, cy, _cz = tdata["camera_xyz"]
+                min_x_b, min_y_b = vg.bounds[0], vg.bounds[1]
+                cam_ix = int((float(cx) - min_x_b) / vg.res)
+                cam_iy = int((float(cy) - min_y_b) / vg.res)
+                fixed_first = min(component,
+                                  key=lambda c: (c[0]-cam_ix)**2 + (c[1]-cam_iy)**2)
+                print(f"[PathPlan] First waypoint seeded from scene camera "
+                      f"@ ({cam_ix},{cam_iy}) → walkable cell {fixed_first}")
+        except Exception as exc:
+            print(f"[PathPlan] Could not seed first waypoint from camera: {exc}")
+
+    waypoints_list = _farthest_point_sample(component, n_wp, seed,
+                                             fixed_first=fixed_first,
+                                             use_xyz=config.get("aerial", False))
     tour_list = _greedy_tsp_tour(waypoints_list, use_xyz=config.get("aerial", False))
 
     # Convert waypoints to array

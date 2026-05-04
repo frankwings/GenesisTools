@@ -128,14 +128,17 @@ def fit_terrain_contour(
     # Use that absolute Z as the uniform cloth init height — every column starts
     # there and either falls to its terrain floor under gravity, or is lifted
     # by the floor constraint if its terrain is above the camera.
-    cam_z = None
+    cam_x = cam_y = cam_z = None
     for obj in scene.objects:
         if obj.type == "CAMERA":
-            cam_z = float((obj.matrix_world @ Vector((0.0, 0.0, 0.0))).z)
-            print(f"[TerrainSnake] original camera '{obj.name}' Z = {cam_z:.2f} m"
-                  f" → cloth init Z")
+            loc = obj.matrix_world @ Vector((0.0, 0.0, 0.0))
+            cam_x, cam_y, cam_z = float(loc.x), float(loc.y), float(loc.z)
+            print(f"[TerrainSnake] original camera '{obj.name}' "
+                  f"@ ({cam_x:.2f}, {cam_y:.2f}, {cam_z:.2f}) → cloth init Z + path seed")
             break
     if cam_z is None:
+        cam_x = (min_x + max_x) / 2.0
+        cam_y = (min_y + max_y) / 2.0
         cam_z = float(max_z)
         print(f"[TerrainSnake] no camera in scene, falling back to z_max = {cam_z:.2f}")
 
@@ -170,6 +173,7 @@ def fit_terrain_contour(
         res=np.float64(res_bu),
         unit_scale=np.float64(unit_scale),
         cloth_init_z=np.float64(cam_z),
+        camera_xyz=np.array([cam_x, cam_y, cam_z], dtype=np.float64),
     )
     print(f"[TerrainSnake] Saved → {out_path}")
     return out_path

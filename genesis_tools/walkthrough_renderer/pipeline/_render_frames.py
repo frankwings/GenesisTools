@@ -48,4 +48,9 @@ scene.render.filepath = config["frames_dir"] + sep + "frame_"
 scene.render.image_settings.file_format = "PNG"
 scene.render.use_persistent_data = True
 
+# Optional: cap render at frame_end (useful for quick previews)
+frame_end_cap = config.get("frame_end")
+if frame_end_cap is not None:
+    scene.frame_end = min(int(frame_end_cap), scene.frame_end)
+
 bpy.ops.render.render(animation=True)

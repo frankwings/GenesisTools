@@ -57,6 +57,7 @@ def build(blend_path: str, config: dict, output_dir: str) -> List[str]:
         "panoramic": config.get("panoramic", False),
         "fps": config.get("fps", 12),
         "frames_dir": str(frames_dir),
+        "frame_end": config.get("frame_end"),  # optional: cap render at frame N
     }
 
     if _is_win_blender(blender_exe):

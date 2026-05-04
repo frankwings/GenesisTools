@@ -81,10 +81,11 @@ config = {
     "fps": 12,
     "max_duration_seconds": 120,
     "walk_speed_mps": 5.0,
-    "render_engine": "WORKBENCH",
+    "render_engine": "EEVEE",
     "render_width": 1280,
     "render_height": 720,
     "render_samples": 32,
+    "frame_end": 100,
     "aerial": False,
 }
 
