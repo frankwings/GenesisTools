@@ -184,7 +184,14 @@ def build(vg, config: dict, camera_ijk: tuple | None = None) -> WalkableData:
         camera_ijk:  (i, j, k) grid index of camera start; derived from vg
                      candidates centroid when None
     """
-    if vg.mode == "snake":
+    if vg.mode == "terrain":
+        # Terrain mode: candidates are already the walkable ground-surface voxels
+        # produced by TerrainSnake (one per column). No flood fill or floor filter
+        # needed — the snake already found the surface.
+        walkable_set = {tuple(r) for r in vg.candidates}
+        print(f"[Walkable] Terrain mode: {len(walkable_set)} walkable voxels "
+              f"(one per grid column)")
+    elif vg.mode == "snake":
         # Snake mode: vg.candidates = raw (inside-AC) voxels from step 1.
         # Step 2a: edge-mesh intersection → free voxels.
         # Step 2b: BFS from camera through free → walkable.

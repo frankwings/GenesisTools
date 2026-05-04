@@ -1,9 +1,10 @@
 """Step 1: ray_cast -> solid voxel grid.
 
-Three build modes (selected by config keys):
-  - "snake"  -- config["snake_npz"] set: uses pre-computed VoxelGrid centers
-  - "local"  -- config["local_area_ratio"] set: bidirectional ray_cast in local AABB
-  - "global" -- neither: tri-axial sweep over full scene bounds
+Four build modes (selected by config keys):
+  - "terrain" -- config["terrain_npz"] set: uses pre-computed terrain_snake.npz (no bpy)
+  - "snake"   -- config["snake_npz"] set: uses pre-computed VoxelGrid centers
+  - "local"   -- config["local_area_ratio"] set: bidirectional ray_cast in local AABB
+  - "global"  -- neither: tri-axial sweep over full scene bounds
 
 Input:  open bpy scene (must be called under bpy Python)
 Output: VoxelGridData -> voxel_grid.npz
@@ -397,9 +398,10 @@ def _build_terrain_candidates(config: dict) -> VoxelGridData:
 # ---------------------------------------------------------------------------
 
 def build(blend_path: str, config: dict) -> VoxelGridData:
-    """Build VoxelGridData from a .blend file using pip bpy.
+    """Build VoxelGridData from a .blend file or terrain_snake.npz.
 
-    Must be called under /home/kingy/blender/4.5/python/bin/python3.11.
+    When config["terrain_npz"] is set, no bpy required — reads the pre-computed
+    heightmap directly. Otherwise must be called under blender's Python.
     """
     if config.get("terrain_npz"):
         return _build_terrain_candidates(config)
