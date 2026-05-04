@@ -23,15 +23,18 @@ import importlib.util
 
 import numpy as np
 
-# Load TerrainSnake directly from its file to avoid importing the package
-# __init__.py, which pulls in snake_3d (requires scipy — not available in
-# Blender's bundled Python).
-_spec = importlib.util.spec_from_file_location(
-    "terrain_snake", Path(__file__).parent / "terrain_snake.py"
-)
-_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_mod)
-TerrainSnake = _mod.TerrainSnake
+# Load TerrainSnake + VolumeClassifier directly from their files to avoid
+# importing the package __init__.py, which pulls in snake_3d (requires scipy
+# — not available in Blender's bundled Python).
+def _load_module(name: str):
+    spec = importlib.util.spec_from_file_location(
+        name, Path(__file__).parent / f"{name}.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+TerrainSnake      = _load_module("terrain_snake").TerrainSnake
+VolumeClassifier  = _load_module("volume_classifier").VolumeClassifier
 
 
 def fit_terrain_contour(
@@ -77,13 +80,34 @@ def fit_terrain_contour(
     res_bu = max(res_bu, span_x / max_grid_cells_xy, span_y / max_grid_cells_xy)
     nx = max(1, int(math.ceil(span_x / res_bu)))
     ny = max(1, int(math.ceil(span_y / res_bu)))
-    print(f"[TerrainSnake] Grid {nx}×{ny}, res={res_bu:.2f} BU — casting rays …")
+    print(f"[TerrainSnake] Grid {nx}×{ny}, res={res_bu:.2f} BU")
+
+    # --- Camera lookup (anchor for cloth init Z + volume classification) ---
+    cam_x = cam_y = cam_z = None
+    for obj in scene.objects:
+        if obj.type == "CAMERA":
+            loc = obj.matrix_world @ Vector((0.0, 0.0, 0.0))
+            cam_x, cam_y, cam_z = float(loc.x), float(loc.y), float(loc.z)
+            print(f"[TerrainSnake] original camera '{obj.name}' "
+                  f"@ ({cam_x:.2f}, {cam_y:.2f}, {cam_z:.2f})")
+            break
+    if cam_z is None:
+        cam_x = (min_x + max_x) / 2.0
+        cam_y = (min_y + max_y) / 2.0
+        cam_z = float(max_z)
+        print(f"[TerrainSnake] no camera in scene, falling back to z_max = {cam_z:.2f}")
+
+    # --- Volume classifier: skip ray hits on atmospheric volumes (clouds, etc.) ---
+    classifier = VolumeClassifier(camera_z=cam_z)
+    classifier.report(scene)
 
     # --- Step 1: downward ray-cast per column ---
+    print("[TerrainSnake] casting rays …")
     ray_span_z = (max_z - min_z) + 4.0
     step_past = 0.05
     all_hits_flat: list[float] = []
     column_hits: dict[tuple, list[float]] = {}
+    n_skipped_hits = 0
 
     for ix in range(nx):
         for iy in range(ny):
@@ -96,15 +120,24 @@ def fit_terrain_contour(
                     direction = Vector((0.0, 0.0, -1.0))
                     rem = ray_span_z
                     while rem > step_past:
-                        hit, loc, _n, *_ = scene.ray_cast(
+                        hit, loc, _norm, _idx, hit_obj, _mat = scene.ray_cast(
                             depsgraph, cur, direction, distance=rem)
                         if not hit:
                             break
-                        hits_z.append(loc.z)
-                        all_hits_flat.append(loc.z)
+                        # Skip ray hits on atmospheric volumes (clouds high above
+                        # the camera) — they aren't walking surfaces. We still
+                        # advance the ray past the hit so subsequent geometry
+                        # (terrain, water) below the cloud can be recorded.
+                        if classifier.should_skip(hit_obj):
+                            n_skipped_hits += 1
+                        else:
+                            hits_z.append(loc.z)
+                            all_hits_flat.append(loc.z)
                         rem -= (loc - cur).length + step_past
                         cur = loc + direction * step_past
             column_hits[(ix, iy)] = hits_z
+    if n_skipped_hits:
+        print(f"[TerrainSnake] skipped {n_skipped_hits} ray hits on atmospheric volumes")
 
     # --- Step 2: terrain floor = topmost valid hit per column ---
     # Bottom-percentile filter removes env-sphere inner-surface hits below the scene.
@@ -122,25 +155,6 @@ def fit_terrain_contour(
 
     n_valid = int(np.sum(~np.isnan(terrain_z_floor)))
     print(f"[TerrainSnake] {n_valid}/{nx*ny} columns have valid terrain hits")
-
-    # --- Step 2b: read original camera Z from the scene ---
-    # The blend file already has a camera positioned at a sensible eye height.
-    # Use that absolute Z as the uniform cloth init height — every column starts
-    # there and either falls to its terrain floor under gravity, or is lifted
-    # by the floor constraint if its terrain is above the camera.
-    cam_x = cam_y = cam_z = None
-    for obj in scene.objects:
-        if obj.type == "CAMERA":
-            loc = obj.matrix_world @ Vector((0.0, 0.0, 0.0))
-            cam_x, cam_y, cam_z = float(loc.x), float(loc.y), float(loc.z)
-            print(f"[TerrainSnake] original camera '{obj.name}' "
-                  f"@ ({cam_x:.2f}, {cam_y:.2f}, {cam_z:.2f}) → cloth init Z + path seed")
-            break
-    if cam_z is None:
-        cam_x = (min_x + max_x) / 2.0
-        cam_y = (min_y + max_y) / 2.0
-        cam_z = float(max_z)
-        print(f"[TerrainSnake] no camera in scene, falling back to z_max = {cam_z:.2f}")
 
     # --- Step 3: fit TerrainSnake ---
     bounds = (min_x, min_y, max_x, max_y, min_z, max_z)
