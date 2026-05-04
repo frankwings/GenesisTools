@@ -356,12 +356,25 @@ def _build_terrain_candidates(config: dict) -> VoxelGridData:
 
     No bpy required — reads the pre-computed terrain_snake.npz produced by
     genesis_tools.active_contour.fit_terrain_contour.
+
+    Only columns with a valid original ray-cast hit (terrain_z_floor not NaN)
+    become walkable candidates.  Columns outside the terrain bounding region
+    (NaN in terrain_z_floor — e.g. grid corners outside a circular terrain disk)
+    are excluded regardless of any Laplacian-interpolated heightmap value.
     """
     data = np.load(config["terrain_npz"])
     heightmap = data["heightmap"].astype(np.float64)   # (nx, ny)
     bounds = tuple(float(b) for b in data["bounds"])   # 6-tuple
     res = float(data["res"])
     unit_scale = float(data["unit_scale"]) if "unit_scale" in data else 1.0
+
+    # terrain_z_floor distinguishes columns with real geometry from those that
+    # were only Laplacian-bridged (e.g. corners outside a circular terrain disk).
+    if "terrain_z_floor" in data:
+        terrain_floor = data["terrain_z_floor"].astype(np.float64)
+        valid_domain = ~np.isnan(terrain_floor)
+    else:
+        valid_domain = None   # legacy npz without terrain_z_floor — fall back to heightmap NaN check
 
     nx, ny = heightmap.shape
     min_z = bounds[4]
@@ -371,6 +384,9 @@ def _build_terrain_candidates(config: dict) -> VoxelGridData:
     candidates = []
     for ix in range(nx):
         for iy in range(ny):
+            # Skip columns outside the terrain domain (no real ray-cast hit)
+            if valid_domain is not None and not valid_domain[ix, iy]:
+                continue
             z_val = float(heightmap[ix, iy])
             if not math.isnan(z_val):
                 iz = int((z_val - min_z) / res)  # floor: voxel that contains terrain surface

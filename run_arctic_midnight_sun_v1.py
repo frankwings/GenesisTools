@@ -44,6 +44,7 @@ if not os.path.exists(NPZ):
         "--dt", "1.0",
         "--max-iterations", "200",
         "--convergence-threshold", "1e-3",
+        "--start-height", "1.7",
     ]
     subprocess.run(cmd, check=True)
     print(f"[arctic v1] terrain_snake.npz saved → {NPZ}")
@@ -66,6 +67,7 @@ config = {
     "terrain_dt": 1.0,
     "terrain_max_iterations": 200,
     "terrain_convergence_threshold": 1e-3,
+    "terrain_start_height": 1.7,
 
     # Camera / path
     "camera_height": 1.7,

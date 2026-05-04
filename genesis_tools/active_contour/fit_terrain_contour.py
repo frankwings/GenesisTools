@@ -46,6 +46,7 @@ def fit_terrain_contour(
     dt: float = 1.0,
     max_iterations: int = 200,
     convergence_threshold: float = 1e-3,
+    start_height: float = 1.7,
 ) -> str:
     """Fit terrain snake to blend_path, save terrain_snake.npz, return output path."""
     import bpy
@@ -116,7 +117,10 @@ def fit_terrain_contour(
         for iy in range(ny):
             valid = [z for z in column_hits[(ix, iy)] if z > z_threshold]
             if valid:
-                terrain_z_floor[ix, iy] = min(valid)
+                # Topmost valid hit = first surface seen from above = terrain surface.
+                # max() is used rather than min() because min() picks up env-sphere
+                # inner-surface hits that slip just above the percentile threshold.
+                terrain_z_floor[ix, iy] = max(valid)
 
     n_valid = int(np.sum(~np.isnan(terrain_z_floor)))
     print(f"[TerrainSnake] {n_valid}/{nx*ny} columns have valid terrain hits")
@@ -132,6 +136,7 @@ def fit_terrain_contour(
         dt=dt,
         max_iterations=max_iterations,
         convergence_threshold=convergence_threshold,
+        start_height=start_height,
     )
     snake.fit()
     print(f"[TerrainSnake] converged in {snake.iterations_run} iterations")
@@ -167,6 +172,7 @@ def _parse_args():
     p.add_argument("--dt", type=float, default=1.0)
     p.add_argument("--max-iterations", type=int, default=200)
     p.add_argument("--convergence-threshold", type=float, default=1e-3)
+    p.add_argument("--start-height", type=float, default=1.7)
     # Blender passes script args after "--" in sys.argv; strip everything before it.
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else sys.argv[1:]
     return p.parse_args(argv)
@@ -186,4 +192,5 @@ if __name__ == "__main__":
         dt=args.dt,
         max_iterations=args.max_iterations,
         convergence_threshold=args.convergence_threshold,
+        start_height=args.start_height,
     )

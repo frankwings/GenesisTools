@@ -216,6 +216,9 @@ demo = TerrainSnake(
     bounds=(-100, -0.5, 100, 0.5, 0.0, 100.0),
     res=1.0, alpha=0.5, gravity=0.5, dt=1.0,
     max_iterations=600, convergence_threshold=1e-3,
+    # Large start_height so valid columns also begin at ~z_max (flat at top),
+    # matching the conceptual illustration of "cloth falls from high above".
+    start_height=float(100.0 - np.nanmean(hits_1d)),
 )
 
 snaps = {}

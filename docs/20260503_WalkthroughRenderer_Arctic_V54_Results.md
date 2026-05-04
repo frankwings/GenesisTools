@@ -1,7 +1,7 @@
 # Arctic Midnight Sun Walkthrough — v54: TerrainSnake Outdoor Mode
 
 **Scene**: `arctic_midnight_sun/fine_scene.blend` (917 MB, unit_scale=1.0, 1 BU = 1 m)
-**Date**: 2026-05-03
+**Date**: 2026-05-03 (re-run with domain-fix patch, same date)
 **Render**: Windows Blender 4.5 + WORKBENCH (D3D GPU, ~0.28s/frame)
 
 ---
@@ -38,17 +38,18 @@ travel through.
 | Z range | −500 m … +130 m |
 | env-sphere percentile | p5 = −116.36 m (env-sphere dome filtered) |
 | Raw hit columns | 25,448 / 32,400 (79%) |
-| Bridged columns (Laplacian) | 6,952 (21%) — corners outside terrain disk |
-| Valid heightmap columns | 32,400 / 32,400 (100%) |
-| Terrain Z (all columns) | 110.02 m |
-| Snake iterations | 200 (hit max — cloth still in free-fall at last step) |
+| Bridged columns (NaN in terrain_z_floor) | 6,952 (21%) — corners outside terrain disk |
+| Valid heightmap columns | 25,448 / 32,400 (78%) — corners now excluded |
+| Terrain Z floor (valid columns) | 0.15 … 119.99 m, dominant ~110 m |
+| Snake cloth start height | terrain_z_floor + 1.7 m for valid columns |
+| Snake iterations | 200 (hit max) |
 | Output | `terrain_snake.npz` |
 
 The arctic scene has a circular terrain disk at Z ≈ 110 m. The 4 corners of the 180×180
-grid have no geometry (outside the disk) — those 6,952 columns are NaN in the raw hits
-and bridged by the snake's Laplacian smoothness. The cloth starts at z_max=130 m and
-falls 20 m at gravity=0.1 m/step, reaching the floor at iteration ~200 — the max_iterations
-limit is barely sufficient for this scene (see convergence figure).
+grid have no geometry (outside the disk) — those 6,952 columns produce NaN in
+`terrain_z_floor` (raw max ray-hit) and are **excluded from the walkable set** (see
+domain-fix below). Valid columns start the cloth at `terrain_z_floor + 1.7 m`; NaN columns
+(corners) start at `z_max = 130 m` and participate only in Laplacian smoothing.
 
 ---
 
@@ -56,14 +57,18 @@ limit is barely sufficient for this scene (see convergence figure).
 
 | Step | Output |
 |------|--------|
-| voxel_grid (terrain mode) | 32,400 walkable voxels — one per column, 180×180×32 grid |
-| walkable | 32,400 ground voxels (no flood-fill; snake found surface directly) |
-| path | 5,821 path points, 20 waypoints, spanning ±1790 m XY |
+| voxel_grid (terrain mode) | **25,448 walkable voxels** — terrain-disk columns only (corners excluded), 180×180×32 grid |
+| walkable | 25,448 ground voxels (no flood-fill; terrain_z_floor NaN mask applied) |
+| path | 2,753 path points, 20 waypoints, spanning ±989 m XY |
 | camera_animate | 1,440 frames @ 12 fps = 120 s walkthrough |
 | render | WORKBENCH, 1280×720, ~0.28 s/frame |
 
 **Camera**: height 1.7 m above ground (eye Z ≈ 111.7 m), lookahead gaze
 (`waypoint_gaze_mode="free"`), walk speed 5.0 m/s.
+
+The path covers a smaller XY extent (±989 m vs ±1790 m in the pre-fix run) because
+walkable voxels outside the terrain disk are now correctly excluded — the path can only
+navigate through the terrain disk, not through the void beyond it.
 
 ---
 
@@ -185,7 +190,9 @@ inside empty space.
 
 ## Bugs Fixed During This Run
 
-Four bugs were discovered and fixed during this run:
+Seven bugs were discovered and fixed across two sub-runs:
+
+### Original four fixes
 
 **1. scipy import via `__init__.py`** — Importing `TerrainSnake` through the
 `genesis_tools.active_contour` package triggers `__init__.py` which imports `snake_3d`,
@@ -208,6 +215,33 @@ this rounded 30.5 → iz=31, placing the walkable voxel at the very top of the s
 (center Z=130 m = max_z). The camera at max_z sees only sky — white empty frames.
 Fix: use `int(...)` (floor division). iz=30 has center Z=110 m; camera eye at 111.7 m,
 1.7 m above the terrain surface.
+
+### Domain-fix patch (same-day re-run)
+
+**5. `min(valid hits)` in terrain floor detection picks env-sphere inner surface** —
+`fit_terrain_contour.py` took the *minimum* of all ray-cast hits above the p5 threshold.
+For the arctic scene the env-sphere inner-surface produces hits at ~−116 m that lie just
+above the −116.36 m p5 cutoff, so `min(valid)` returned −116 m rather than the
+terrain at +110 m. The cloth converged underground, giving a correct GIF only because the
+cloth had not reached the actual geometry floor in the 200-iteration budget.
+Fix: change `min(valid)` to `max(valid)` — the *topmost* valid hit is the first surface
+seen from above and is the correct terrain surface for outdoor scenes.
+
+**6. NaN-domain columns (outside terrain disk) became walkable voxels** — The Laplacian
+bridged the 6,952 corner columns (outside the circular terrain disk, NaN in
+`terrain_z_floor`) toward valid neighbors, giving them a finite cloth height. The terrain
+voxel mapper then created walkable voxels for those columns — camera could walk through
+empty space beyond the terrain boundary.
+Fix: `_build_terrain_candidates` in `voxel_grid.py` loads `terrain_z_floor` from the npz
+and skips any column where it is NaN, regardless of the interpolated heightmap value.
+
+**7. Convergence tracking included NaN columns → no early-stop** — `TerrainSnake.step()`
+computed `max_displacement` over *all* vertices including NaN corner columns (which start
+at z_max and fall slowly under gravity). This masked valid-column convergence and prevented
+early termination even after valid columns had fully settled.
+Fix: compute `max_d` only over `valid_mask` columns; add `start_height` parameter so valid
+columns begin at `terrain_z_floor + start_height` (just above the terrain surface) rather
+than at z_max, reducing their fall distance from ~20 m to ~1.7 m.
 
 ---
 

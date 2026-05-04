@@ -28,6 +28,7 @@ class TerrainSnake:
         convergence_threshold: float = 1e-3,
         plateau_window: int = 20,
         plateau_rtol: float = 0.02,
+        start_height: float = 1.7,     # valid columns init this far above terrain_z_floor
     ) -> None:
         self.terrain_z_floor = np.asarray(terrain_z_floor, dtype=np.float64)
         self.bounds = bounds
@@ -39,14 +40,29 @@ class TerrainSnake:
         self.convergence_threshold = convergence_threshold
         self.plateau_window = plateau_window
         self.plateau_rtol = plateau_rtol
+        self.start_height = float(start_height)
 
         self.nx, self.ny = self.terrain_z_floor.shape
         min_x, min_y, max_x, max_y, min_z, max_z = bounds
 
+        # Columns with no terrain hit — NaN in terrain_z_floor.
+        # They still participate in Laplacian (so Vegetation-gap bridging works)
+        # but are excluded from the walkable output via _build_terrain_candidates.
+        self.valid_mask = ~np.isnan(self.terrain_z_floor)  # (nx, ny) bool
+
         xs = min_x + (np.arange(self.nx) + 0.5) * self.res
         ys = min_y + (np.arange(self.ny) + 0.5) * self.res
         XX, YY = np.meshgrid(xs, ys, indexing="ij")
-        z_init = np.full((self.nx, self.ny), float(max_z), dtype=np.float64)
+
+        # Valid columns: start just above their terrain floor so the cloth only
+        # needs to fall start_height metres (not the full z_max − terrain gap).
+        # NaN columns: start at z_max and converge toward valid neighbours via
+        # Laplacian.  They are excluded from the heightmap in voxel_grid.
+        z_init = np.where(
+            self.valid_mask,
+            self.terrain_z_floor + self.start_height,
+            float(max_z),
+        )
 
         # vertices: (nx*ny, 3) — XY fixed, only Z updated
         self.vertices = np.column_stack([XX.ravel(), YY.ravel(), z_init.ravel()])
@@ -69,7 +85,7 @@ class TerrainSnake:
         return (mean_nbrs - Z).ravel()
 
     def step(self) -> float:
-        """One iteration. Returns max absolute Z displacement."""
+        """One iteration. Returns max absolute Z displacement over valid columns."""
         lap_z = self._laplacian_force_z()
         F_z = self.alpha * lap_z - self.gravity
         delta_z = self.dt * F_z
@@ -79,13 +95,17 @@ class TerrainSnake:
 
         # Hard floor: cloth cannot pass through terrain
         floor = self.terrain_z_floor.ravel()
-        valid = ~np.isnan(floor)
-        self.vertices[valid, 2] = np.maximum(self.vertices[valid, 2], floor[valid])
-        # Safety lower bound for NaN (sky-only) columns
+        valid_flat = self.valid_mask.ravel()
+        self.vertices[valid_flat, 2] = np.maximum(
+            self.vertices[valid_flat, 2], floor[valid_flat])
+        # Safety lower bound for all columns
         self.vertices[:, 2] = np.maximum(self.vertices[:, 2], self.min_z)
 
         self.iterations_run += 1
-        max_d = float(np.max(np.abs(self.vertices[:, 2] - z_before)))
+        # Track convergence only over valid columns — NaN columns fall from max_z
+        # and dominate max_d, preventing early-stop even after valid columns settle.
+        diff = np.abs(self.vertices[valid_flat, 2] - z_before[valid_flat])
+        max_d = float(np.max(diff)) if diff.size > 0 else 0.0
         self.max_displacements.append(max_d)
         return max_d
 
