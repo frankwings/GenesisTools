@@ -119,14 +119,20 @@ def fit_terrain_contour(
     print(f"[TerrainSnake] env-sphere threshold (p{env_sphere_percentile}) = {z_lo:.2f}")
 
     valid_flat = [z for z in all_hits_flat if z > z_lo]
-    bin_w = 1.0  # 1 m bins
+    # Bin width = res/4 (e.g. 5 m for a 20 m grid).  Wide enough that the main
+    # terrain surface aggregates its hits into fewer bins and dominates the
+    # histogram over narrowly-concentrated geometry (ocean floor, sphere surfaces).
+    bin_w = max(1.0, res_bu / 4.0)
     bins = np.arange(z_lo, max_z + bin_w * 2, bin_w)
     hist, bin_edges = np.histogram(valid_flat, bins=bins)
     peak_idx = int(np.argmax(hist))
     z_dominant = float((bin_edges[peak_idx] + bin_edges[peak_idx + 1]) / 2.0)
-    band = float(terrain_band_tolerance) if terrain_band_tolerance is not None else res_bu / 2.0
+    # Default band = one bin width: tight enough to exclude geometry one bin
+    # away from the dominant surface (e.g. a sky-sphere top sitting 8-10 m above
+    # the tundra), wide enough to capture slight terrain relief within the band.
+    band = float(terrain_band_tolerance) if terrain_band_tolerance is not None else bin_w
     print(f"[TerrainSnake] dominant terrain Z = {z_dominant:.2f} m "
-          f"({hist[peak_idx]} hits in peak bin), band ±{band:.1f} m")
+          f"({hist[peak_idx]} hits in peak bin, bin_w={bin_w:.1f} m), band ±{band:.1f} m")
 
     terrain_z_floor = np.full((nx, ny), np.nan, dtype=np.float64)
     for ix in range(nx):
