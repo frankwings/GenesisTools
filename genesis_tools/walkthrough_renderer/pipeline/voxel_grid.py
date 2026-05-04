@@ -30,7 +30,7 @@ class VoxelGridData:
     res: float               # voxel size in Blender units
     bounds: tuple            # (min_x, min_y, max_x, max_y, min_z, max_z)
     unit_scale: float        # metres per Blender unit
-    mode: str                # "snake" | "local" | "global"
+    mode: str                # "terrain" | "snake" | "local" | "global"
     hits: np.ndarray | None  # (H, 3) float64 -- ray hit positions (debug only)
 
 
