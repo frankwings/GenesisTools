@@ -128,14 +128,27 @@ class SceneObjectClassifier:
             # CURVE / META / etc. — for now treat as solid
             return self.SOLID
 
-        # Volume-shaded mesh: split into atmospheric vs ground
-        if self._volume_shader_kind(obj) is not None:
-            z_min, _z_max = self._bbox_z_range(obj)
-            if z_min > self.camera_z + self.atmospheric_offset:
-                return self.ATMOSPHERIC_VOLUME
-            return self.GROUND_VOLUME
+        vol_kind = self._volume_shader_kind(obj)
+        if vol_kind is None:
+            return self.SOLID
 
-        return self.SOLID
+        # ShaderNodeVolumeScatter is the canonical atmospheric-scattering shader
+        # (clouds, fog, smoke).  It produces no real surface — the "geometry" is
+        # just the bounding shape in which the scatter happens.  Vegetation and
+        # water virtually never use pure scatter; they use Principled which mixes
+        # surface + volume.  Classify scatter as atmospheric regardless of bbox
+        # position — KoleClouds wraps the entire scene (bbox extent 240 m) so a
+        # bbox-position rule cannot catch it.
+        if vol_kind == "scatter":
+            return self.ATMOSPHERIC_VOLUME
+
+        # Principled / Absorption volumes: lean on bbox position.  Above camera
+        # by margin → atmospheric (upper fog), at or below camera → ground volume
+        # (water, near-ground fog).
+        z_min, _z_max = self._bbox_z_range(obj)
+        if z_min > self.camera_z + self.atmospheric_offset:
+            return self.ATMOSPHERIC_VOLUME
+        return self.GROUND_VOLUME
 
     def _volume_shader_kind(self, obj) -> "str | None":
         """Return 'scatter' / 'principled' / 'absorption' / 'other' / None."""
