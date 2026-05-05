@@ -764,11 +764,11 @@ def terrain_figure_5(td: TerrainData, out_dir: Path) -> None:
     vmin = float(np.nanmin(hm)) - 5
     vmax = float(np.nanmax(hm)) + 5
 
-    # Colour path by height (Z) — low=blue, high=yellow (plasma)
-    z = td.pts[:, 2]
-    z_min, z_max = float(z.min()), float(z.max())
-    z_span = max(z_max - z_min, 1e-6)
-    t_frac = (z - z_min) / z_span    # (N,) ∈ [0,1]
+    # Arc-length fraction for path colouring (0=start, 1=end)
+    diffs = np.diff(td.pts[:, :2], axis=0)
+    seg_len = np.sqrt((diffs**2).sum(axis=1))
+    cum = np.concatenate([[0.0], np.cumsum(seg_len)])
+    t_frac = cum / max(cum[-1], 1e-6)   # (N,) ∈ [0,1]
 
     def _draw_panel(ax, xlim, ylim, title, label_wps=True):
         im = ax.imshow(hm.T, origin="lower",
@@ -776,7 +776,7 @@ def terrain_figure_5(td: TerrainData, out_dir: Path) -> None:
                        cmap="terrain", vmin=vmin, vmax=vmax,
                        aspect="equal", interpolation="bilinear")
 
-        # Path coloured by height: low=blue, high=yellow (plasma)
+        # Path coloured by progress: blue=start → yellow=end
         from matplotlib.collections import LineCollection
         pts2 = td.pts[:, :2]
         segs = np.stack([pts2[:-1], pts2[1:]], axis=1)
@@ -816,13 +816,13 @@ def terrain_figure_5(td: TerrainData, out_dir: Path) -> None:
         # Colourbar for path progress
         sm = plt.cm.ScalarMappable(cmap="plasma", norm=plt.Normalize(0, 1))
         sm.set_array([])
-        plt.colorbar(sm, ax=ax, label=f"Camera height Z (m)  [{z_min:.1f} … {z_max:.1f}]",
+        plt.colorbar(sm, ax=ax, label="Path progress (0=start, 1=end)",
                      fraction=0.03, pad=0.01)
 
     fig, ax = plt.subplots(1, 1, figsize=(12, 10))
     fig.suptitle(
         "Phase 2 — Walkthrough Path (XY top-down)\n"
-        "Path coloured by height Z (plasma: blue=low → yellow=high), white circles = waypoints (numbered in tour order)",
+        "Path coloured by progress (plasma: blue=start → yellow=end), white circles = waypoints (numbered in tour order)",
         fontsize=11,
     )
 

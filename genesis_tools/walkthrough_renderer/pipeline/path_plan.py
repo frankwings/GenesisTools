@@ -127,41 +127,100 @@ def _greedy_tsp_tour(waypoints: list, use_xyz: bool = False) -> list:
     return tour
 
 
-def _two_opt_improve(tour: list, fixed_first=None, use_xyz: bool = False) -> list:
-    """2-opt improvement pass on a TSP tour.
+def _held_karp_tsp(waypoints: list, fixed_first=None, use_xyz: bool = False) -> list:
+    """Exact open-path TSP via Held-Karp dynamic programming.
 
-    Iteratively reverses sub-segments to eliminate crossing edges, reducing
-    path length and the chance of the camera revisiting the same area.
-    fixed_first: if given, this waypoint is kept at index 0 (not reversed away).
-    Runs until no improving swap is found (typically converges in 2-4 passes
-    for n=20 waypoints).
+    dp[mask][v] = min cost to visit exactly the nodes in `mask`, starting at
+    node 0, ending at node v.  Open path (no return edge).
+    Time O(n² · 2^n); practical up to n ≈ 20 (typically 1–5 s).
+
+    fixed_first: waypoint placed at index 0 (tour always starts there).
     """
-    def _dist2(a, b):
-        if use_xyz:
-            return (a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2
-        return (a[0]-b[0])**2 + (a[1]-b[1])**2
-
-    n = len(tour)
+    n = len(waypoints)
     if n <= 3:
-        return tour
-    best = list(tour)
-    improved = True
-    while improved:
-        improved = False
-        for i in range(1, n - 1):          # i=0 kept fixed if fixed_first set
-            for j in range(i + 1, n):
-                # Reverse segment best[i:j+1]
-                new_tour = best[:i] + best[i:j+1][::-1] + best[j+1:]
-                if fixed_first is not None and new_tour[0] != fixed_first:
-                    continue
-                d_old = (_dist2(best[i-1], best[i]) +
-                         _dist2(best[j], best[j+1] if j+1 < n else best[0]))
-                d_new = (_dist2(new_tour[i-1], new_tour[i]) +
-                         _dist2(new_tour[j], new_tour[j+1] if j+1 < n else new_tour[0]))
-                if d_new < d_old - 1e-10:
-                    best = new_tour
-                    improved = True
-    return best
+        return list(waypoints)
+
+    wps = list(waypoints)
+    if fixed_first is not None and fixed_first in wps:
+        idx = wps.index(fixed_first)
+        wps[0], wps[idx] = wps[idx], wps[0]
+
+    # Distance matrix
+    d = np.empty((n, n), dtype=np.float32)
+    for i in range(n):
+        for j in range(n):
+            if use_xyz:
+                d[i, j] = math.sqrt((wps[i][0]-wps[j][0])**2 +
+                                    (wps[i][1]-wps[j][1])**2 +
+                                    (wps[i][2]-wps[j][2])**2)
+            else:
+                d[i, j] = math.sqrt((wps[i][0]-wps[j][0])**2 +
+                                    (wps[i][1]-wps[j][1])**2)
+
+    total_masks = 1 << n
+    INF = np.float32(1e18)
+    dp     = np.full((total_masks, n), INF,  dtype=np.float32)
+    parent = np.full((total_masks, n), -1,   dtype=np.int16)
+
+    dp[1, 0] = 0.0   # visited = {node 0}, at node 0, cost = 0
+
+    # Precompute per-node bitmasks for O(1) membership test
+    node_bit = np.array([1 << v for v in range(n)], dtype=np.int64)
+
+    arange_n = np.arange(n, dtype=np.int64)
+
+    for mask in range(1, total_masks):
+        if not (mask & 1):          # tour must include node 0
+            continue
+        row = dp[mask]              # (n,)
+        if not (row < INF).any():
+            continue
+
+        in_mask = (mask & node_bit).astype(bool)   # (n,) bool
+        costs_from = np.where(in_mask, row, INF)   # (n,)
+
+        # ext[v, u] = costs_from[v] + d[v, u]  — (n, n)
+        ext = costs_from[:, np.newaxis] + d
+
+        # Best cost / best predecessor for each u  — (n,) each
+        best_costs = ext.min(axis=0)
+        best_prevs = ext.argmin(axis=0).astype(np.int16)
+
+        # Only update u's not already in mask and with finite cost
+        not_in = ~in_mask
+        update = not_in & (best_costs < INF)
+        if not update.any():
+            continue
+
+        # new_mask for each u = mask | (1 << u)
+        new_masks = (mask | node_bit)[update]          # row indices into dp
+        u_idx     = arange_n[update]                   # column indices
+
+        # Vectorised conditional update
+        cur = dp[new_masks, u_idx]
+        bc  = best_costs[update]
+        improve = bc < cur
+        if improve.any():
+            rows = new_masks[improve]
+            cols = u_idx[improve]
+            dp    [rows, cols] = bc[improve].astype(np.float32)
+            parent[rows, cols] = best_prevs[update][improve]
+
+    full = total_masks - 1
+    best_end = int(dp[full].argmin())
+
+    # Reconstruct
+    tour_idx = []
+    v, mask = best_end, full
+    while True:
+        tour_idx.append(v)
+        pv = int(parent[mask, v])
+        mask ^= (1 << v)
+        if pv < 0:
+            break
+        v = pv
+    tour_idx.reverse()
+    return [wps[i] for i in tour_idx]
 
 
 def _bfs_path(start: tuple, goal: tuple, walkable: set) -> list:
@@ -661,9 +720,9 @@ def build(vg, wk, config: dict) -> PathData:
                                              fixed_first=fixed_first,
                                              use_xyz=config.get("aerial", False))
     use_xyz = config.get("aerial", False)
-    tour_list = _greedy_tsp_tour(waypoints_list, use_xyz=use_xyz)
-    tour_list = _two_opt_improve(tour_list, fixed_first=fixed_first, use_xyz=use_xyz)
-    print(f"[PathPlan] 2-opt tour length: {len(tour_list)} waypoints")
+    t0 = time.time()
+    tour_list = _held_karp_tsp(waypoints_list, fixed_first=fixed_first, use_xyz=use_xyz)
+    print(f"[PathPlan] Held-Karp tour: {len(tour_list)} waypoints, {time.time()-t0:.1f}s")
 
     # Convert waypoints to array
     waypoints_arr = np.array(waypoints_list, dtype=np.int32)
