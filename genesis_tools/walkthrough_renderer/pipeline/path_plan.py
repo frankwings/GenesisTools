@@ -70,13 +70,10 @@ def _farthest_point_sample(cells: set, n: int, rng_seed: int,
     import random
     rng = random.Random(rng_seed)
     cells_list = list(cells)
+    first = fixed_first if fixed_first is not None else rng.choice(cells_list)
     if len(cells_list) <= n:
-        if fixed_first is not None and fixed_first in cells:
-            rest = [c for c in cells_list if c != fixed_first]
-            return [fixed_first] + rest
-        return cells_list
-    first = fixed_first if (fixed_first is not None and fixed_first in cells) \
-            else rng.choice(cells_list)
+        rest = [c for c in cells_list if c != first]
+        return [first] + rest
     selected = [first]
     if use_xyz:
         dist = {c: (c[0]-first[0])**2 + (c[1]-first[1])**2 + (c[2]-first[2])**2 for c in cells_list}
@@ -578,26 +575,38 @@ def build(vg, wk, config: dict) -> PathData:
     n_wp = config.get("num_waypoints", 20)
     seed = config.get("seed", 42)
 
-    # Seed first waypoint from the original scene camera position when available.
-    # The camera Z (e.g. ice level at 2.7 m) is usually NOT on the walkable iz
-    # plane (e.g. plateau at 110 m), so snap by XY only — pick the walkable cell
-    # whose (ix, iy) is closest to the camera's (cam_ix, cam_iy).
+    # Force first waypoint to the exact camera voxel (ix, iy, iz) regardless
+    # of whether it is in the walkable component.  ix/iy are the heightmap array
+    # indices for the camera's XY; iz comes from heightmap[ix,iy] (terrain surface
+    # at that column), falling back to the camera's actual Z if the column is NaN.
+    # The cell is injected into component + walkable_set so FPS spreads from it
+    # and BFS can route outward.  If the camera is over disconnected terrain (e.g.
+    # water with no walkable 6-neighbour), _bfs_path returns [camera, next_wp] —
+    # a direct jump that camera_animate interpolates as a straight approach shot.
     fixed_first = None
     terrain_npz = config.get("terrain_npz")
     if terrain_npz and component:
         try:
             tdata = np.load(terrain_npz)
             if "camera_xyz" in tdata.files:
-                cx, cy, _cz = tdata["camera_xyz"]
-                min_x_b, min_y_b = vg.bounds[0], vg.bounds[1]
-                cam_ix = int((float(cx) - min_x_b) / vg.res)
-                cam_iy = int((float(cy) - min_y_b) / vg.res)
-                fixed_first = min(component,
-                                  key=lambda c: (c[0]-cam_ix)**2 + (c[1]-cam_iy)**2)
-                print(f"[PathPlan] First waypoint seeded from scene camera "
-                      f"@ ({cam_ix},{cam_iy}) → walkable cell {fixed_first}")
+                cx, cy, cz = tdata["camera_xyz"]
+                min_x_b, min_y_b, min_z_b = vg.bounds[0], vg.bounds[1], vg.bounds[4]
+                cam_ix = max(0, min(vg.nx - 1, int((float(cx) - min_x_b) / vg.res)))
+                cam_iy = max(0, min(vg.ny - 1, int((float(cy) - min_y_b) / vg.res)))
+                h_val = float(tdata["heightmap"][cam_ix, cam_iy])
+                if not math.isnan(h_val):
+                    cam_iz = max(0, min(vg.nz - 1, int((h_val - min_z_b) / vg.res)))
+                else:
+                    cam_iz = max(0, min(vg.nz - 1, int((float(cz) - min_z_b) / vg.res)))
+                fixed_first = (cam_ix, cam_iy, cam_iz)
+                if fixed_first not in component:
+                    component.add(fixed_first)
+                    walkable_set.add(fixed_first)
+                    print(f"[PathPlan] Camera cell {fixed_first} not in walkable — forced as first waypoint")
+                else:
+                    print(f"[PathPlan] First waypoint forced to camera cell {fixed_first}")
         except Exception as exc:
-            print(f"[PathPlan] Could not seed first waypoint from camera: {exc}")
+            print(f"[PathPlan] Could not force first waypoint from camera: {exc}")
 
     waypoints_list = _farthest_point_sample(component, n_wp, seed,
                                              fixed_first=fixed_first,
