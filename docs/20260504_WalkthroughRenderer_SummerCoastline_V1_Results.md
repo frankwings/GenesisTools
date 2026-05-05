@@ -131,17 +131,31 @@ coastline has steeper cliff faces that produce sharper cloth gradients at cloth 
 | Denoiser | OpenImageDenoise |
 | Walk speed | 5.0 m/s |
 | Camera height | 1.7 m |
+| Camera clip_end | 10 000 m (fixed; was 100 m — clipped all vegetation) |
 | Waypoints | 20 |
 | Seed | 42 |
 | Gaze mode | waypoint (lookahead 0.05) |
-| First waypoint | scene camera @ (63.4, 10.7, 19.65) → walkable cell (100, 88, 84) |
+| Path connectivity | **26-connected BFS** (connects gentle slopes; isolates steep cliffs) |
+| First waypoint | scene camera @ (63.4, 10.7, 19.65) → walkable cell (100, 91, 83) |
 | Approx time/frame | ~2.9 s |
 
 ### Walkthrough GIF
 
 ![summer_coastline v1 walkthrough](assets/summer_coastline_v1/summer_coastline_v1_walkthrough.gif)
 
-*334 frames (every 3rd of 1000), 12 fps, 4.8 MB*
+*1000 frames, 12 fps, 14.9 MB*
+
+### Combined GIF — Rendered Frame + Live XY Map
+
+![summer_coastline v1 combined](assets/summer_coastline_v1/summer_coastline_v1_walkthrough_combined.gif)
+
+*334 frames (every 3rd), 560×240, 27.1 MB. Left: Cycles render. Right: XY terrain map with plasma trail and current camera position (white crosshair).*
+
+### Figure 5 — Walkthrough Path (XY Top-Down)
+
+![figure 5](assets/summer_coastline_v1/figure_5_walkthrough_path.png)
+
+Path coloured by progress (plasma, blue→yellow). 26-connected BFS naturally routes around coastal cliffs and highlands — the path follows the flat shoreline and valley floors, avoiding steep terrain where adjacent column iz-difference ≥ 2 breaks connectivity.
 
 ---
 
@@ -174,11 +188,13 @@ snake iterations cannot fully resolve.
 | Run log | `results/summer_coastline_v1/run.log` |
 | Walkthrough blend | `results/summer_coastline_v1/fine_scene_walkthrough.blend` |
 | Walkthrough GIF | `docs/assets/summer_coastline_v1/summer_coastline_v1_walkthrough.gif` |
+| Combined GIF (render + XY map) | `docs/assets/summer_coastline_v1/summer_coastline_v1_walkthrough_combined.gif` |
 | Fig 0 — initial vs final cloth | `docs/assets/summer_coastline_v1/figure_0_initial_vs_final.png` |
 | Fig 1 — top-down | `docs/assets/summer_coastline_v1/figure_1_top_down.png` |
 | Fig 2 — side profiles | `docs/assets/summer_coastline_v1/figure_2_side_profiles.png` |
 | Fig 3 — camera-anchored projections (XY + XZ + YZ) | `docs/assets/summer_coastline_v1/figure_3_bridging_demo.png` |
 | Fig 4 — convergence | `docs/assets/summer_coastline_v1/figure_4_convergence.png` |
+| Fig 5 — walkthrough path (XY) | `docs/assets/summer_coastline_v1/figure_5_walkthrough_path.png` |
 | Run script | `run_summer_coastline_v1.py` |
 
 ---

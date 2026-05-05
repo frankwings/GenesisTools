@@ -207,17 +207,33 @@ ray inserts and percentile filtering, low single-digit seconds locally.
 | Denoiser | OpenImageDenoise |
 | Walk speed | 5.0 m/s |
 | Camera height | 1.7 m |
+| Camera clip_end | 10 000 m (fixed; was 100 m — clipped all vegetation) |
 | Waypoints | 20 |
 | Seed | 42 |
 | Gaze mode | waypoint (lookahead 0.05) |
-| First waypoint | scene camera @ (−68.5, 0.0, 2.72) → walkable cell (78, 94, 84) |
+| Path connectivity | **26-connected BFS** (face + edge + corner; connects gentle slopes) |
+| First waypoint | scene camera @ (−68.5, 0.0, 2.72) → walkable cell (78, 90, 83) |
 | Approx time/frame | ~2.9 s |
 
 ### Walkthrough GIF
 
 ![arctic v57 walkthrough](assets/arctic_midnight_sun_v57/arctic_v57_walkthrough.gif)
 
-*334 frames (every 3rd of 1000), 12 fps, 4.9 MB*
+*1000 frames, 12 fps, 16.0 MB*
+
+### Combined GIF — Rendered Frame + Live XY Map
+
+![arctic v57 combined](assets/arctic_midnight_sun_v57/arctic_v57_walkthrough_combined.gif)
+
+*334 frames (every 3rd), 560×240, 26.0 MB. Left: Cycles render. Right: XY terrain map with plasma trail and current camera position (white crosshair).*
+
+### Figure 5 — Walkthrough Path (XY Top-Down)
+
+![figure 5](assets/arctic_midnight_sun_v57/figure_5_walkthrough_path.png)
+
+Left: full terrain extent with the camera path coloured by progress (plasma, blue→yellow).
+Numbered waypoints (1–20), start marker (▲), end marker (■), and original scene camera (★).
+Right: zoomed to the path bounding box + 12 % margin.
 
 ---
 
@@ -230,11 +246,13 @@ ray inserts and percentile filtering, low single-digit seconds locally.
 | Phase 2 log | `results/arctic_midnight_sun_v57/phase2.log` |
 | Walkthrough blend | `results/arctic_midnight_sun_v57/fine_scene_walkthrough.blend` |
 | Walkthrough GIF | `docs/assets/arctic_midnight_sun_v57/arctic_v57_walkthrough.gif` |
+| Combined GIF (render + XY map) | `docs/assets/arctic_midnight_sun_v57/arctic_v57_walkthrough_combined.gif` |
 | Fig 0 — initial vs final cloth | `docs/assets/arctic_midnight_sun_v57/figure_0_initial_vs_final.png` |
 | Fig 1 — top-down | `docs/assets/arctic_midnight_sun_v57/figure_1_top_down.png` |
 | Fig 2 — side profiles | `docs/assets/arctic_midnight_sun_v57/figure_2_side_profiles.png` |
 | Fig 3 — camera-anchored projections (XY + XZ + YZ) | `docs/assets/arctic_midnight_sun_v57/figure_3_bridging_demo.png` |
 | Fig 4 — convergence | `docs/assets/arctic_midnight_sun_v57/figure_4_convergence.png` |
+| Fig 5 — walkthrough path (XY) | `docs/assets/arctic_midnight_sun_v57/figure_5_walkthrough_path.png` |
 | Run script | `run_arctic_midnight_sun_v57.py` |
 
 ---

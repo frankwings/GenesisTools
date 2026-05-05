@@ -527,7 +527,13 @@ def terrain_figure_2(td: TerrainData, out_dir: Path) -> None:
                 zs_parts.append(np.array([td.pts[:, 2].min(),
                                            td.pts[:, 2].max() + td.camera_height]))
             zs = np.concatenate(zs_parts)
-            z_lo, z_hi = float(zs.min()), float(zs.max())
+            # Use 2nd/98th percentile to clip seabed outlier hits; ensure
+            # camera-path Z extremes are always included in the range.
+            z_lo = float(np.percentile(zs, 2))
+            z_hi = float(np.percentile(zs, 98))
+            if td.has_path:
+                z_lo = min(z_lo, float(td.pts[:, 2].min()))
+                z_hi = max(z_hi, float(td.pts[:, 2].max()) + td.camera_height)
             pad = max(2.0, (z_hi - z_lo) * 0.1)
             ax.set_ylim(z_lo - pad, z_hi + pad)
         else:
@@ -814,30 +820,16 @@ def terrain_figure_5(td: TerrainData, out_dir: Path) -> None:
         plt.colorbar(sm, ax=ax, label="Path progress (0=start, 1=end)",
                      fraction=0.03, pad=0.01)
 
-    fig, axes = plt.subplots(1, 2, figsize=(20, 9))
+    fig, ax = plt.subplots(1, 1, figsize=(12, 10))
     fig.suptitle(
         "Phase 2 — Walkthrough Path (XY top-down)\n"
         "Path coloured by progress (plasma: blue→yellow), white circles = waypoints (numbered in tour order)",
         fontsize=11,
     )
 
-    # Left: full terrain extent
-    _draw_panel(axes[0], (min_x, max_x), (min_y, max_y),
-                f"Full terrain ({td.nx}×{td.ny} grid, {td.res:.0f} m/cell)\n"
+    _draw_panel(ax, (min_x, max_x), (min_y, max_y),
+                f"Full terrain ({td.nx}×{td.ny} grid, {td.res:.0f} m/cell) — "
                 f"{len(td.pts)} path points, {len(td.wps)} waypoints")
-
-    # Right: zoomed to path bounding box + 10% margin
-    if len(td.pts) > 0:
-        px, py = td.pts[:, 0], td.pts[:, 1]
-        margin_x = max((px.max() - px.min()) * 0.12, td.res * 3)
-        margin_y = max((py.max() - py.min()) * 0.12, td.res * 3)
-        xlim_z = (px.min() - margin_x, px.max() + margin_x)
-        ylim_z = (py.min() - margin_y, py.max() + margin_y)
-    else:
-        xlim_z = (min_x, max_x); ylim_z = (min_y, max_y)
-    _draw_panel(axes[1], xlim_z, ylim_z,
-                "Zoomed: path bounding box + 12% margin",
-                label_wps=True)
 
     plt.tight_layout()
     out = out_dir / "figure_5_walkthrough_path.png"
