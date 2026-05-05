@@ -4,7 +4,7 @@ sys.path.insert(0, "/home/kingy/Projects/Genesis/GenesisTools")
 
 from pathlib import Path
 from genesis_tools.gif_generator import create_gif
-from genesis_tools.walkthrough_renderer.combined_gif import make_combined_gif
+from genesis_tools.walkthrough_renderer.combined_gif import make_combined_gif, make_combined_mp4
 
 RESULTS = Path("/home/kingy/Projects/Genesis/GenesisTools/results/arctic_midnight_sun_v57")
 ASSETS  = Path("/home/kingy/Projects/Genesis/GenesisTools/docs/assets/arctic_midnight_sun_v57")
@@ -28,6 +28,16 @@ make_combined_gif(
     terrain_npz=RESULTS / "terrain_snake.npz",
     output_gif=combined_gif_path,
     fps=12, step=3, output_scale=0.5,
+)
+
+# MP4: all frames, full resolution, 6 fps (slower, smoother)
+mp4_path = ASSETS / "arctic_v57_walkthrough_combined.mp4"
+make_combined_mp4(
+    frames=all_frames,
+    path_npz=RESULTS / "path.npz",
+    terrain_npz=RESULTS / "terrain_snake.npz",
+    output_mp4=mp4_path,
+    fps=6, step=1, output_scale=1.0,
 )
 
 print("Done.")

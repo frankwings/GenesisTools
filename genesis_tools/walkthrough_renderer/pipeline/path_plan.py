@@ -127,6 +127,43 @@ def _greedy_tsp_tour(waypoints: list, use_xyz: bool = False) -> list:
     return tour
 
 
+def _two_opt_improve(tour: list, fixed_first=None, use_xyz: bool = False) -> list:
+    """2-opt improvement pass on a TSP tour.
+
+    Iteratively reverses sub-segments to eliminate crossing edges, reducing
+    path length and the chance of the camera revisiting the same area.
+    fixed_first: if given, this waypoint is kept at index 0 (not reversed away).
+    Runs until no improving swap is found (typically converges in 2-4 passes
+    for n=20 waypoints).
+    """
+    def _dist2(a, b):
+        if use_xyz:
+            return (a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2
+        return (a[0]-b[0])**2 + (a[1]-b[1])**2
+
+    n = len(tour)
+    if n <= 3:
+        return tour
+    best = list(tour)
+    improved = True
+    while improved:
+        improved = False
+        for i in range(1, n - 1):          # i=0 kept fixed if fixed_first set
+            for j in range(i + 1, n):
+                # Reverse segment best[i:j+1]
+                new_tour = best[:i] + best[i:j+1][::-1] + best[j+1:]
+                if fixed_first is not None and new_tour[0] != fixed_first:
+                    continue
+                d_old = (_dist2(best[i-1], best[i]) +
+                         _dist2(best[j], best[j+1] if j+1 < n else best[0]))
+                d_new = (_dist2(new_tour[i-1], new_tour[i]) +
+                         _dist2(new_tour[j], new_tour[j+1] if j+1 < n else new_tour[0]))
+                if d_new < d_old - 1e-10:
+                    best = new_tour
+                    improved = True
+    return best
+
+
 def _bfs_path(start: tuple, goal: tuple, walkable: set) -> list:
     """BFS shortest path in walkable voxels using 26-connected movement.
 
@@ -623,7 +660,10 @@ def build(vg, wk, config: dict) -> PathData:
     waypoints_list = _farthest_point_sample(component, n_wp, seed,
                                              fixed_first=fixed_first,
                                              use_xyz=config.get("aerial", False))
-    tour_list = _greedy_tsp_tour(waypoints_list, use_xyz=config.get("aerial", False))
+    use_xyz = config.get("aerial", False)
+    tour_list = _greedy_tsp_tour(waypoints_list, use_xyz=use_xyz)
+    tour_list = _two_opt_improve(tour_list, fixed_first=fixed_first, use_xyz=use_xyz)
+    print(f"[PathPlan] 2-opt tour length: {len(tour_list)} waypoints")
 
     # Convert waypoints to array
     waypoints_arr = np.array(waypoints_list, dtype=np.int32)
