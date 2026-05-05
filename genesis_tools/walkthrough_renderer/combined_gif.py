@@ -99,10 +99,11 @@ def _iter_combined_frames(
 
     all_px = _world_to_px(path_pts[:, :2], bounds, map_px)
 
-    diffs = np.diff(path_pts[:, :2], axis=0)
-    seg_len = np.sqrt((diffs**2).sum(axis=1))
-    cum = np.concatenate([[0.0], np.cumsum(seg_len)])
-    t_frac = cum / max(cum[-1], 1e-6)
+    # Colour trail by height (Z) — normalised to [0,1] across the path's Z range
+    z = path_pts[:, 2]
+    z_min, z_max = float(z.min()), float(z.max())
+    z_span = max(z_max - z_min, 1e-6)
+    t_frac = (z - z_min) / z_span   # (P,) — 0=lowest, 1=highest
 
     dot_r = max(4, map_px // 80)
     trail_w = max(1, map_px // 200)
