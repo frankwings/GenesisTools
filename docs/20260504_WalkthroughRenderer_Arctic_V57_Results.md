@@ -2,8 +2,8 @@
 
 **Scene**: `arctic_midnight_sun/fine_scene.blend` (917 MB, unit_scale=1.0, 1 BU = 1 m)
 **Date**: 2026-05-04
-**Phase reported**: Phase 1 only — terrain snake fitting (no walkthrough render)
-**Run host**: local Linux + system Blender 4.5.0
+**Phase reported**: Phase 1 + Phase 2 — terrain snake + 1000-frame Cycles render
+**Run host**: local Linux + system Blender 4.5.0 + RTX 5090 (OPTIX)
 
 ---
 
@@ -192,27 +192,56 @@ ray inserts and percentile filtering, low single-digit seconds locally.
 
 ---
 
+## Phase 2 — Walkthrough Render
+
+**Script**: `run_arctic_midnight_sun_v57.py`
+**Render engine**: Cycles (OPTIX, RTX 5090)
+
+| Parameter | Value |
+|-----------|-------|
+| Frames | 1000 |
+| FPS | 12 |
+| Duration | 83.4 s |
+| Resolution | 640 × 480 |
+| Samples | 64 |
+| Denoiser | OpenImageDenoise |
+| Walk speed | 5.0 m/s |
+| Camera height | 1.7 m |
+| Waypoints | 20 |
+| Seed | 42 |
+| Gaze mode | waypoint (lookahead 0.05) |
+| First waypoint | scene camera @ (−68.5, 0.0, 2.72) → walkable cell (78, 94, 84) |
+| Approx time/frame | ~2.9 s |
+
+### Walkthrough GIF
+
+![arctic v57 walkthrough](assets/arctic_midnight_sun_v57/arctic_v57_walkthrough.gif)
+
+*334 frames (every 3rd of 1000), 12 fps, 4.9 MB*
+
+---
+
 ## Files
 
 | Content | Path |
 |---------|------|
 | Terrain NPZ | `results/arctic_midnight_sun_v57/terrain_snake.npz` |
 | Phase 1 log | `results/arctic_midnight_sun_v57/phase1.log` |
+| Phase 2 log | `results/arctic_midnight_sun_v57/phase2.log` |
+| Walkthrough blend | `results/arctic_midnight_sun_v57/fine_scene_walkthrough.blend` |
+| Walkthrough GIF | `docs/assets/arctic_midnight_sun_v57/arctic_v57_walkthrough.gif` |
 | Fig 0 — initial vs final cloth | `docs/assets/arctic_midnight_sun_v57/figure_0_initial_vs_final.png` |
 | Fig 1 — top-down | `docs/assets/arctic_midnight_sun_v57/figure_1_top_down.png` |
 | Fig 2 — side profiles | `docs/assets/arctic_midnight_sun_v57/figure_2_side_profiles.png` |
 | Fig 3 — camera-anchored projections (XY + XZ + YZ) | `docs/assets/arctic_midnight_sun_v57/figure_3_bridging_demo.png` |
 | Fig 4 — convergence | `docs/assets/arctic_midnight_sun_v57/figure_4_convergence.png` |
-| Run script | `run_arctic_midnight_sun_v1.py` (re-uses fit_terrain_contour with refine on by default) |
+| Run script | `run_arctic_midnight_sun_v57.py` |
 
 ---
 
 ## Known Issues / Future Work
 
-1. **Phase 2 not yet re-run on v57 npz** — walkthrough render still uses
-   v56's terrain. Once we want to compare the camera path quality, run
-   `run_arctic_midnight_sun_v1.py` with `OUT_DIR` pointing at `arctic_midnight_sun_v57`.
-2. **Deep underwater hits** — `terrain_z_floor` min is −136 m on a few
+1. **Deep underwater hits** — `terrain_z_floor` min is −136 m on a few
    columns where the topmost valid hit was the seabed mesh below a NaN
    region. Laplacian smoothing pulls these back to the cloth band ≈ −15 m
    so the camera doesn't fall into them, but a stricter "ground volume"
