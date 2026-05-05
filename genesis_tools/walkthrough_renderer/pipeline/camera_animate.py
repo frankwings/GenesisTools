@@ -151,7 +151,9 @@ def build(blend_path: str, path_data, orient: "OrientData",
     cam_data = bpy.data.cameras.new("WalkthroughCamera")
     cam_data.lens = 35
     cam_data.clip_start = 0.001 / unit_scale
-    cam_data.clip_end = 100.0 / unit_scale
+    # Match Infinigen scene cameras (clip_end=10000 BU). 100 m clips all distant
+    # terrain and vegetation on large outdoor scenes — must be >> scene radius.
+    cam_data.clip_end = config.get("camera_clip_end", 10000.0) / unit_scale
     cam_obj = bpy.data.objects.new("WalkthroughCamera", cam_data)
     bpy.context.scene.collection.objects.link(cam_obj)
     bpy.context.scene.camera = cam_obj

@@ -742,8 +742,111 @@ def terrain_figure_4(td: TerrainData, out_dir: Path) -> None:
     print(f"Saved {out}")
 
 
+def terrain_figure_5(td: TerrainData, out_dir: Path) -> None:
+    """Phase 2 — XY top-down walkthrough path + numbered waypoints.
+
+    Left panel: full terrain heightmap + path coloured by progress + waypoints.
+    Right panel: zoomed view around the path bounding box.
+    Skipped (no-op) if no path.npz was found.
+    """
+    if not td.has_path:
+        print("[viz] figure_5 skipped — no path.npz")
+        return
+
+    min_x, min_y, max_x, max_y, _, _ = td.bounds
+    hm = np.where(td.valid_hmap, td.heightmap, np.nan)
+    vmin = float(np.nanmin(hm)) - 5
+    vmax = float(np.nanmax(hm)) + 5
+
+    # Arc-length fraction for path colouring (0 = start, 1 = end)
+    diffs = np.diff(td.pts[:, :2], axis=0)
+    seg_len = np.sqrt((diffs**2).sum(axis=1))
+    cum = np.concatenate([[0.0], np.cumsum(seg_len)])
+    total = max(cum[-1], 1e-6)
+    t_frac = cum / total          # (N,) ∈ [0,1]
+
+    def _draw_panel(ax, xlim, ylim, title, label_wps=True):
+        im = ax.imshow(hm.T, origin="lower",
+                       extent=[min_x, max_x, min_y, max_y],
+                       cmap="terrain", vmin=vmin, vmax=vmax,
+                       aspect="equal", interpolation="bilinear")
+
+        # Path coloured by progress: blue → red
+        from matplotlib.collections import LineCollection
+        pts2 = td.pts[:, :2]
+        segs = np.stack([pts2[:-1], pts2[1:]], axis=1)
+        lc = LineCollection(segs, cmap="plasma",
+                            norm=plt.Normalize(0, 1), linewidths=1.4)
+        lc.set_array(t_frac[:-1])
+        ax.add_collection(lc)
+
+        # Waypoints numbered in tour order
+        n_wps = len(td.wps)
+        ax.scatter(td.wps[:, 0], td.wps[:, 1],
+                   c="white", s=60, zorder=6,
+                   edgecolor="black", linewidths=0.8)
+        if label_wps:
+            for i, (wx, wy, _) in enumerate(td.wps):
+                ax.annotate(str(i + 1), (wx, wy),
+                            fontsize=6, ha="center", va="center",
+                            fontweight="bold", zorder=7)
+
+        # Start (green diamond) and end (red square)
+        ax.scatter(*td.pts[0, :2],  marker="D", c="lime",  s=90, zorder=8,
+                   edgecolor="black", linewidths=0.8, label="start")
+        ax.scatter(*td.pts[-1, :2], marker="s", c="red",   s=90, zorder=8,
+                   edgecolor="black", linewidths=0.8, label="end")
+
+        # Original scene camera
+        if td.camera_xyz is not None:
+            cx, cy = float(td.camera_xyz[0]), float(td.camera_xyz[1])
+            ax.scatter(cx, cy, marker="*", c="yellow", s=160, zorder=9,
+                       edgecolor="black", linewidths=0.6, label="scene camera")
+
+        ax.set_xlim(xlim); ax.set_ylim(ylim)
+        ax.set_title(title, fontsize=9)
+        ax.set_xlabel("X (m)"); ax.set_ylabel("Y (m)")
+        ax.legend(fontsize=7, loc="upper right")
+
+        # Colourbar for path progress
+        sm = plt.cm.ScalarMappable(cmap="plasma", norm=plt.Normalize(0, 1))
+        sm.set_array([])
+        plt.colorbar(sm, ax=ax, label="Path progress (0=start, 1=end)",
+                     fraction=0.03, pad=0.01)
+
+    fig, axes = plt.subplots(1, 2, figsize=(20, 9))
+    fig.suptitle(
+        "Phase 2 — Walkthrough Path (XY top-down)\n"
+        "Path coloured by progress (plasma: blue→yellow), white circles = waypoints (numbered in tour order)",
+        fontsize=11,
+    )
+
+    # Left: full terrain extent
+    _draw_panel(axes[0], (min_x, max_x), (min_y, max_y),
+                f"Full terrain ({td.nx}×{td.ny} grid, {td.res:.0f} m/cell)\n"
+                f"{len(td.pts)} path points, {len(td.wps)} waypoints")
+
+    # Right: zoomed to path bounding box + 10% margin
+    if len(td.pts) > 0:
+        px, py = td.pts[:, 0], td.pts[:, 1]
+        margin_x = max((px.max() - px.min()) * 0.12, td.res * 3)
+        margin_y = max((py.max() - py.min()) * 0.12, td.res * 3)
+        xlim_z = (px.min() - margin_x, px.max() + margin_x)
+        ylim_z = (py.min() - margin_y, py.max() + margin_y)
+    else:
+        xlim_z = (min_x, max_x); ylim_z = (min_y, max_y)
+    _draw_panel(axes[1], xlim_z, ylim_z,
+                "Zoomed: path bounding box + 12% margin",
+                label_wps=True)
+
+    plt.tight_layout()
+    out = out_dir / "figure_5_walkthrough_path.png"
+    fig.savefig(out, dpi=150); plt.close(fig)
+    print(f"Saved {out}")
+
+
 def run_terrain_snake(result_dir: Path) -> None:
-    """Generate all 5 TerrainSnake figures for `result_dir`."""
+    """Generate all 6 TerrainSnake figures for `result_dir`."""
     out_dir = result_dir / "viz"
     out_dir.mkdir(parents=True, exist_ok=True)
     td = _load_terrain_data(result_dir)
@@ -752,6 +855,7 @@ def run_terrain_snake(result_dir: Path) -> None:
     terrain_figure_2(td, out_dir)
     terrain_figure_3(td, out_dir)
     terrain_figure_4(td, out_dir)
+    terrain_figure_5(td, out_dir)
     print(f"\nAll TerrainSnake figures saved to {out_dir}")
 
 
