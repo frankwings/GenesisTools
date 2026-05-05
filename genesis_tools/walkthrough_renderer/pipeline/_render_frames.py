@@ -29,7 +29,28 @@ elif engine in ("EEVEE", "BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"):
     scene.render.engine = "BLENDER_EEVEE_NEXT"
 else:
     scene.render.engine = "CYCLES"
-    scene.cycles.device = "CPU"
+    # Try GPU (OPTIX preferred for NVIDIA, then CUDA, then HIP for AMD,
+    # METAL for Apple, ONEAPI for Intel) — fall back to CPU if none enabled.
+    prefs = bpy.context.preferences.addons["cycles"].preferences
+    enabled_gpu = False
+    for backend in ("OPTIX", "CUDA", "HIP", "METAL", "ONEAPI"):
+        try:
+            prefs.compute_device_type = backend
+            prefs.refresh_devices()
+            gpu_devices = [d for d in prefs.devices if d.type == backend]
+            if gpu_devices:
+                for d in prefs.devices:
+                    d.use = (d.type == backend)  # enable all of this backend, disable CPU
+                scene.cycles.device = "GPU"
+                enabled_gpu = True
+                names = [d.name for d in gpu_devices]
+                print(f"[Cycles] GPU enabled ({backend}): {names}")
+                break
+        except Exception:
+            continue
+    if not enabled_gpu:
+        scene.cycles.device = "CPU"
+        print("[Cycles] No GPU backend available — falling back to CPU")
     scene.cycles.samples = config.get("render_samples", 32)
     scene.cycles.use_adaptive_sampling = True
     scene.cycles.adaptive_threshold = 0.01
