@@ -25,9 +25,9 @@ XY resolution improvement on the actual terrain at no extra ray cost.
 | Fix | File | Change |
 |-----|------|--------|
 | Two-pass ray cast | `genesis_tools/active_contour/fit_terrain_contour.py` | Extracted `_cast_terrain_rays` / `_hits_to_floor` / `_tight_bbox_of_valid` helpers; added pass-2 over tight bbox at the same `nx × ny`; output `bounds` / `res` reflect pass 2 |
-| Optional path overlay in viz | `genesis_tools/active_contour/visualize_terrain_snake_arctic.py` | Accepts a `result_dir` CLI arg; renders fig 1/2 with or without `path.npz`; auto-mean cloth Z in fig 0 title |
-| Waypoint coordinate fix | `genesis_tools/active_contour/visualize_terrain_snake_arctic.py` | Convert voxel-index waypoints → world XY before plotting (fig 1 used to display all 20 waypoints as a single dot at world ≈ (90, 90) m) |
-| Camera-anchored figure 3 | `genesis_tools/active_contour/visualize_terrain_snake_arctic.py` | Three-panel projection figure on real v57 data: Panel A = XY top-down (heightmap + green bridged-cells overlay + slice lines for B/C); Panel B = XZ cross-section (vary X at Y = camera_Y); Panel C = YZ cross-section (vary Y at X = camera_X). Slice indices come from `_camera_anchored_iy()` / `_camera_anchored_ix()`; B/C share `_draw_vertical_slice()`. See module docstring convention. |
+| Optional path overlay in viz | `genesis_tools/active_contour/visualize.py` (`terrain` mode) | Accepts a `result_dir` CLI arg; renders fig 1/2 with or without `path.npz`; auto-mean cloth Z in fig 0 title |
+| Waypoint coordinate fix | `genesis_tools/active_contour/visualize.py` (`terrain` mode) | Convert voxel-index waypoints → world XY before plotting (fig 1 used to display all 20 waypoints as a single dot at world ≈ (90, 90) m) |
+| Camera-anchored figure 3 | `genesis_tools/active_contour/visualize.py` (`terrain` mode) | Three-panel projection figure on real v57 data: Panel A = XY top-down (heightmap + green bridged-cells overlay + slice lines for B/C); Panel B = XZ cross-section (vary X at Y = camera_Y); Panel C = YZ cross-section (vary Y at X = camera_X). Slice indices come from `_camera_anchored_iy()` / `_camera_anchored_ix()`; B/C share `_draw_vertical_slice()`. See module docstring convention. |
 
 ---
 
@@ -156,7 +156,7 @@ only places the cloth strays from real terrain, and they sit outside
 the walkable island domain so they don't affect the camera path.
 
 > **Convention** — every 1-D slice / cross-section figure in
-> `genesis_tools/active_contour/visualize_terrain_snake_arctic.py` is anchored at `camera_xyz` from the
+> `genesis_tools/active_contour/visualize.py` (`terrain` mode) is anchored at `camera_xyz` from the
 > npz, via `_camera_anchored_iy()` / `_camera_anchored_ix()`, drawn by
 > the local helper `_draw_vertical_slice()`. The scene camera marks the
 > canonical "interesting" line; arbitrary mid-bbox or synthetic slices
