@@ -34,10 +34,22 @@ class PathData:
 # ---------------------------------------------------------------------------
 
 _FACE_NEIGHBORS = ((1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1))
+_ALL26_NEIGHBORS = tuple(
+    (dx, dy, dz)
+    for dx in (-1, 0, 1)
+    for dy in (-1, 0, 1)
+    for dz in (-1, 0, 1)
+    if (dx, dy, dz) != (0, 0, 0)
+)
 
 
 def _bfs_largest_component(walkable: set) -> set:
-    """Return the largest 6-connected (face-adjacent) component of walkable voxels."""
+    """Return the largest 26-connected component of walkable voxels.
+
+    26-connected includes face, edge, and corner neighbours (all dx,dy,dz ∈ {-1,0,1}).
+    This connects adjacent terrain columns whose iz differs by ≤1 (gentle slope)
+    while still isolating steep cliffs (iz diff ≥2 with no shared neighbour).
+    """
     remaining = set(walkable)
     best: set = set()
     while remaining:
@@ -50,7 +62,7 @@ def _bfs_largest_component(walkable: set) -> set:
                 continue
             component.add(cell)
             cx, cy, cz = cell
-            for dx, dy, dz in _FACE_NEIGHBORS:
+            for dx, dy, dz in _ALL26_NEIGHBORS:
                 nb = (cx+dx, cy+dy, cz+dz)
                 if nb in remaining and nb not in component:
                     queue.append(nb)
@@ -116,11 +128,11 @@ def _greedy_tsp_tour(waypoints: list, use_xyz: bool = False) -> list:
 
 
 def _bfs_path(start: tuple, goal: tuple, walkable: set) -> list:
-    """BFS shortest path in walkable voxels using 6-connected face-adjacent movement.
+    """BFS shortest path in walkable voxels using 26-connected movement.
 
-    Each step moves along exactly one axis (±X, ±Y, or ±Z) by one voxel.
-    No diagonal moves — every world-space segment is axis-aligned and ≤ res BU,
-    which prevents the camera path from clipping through walls or floors.
+    Includes face, edge, and corner neighbours so gentle slopes (adjacent terrain
+    columns whose iz differs by 1) are traversable in a single step.  Steep cliffs
+    (iz diff ≥2 with no shared 26-neighbour in walkable) remain disconnected.
     """
     if start == goal:
         return [start]
@@ -136,7 +148,7 @@ def _bfs_path(start: tuple, goal: tuple, walkable: set) -> list:
             path.reverse()
             return path
         cx, cy, cz = cell
-        for dx, dy, dz in _FACE_NEIGHBORS:
+        for dx, dy, dz in _ALL26_NEIGHBORS:
             nb = (cx+dx, cy+dy, cz+dz)
             if nb in walkable and nb not in parent:
                 parent[nb] = cell; queue.append(nb)
