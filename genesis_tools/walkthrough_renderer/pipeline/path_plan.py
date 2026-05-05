@@ -34,6 +34,7 @@ class PathData:
 # ---------------------------------------------------------------------------
 
 _FACE_NEIGHBORS = ((1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1))
+_XY_NEIGHBORS   = ((1,0),(-1,0),(0,1),(0,-1))
 
 
 def _bfs_largest_component(walkable: set) -> set:
@@ -60,9 +61,79 @@ def _bfs_largest_component(walkable: set) -> set:
     return best
 
 
+def _bfs_largest_component_xy(walkable: set) -> set:
+    """Terrain mode: largest XY-4-connected component, Z-agnostic.
+
+    In terrain mode each (ix,iy) column has exactly one walkable voxel whose iz
+    is determined by the terrain heightmap.  Two adjacent columns can have any iz
+    difference — 3-D 6-connected BFS would disconnect them whenever their iz
+    values differ.  This function treats the walkable surface as a pure 2-D XY
+    graph: (ix1,iy1,iz1) and (ix2,iy2,iz2) are neighbours iff |ix1-ix2|+
+    |iy1-iy2|==1, regardless of iz.
+    """
+    xy_to_cell = {(c[0], c[1]): c for c in walkable}
+    remaining_xy = set(xy_to_cell)
+    best_xy: set = set()
+    while remaining_xy:
+        start_xy = next(iter(remaining_xy))
+        comp_xy: set = set()
+        queue = deque([start_xy])
+        while queue:
+            xy = queue.popleft()
+            if xy in comp_xy or xy not in remaining_xy:
+                continue
+            comp_xy.add(xy)
+            ix, iy = xy
+            for dx, dy in _XY_NEIGHBORS:
+                nb = (ix+dx, iy+dy)
+                if nb in remaining_xy and nb not in comp_xy:
+                    queue.append(nb)
+        remaining_xy -= comp_xy
+        if len(comp_xy) > len(best_xy):
+            best_xy = comp_xy
+    return {xy_to_cell[xy] for xy in best_xy}
+
+
+def _bfs_path_xy(start: tuple, goal: tuple, walkable: set) -> list:
+    """Terrain mode: BFS path between two walkable cells using XY-only connectivity.
+
+    Adjacent columns are neighbours regardless of their iz difference.  The
+    returned list contains the actual (ix,iy,iz) cells from the walkable set —
+    the Z follows the terrain surface, not a straight line through voxel space.
+    If no XY path exists, returns [start, goal] (direct jump, same as _bfs_path).
+    """
+    xy_to_cell = {(c[0], c[1]): c for c in walkable}
+    start_xy = (start[0], start[1])
+    goal_xy  = (goal[0],  goal[1])
+    if start_xy == goal_xy:
+        return [start]
+    parent: dict = {start_xy: None}
+    queue = deque([start_xy])
+    while queue:
+        xy = queue.popleft()
+        if xy == goal_xy:
+            path_xy = []
+            cur = xy
+            while cur is not None:
+                path_xy.append(cur)
+                cur = parent[cur]
+            path_xy.reverse()
+            return [xy_to_cell.get(xy, start) for xy in path_xy]
+        ix, iy = xy
+        for dx, dy in _XY_NEIGHBORS:
+            nb = (ix+dx, iy+dy)
+            if nb in xy_to_cell and nb not in parent:
+                parent[nb] = xy
+                queue.append(nb)
+    return [start, goal]
+
+
 def _farthest_point_sample(cells: set, n: int, rng_seed: int,
                             fixed_first=None, use_xyz: bool = False) -> list:
     """Return n cells using farthest-point sampling.
+
+    fixed_first is always used as the first element — even if not in cells
+    (caller is responsible for injecting it into cells when needed for routing).
 
     use_xyz=False: XY distance only (default, ground-level walking).
     use_xyz=True:  XYZ distance (aerial mode, spreads waypoints in 3D).
@@ -70,13 +141,10 @@ def _farthest_point_sample(cells: set, n: int, rng_seed: int,
     import random
     rng = random.Random(rng_seed)
     cells_list = list(cells)
+    first = fixed_first if fixed_first is not None else rng.choice(cells_list)
     if len(cells_list) <= n:
-        if fixed_first is not None and fixed_first in cells:
-            rest = [c for c in cells_list if c != fixed_first]
-            return [fixed_first] + rest
-        return cells_list
-    first = fixed_first if (fixed_first is not None and fixed_first in cells) \
-            else rng.choice(cells_list)
+        rest = [c for c in cells_list if c != first]
+        return [first] + rest
     selected = [first]
     if use_xyz:
         dist = {c: (c[0]-first[0])**2 + (c[1]-first[1])**2 + (c[2]-first[2])**2 for c in cells_list}
@@ -284,7 +352,7 @@ def _cast_all_hits_bidir(origin, direction, max_dist):
 
 
 def _build_smooth_path(tour: list, walkable: set, config: dict, bounds: tuple,
-                       n_iters: int = 5) -> list:
+                       n_iters: int = 5, terrain_mode: bool = False) -> list:
     """BFS corridor + Laplacian smoothing + 4x upsample (requires bpy)."""
     import bpy
     from mathutils import Vector as _V
@@ -293,10 +361,11 @@ def _build_smooth_path(tour: list, walkable: set, config: dict, bounds: tuple,
     res = config.get("_effective_grid_resolution", config["grid_resolution"])
     cam_h_bu = config.get("camera_height", 1.7) / config.get("_unit_scale", 1.0)
 
+    _path_fn = _bfs_path_xy if terrain_mode else _bfs_path
     cell_path = []
     n = len(tour)
     for i in range(n - 1):
-        segment = _bfs_path(tour[i], tour[i+1], walkable)
+        segment = _path_fn(tour[i], tour[i+1], walkable)
         if i == 0:
             cell_path.extend(segment)
         else:
@@ -574,30 +643,49 @@ def build(vg, wk, config: dict) -> PathData:
             bounds=vg.bounds,
         )
 
-    component = _bfs_largest_component(walkable_set)
+    terrain_mode = getattr(vg, "mode", None) == "terrain"
+    component = (_bfs_largest_component_xy(walkable_set) if terrain_mode
+                 else _bfs_largest_component(walkable_set))
     n_wp = config.get("num_waypoints", 20)
     seed = config.get("seed", 42)
 
-    # Seed first waypoint from the original scene camera position when available.
-    # The camera Z (e.g. ice level at 2.7 m) is usually NOT on the walkable iz
-    # plane (e.g. plateau at 110 m), so snap by XY only — pick the walkable cell
-    # whose (ix, iy) is closest to the camera's (cam_ix, cam_iy).
+    # Force first waypoint to the exact camera voxel, regardless of walkability.
+    # Terrain mode: each column has exactly one walkable voxel whose iz comes
+    # from heightmap[ix,iy]. If the camera column is NaN (e.g. over water),
+    # iz falls back to the camera's actual Z converted to voxel space.
+    # The camera cell is injected into component + walkable_set so that FPS
+    # spreads from it and BFS can route outward from it. If BFS finds no
+    # walkable neighbours (island camera over water with no adjacent land),
+    # _bfs_path returns [camera_cell, next_waypoint] — a direct jump —
+    # which camera_animate interpolates as a straight approach shot.
     fixed_first = None
     terrain_npz = config.get("terrain_npz")
     if terrain_npz and component:
         try:
             tdata = np.load(terrain_npz)
             if "camera_xyz" in tdata.files:
-                cx, cy, _cz = tdata["camera_xyz"]
-                min_x_b, min_y_b = vg.bounds[0], vg.bounds[1]
-                cam_ix = int((float(cx) - min_x_b) / vg.res)
-                cam_iy = int((float(cy) - min_y_b) / vg.res)
-                fixed_first = min(component,
-                                  key=lambda c: (c[0]-cam_ix)**2 + (c[1]-cam_iy)**2)
-                print(f"[PathPlan] First waypoint seeded from scene camera "
-                      f"@ ({cam_ix},{cam_iy}) → walkable cell {fixed_first}")
+                cx, cy, cz = tdata["camera_xyz"]
+                min_x_b, min_y_b, min_z_b = vg.bounds[0], vg.bounds[1], vg.bounds[4]
+                cam_ix = max(0, min(vg.nx - 1, int((float(cx) - min_x_b) / vg.res)))
+                cam_iy = max(0, min(vg.ny - 1, int((float(cy) - min_y_b) / vg.res)))
+                # Prefer terrain-surface iz at camera XY; fall back to camera Z.
+                hmap = tdata["heightmap"]
+                h_val = float(hmap[cam_ix, cam_iy])
+                if not math.isnan(h_val):
+                    cam_iz = max(0, min(vg.nz - 1, int((h_val - min_z_b) / vg.res)))
+                else:
+                    cam_iz = max(0, min(vg.nz - 1, int((float(cz) - min_z_b) / vg.res)))
+                fixed_first = (cam_ix, cam_iy, cam_iz)
+                in_component = fixed_first in component
+                if not in_component:
+                    component.add(fixed_first)
+                    walkable_set.add(fixed_first)
+                    print(f"[PathPlan] Camera cell {fixed_first} not in walkable "
+                          f"(NaN terrain) — forced as first waypoint")
+                else:
+                    print(f"[PathPlan] First waypoint forced to camera cell {fixed_first}")
         except Exception as exc:
-            print(f"[PathPlan] Could not seed first waypoint from camera: {exc}")
+            print(f"[PathPlan] Could not force first waypoint from camera: {exc}")
 
     waypoints_list = _farthest_point_sample(component, n_wp, seed,
                                              fixed_first=fixed_first,
@@ -627,7 +715,8 @@ def build(vg, wk, config: dict) -> PathData:
                 config["_unit_scale"] = vg.unit_scale
                 t0 = time.time()
                 path_vecs = _build_smooth_path(tour_list, walkable_set, config, vg.bounds,
-                                               n_iters=laplacian_iters)
+                                               n_iters=laplacian_iters,
+                                               terrain_mode=terrain_mode)
                 if not config.get("aerial"):
                     path_vecs, _ = _snap_path_to_floor(path_vecs, config)
                 elapsed = time.time() - t0
@@ -641,8 +730,9 @@ def build(vg, wk, config: dict) -> PathData:
             t0 = time.time()
             cell_path = []
             n = len(tour_list)
+            _path_fn = _bfs_path_xy if terrain_mode else _bfs_path
             for i in range(n - 1):
-                seg = _bfs_path(tour_list[i], tour_list[i+1], walkable_set)
+                seg = _path_fn(tour_list[i], tour_list[i+1], walkable_set)
                 cell_path.extend(seg if i == 0 else seg[1:])
             elapsed = time.time() - t0
             print(f"[PathPlan] BFS (pure): {len(cell_path)} cells, {elapsed:.2f}s")
@@ -668,7 +758,8 @@ def build(vg, wk, config: dict) -> PathData:
             config["_unit_scale"] = vg.unit_scale
             n_iters = config.get("laplacian_iters", 5)
             path_vecs = _build_smooth_path(tour_list, walkable_set, config, vg.bounds,
-                                           n_iters=n_iters)
+                                           n_iters=n_iters,
+                                           terrain_mode=terrain_mode)
             if not config.get("aerial"):
                 path_vecs, _ = _snap_path_to_floor(path_vecs, config)
             path_vecs = _fine_adjust_path(path_vecs, config)
@@ -677,8 +768,9 @@ def build(vg, wk, config: dict) -> PathData:
             # Running outside bpy: emit voxel centres along BFS corridor
             cell_path = []
             n = len(tour_list)
+            _path_fn = _bfs_path_xy if terrain_mode else _bfs_path
             for i in range(n - 1):
-                seg = _bfs_path(tour_list[i], tour_list[i+1], walkable_set)
+                seg = _path_fn(tour_list[i], tour_list[i+1], walkable_set)
                 cell_path.extend(seg if i == 0 else seg[1:])
             path_points_arr = np.array([
                 [min_x+(c[0]+0.5)*res, min_y+(c[1]+0.5)*res, min_z+(c[2]+0.5)*res]
