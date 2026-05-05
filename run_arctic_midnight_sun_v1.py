@@ -73,7 +73,7 @@ config = {
     "camera_height": 1.7,
     "num_waypoints": 20,
     "seed": 42,
-    "waypoint_gaze_mode": "free",
+    "waypoint_gaze_mode": "waypoint",
     "lookahead_fraction": 0.05,
     "rotation_smooth_seconds": 2.0,
 
@@ -85,7 +85,6 @@ config = {
     "render_width": 1280,
     "render_height": 720,
     "render_samples": 32,
-    "frame_end": 100,
     "aerial": False,
 }
 
