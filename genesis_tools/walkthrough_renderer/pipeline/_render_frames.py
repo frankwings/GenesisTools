@@ -55,7 +55,21 @@ else:
     scene.cycles.use_adaptive_sampling = True
     scene.cycles.adaptive_threshold = 0.01
     scene.cycles.adaptive_min_samples = 4
-    scene.view_layers[0].cycles.use_denoising = True
+    # Final-pass denoiser: OpenImageDenoise (best quality, runs on CPU/GPU).
+    # Both flags are needed — view_layer.use_denoising marks the layer as
+    # denoiseable, scene.cycles.use_denoising actually triggers the pass.
+    use_denoise = config.get("use_denoise", True)
+    scene.cycles.use_denoising = use_denoise
+    if use_denoise:
+        scene.cycles.denoiser = "OPENIMAGEDENOISE"
+        scene.cycles.denoising_input_passes = "RGB_ALBEDO_NORMAL"
+        scene.cycles.denoising_prefilter = "ACCURATE"
+        scene.view_layers[0].cycles.use_denoising = True
+        scene.view_layers[0].cycles.denoising_store_passes = True
+    else:
+        scene.view_layers[0].cycles.use_denoising = False
+    print(f"[Cycles] samples={scene.cycles.samples}, denoise={use_denoise}"
+          + (f", denoiser={scene.cycles.denoiser}" if use_denoise else ""))
 
 if config.get("panoramic"):
     cam_data = scene.camera.data

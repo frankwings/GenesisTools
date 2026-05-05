@@ -79,12 +79,13 @@ config = {
 
     # Render
     "fps": 12,
-    "max_duration_seconds": 120,
+    "max_duration_seconds": 80,           # 12 fps × 80 s = 960 frames (≤1000 cap)
     "walk_speed_mps": 5.0,
-    "render_engine": "EEVEE",
-    "render_width": 1280,
-    "render_height": 720,
-    "render_samples": 32,
+    "render_engine": "CYCLES",
+    "render_width": 640,
+    "render_height": 480,
+    "render_samples": 64,
+    "use_denoise": True,
     "aerial": False,
 }
 

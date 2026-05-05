@@ -1,4 +1,10 @@
-"""Visualize TerrainSnake results for arctic_midnight_sun_v1.
+"""Visualize TerrainSnake results for arctic_midnight_sun_*.
+
+Usage:
+    python visualize_terrain_snake_arctic.py [result_dir]
+
+Default result_dir = results/arctic_midnight_sun_v1.  path.npz is optional —
+when missing, fig 1/2 omit the camera-path overlay.
 
 5 figures (same style as Snake3D visualizations):
   fig0 -- initial cloth (flat at z_max) vs final cloth (settled on terrain)
@@ -16,25 +22,41 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-OUT_DIR = Path("results/arctic_midnight_sun_v1/viz")
+RESULT_DIR = Path(sys.argv[1]) if len(sys.argv) > 1 \
+    else Path("results/arctic_midnight_sun_v1")
+OUT_DIR = RESULT_DIR / "viz"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-NPZ  = Path("results/arctic_midnight_sun_v1/terrain_snake.npz")
-PNPZ = Path("results/arctic_midnight_sun_v1/path.npz")
+NPZ  = RESULT_DIR / "terrain_snake.npz"
+PNPZ = RESULT_DIR / "path.npz"
 
 data  = np.load(NPZ)
-heightmap   = data["heightmap"].astype(np.float64)       # (180,180)
-floor_raw   = data["terrain_z_floor"].astype(np.float64) # (180,180)
+heightmap   = data["heightmap"].astype(np.float64)       # (nx,ny)
+floor_raw   = data["terrain_z_floor"].astype(np.float64) # (nx,ny)
 disps       = data["max_displacements"].astype(np.float64)
 bounds      = tuple(data["bounds"])
 res         = float(data["res"])
 min_x, min_y, max_x, max_y, min_z, max_z = bounds
 nx, ny = heightmap.shape
 
-pdata = np.load(PNPZ)
-pts   = pdata["path_points"]   # (N,3) world coords
-wps   = pdata["waypoints"]     # (20,3) world coords
-camera_height = float(pdata["camera_height"])
+if PNPZ.exists():
+    pdata = np.load(PNPZ)
+    pts   = pdata["path_points"]      # (N,3) world coords
+    wps_v = pdata["waypoints"]        # (20,3) **voxel indices** — see path_plan.py
+    camera_height = float(pdata["camera_height"])
+    # Convert voxel-index waypoints → world XY for plotting on a world-coord axis.
+    # (path_points are already in world coords; waypoints are not — easy bug.)
+    wps_world_x = min_x + (wps_v[:, 0].astype(float) + 0.5) * res
+    wps_world_y = min_y + (wps_v[:, 1].astype(float) + 0.5) * res
+    wps_world_z = min_z + (wps_v[:, 2].astype(float) + 0.5) * res
+    wps = np.column_stack([wps_world_x, wps_world_y, wps_world_z])
+    has_path = True
+else:
+    pts = np.empty((0, 3))
+    wps = np.empty((0, 3))
+    camera_height = 1.7
+    has_path = False
+    print(f"[viz] {PNPZ} not found — fig 1/2 omit camera-path overlay")
 
 # World XY cell centres
 xs = min_x + (np.arange(nx) + 0.5) * res
@@ -46,10 +68,12 @@ valid_hmap  = ~np.isnan(heightmap)
 bridged     = valid_hmap & ~valid_floor   # columns where snake filled NaN
 
 # ── Figure 0: initial cloth vs final cloth (equivalent of figure_2_contour) ──
+final_mean_z = float(np.nanmean(heightmap))
 fig, axes = plt.subplots(1, 3, figsize=(18, 6))
 fig.suptitle(
     "TerrainSnake — Arctic Midnight Sun\n"
-    "Initial Cloth (orange, flat at z_max=130 m)  vs  Final Cloth (blue, settled at z=110 m)",
+    f"Initial Cloth (orange, flat at z_max={max_z:.0f} m)  vs  "
+    f"Final Cloth (blue, settled at z≈{final_mean_z:.1f} m)",
     fontsize=12,
 )
 
@@ -91,7 +115,8 @@ ax.text(arrow_x + res * 2, (max_z + float(np.nanmean(heightmap))) / 2,
         fontsize=8, va="center")
 ax.set_title("Front (XZ) — cloth fall from z_max to terrain", fontsize=9)
 ax.set_xlabel("X (m)"); ax.set_ylabel("Z (m)")
-ax.set_ylim(max_z - 30, max_z + 5)
+ax.set_ylim(min(np.nanmin(heightmap), max_z) - 5,
+            max(max_z, float(np.nanmax(heightmap))) + 5)
 ax.legend(fontsize=8, markerscale=3)
 
 # Panel C: Side (YZ)
@@ -103,7 +128,8 @@ ax.axhline(max_z, color="darkorange", lw=1.2, ls="--", alpha=0.6)
 ax.axhline(float(np.nanmean(heightmap)), color="steelblue", lw=1.2, ls="--", alpha=0.6)
 ax.set_title("Side (YZ) — cloth fall from z_max to terrain", fontsize=9)
 ax.set_xlabel("Y (m)"); ax.set_ylabel("Z (m)")
-ax.set_ylim(max_z - 30, max_z + 5)
+ax.set_ylim(min(np.nanmin(heightmap), max_z) - 5,
+            max(max_z, float(np.nanmax(heightmap))) + 5)
 ax.legend(fontsize=8, markerscale=3)
 
 plt.tight_layout()
@@ -137,10 +163,15 @@ vmin = np.nanmin(hm) - 5; vmax = np.nanmax(hm) + 5
 im2 = ax.imshow(hm.T, origin="lower",
                 extent=[min_x, max_x, min_y, max_y],
                 cmap="terrain", vmin=vmin, vmax=vmax, aspect="equal")
-ax.plot(pts[:, 0], pts[:, 1], "r-", lw=0.8, label="camera path")
-ax.scatter(wps[:, 0], wps[:, 1], c="yellow", s=25, zorder=5, label="waypoints")
-ax.set_title("Snake Heightmap (cloth Z) + Camera Path", fontsize=9)
-ax.set_xlabel("X (m)"); ax.legend(fontsize=8)
+if has_path:
+    ax.plot(pts[:, 0], pts[:, 1], "r-", lw=0.8, label="camera path")
+    ax.scatter(wps[:, 0], wps[:, 1], c="yellow", s=45, zorder=5,
+               edgecolor="black", linewidth=0.6,
+               label=f"waypoints ({len(wps)})")
+    ax.legend(fontsize=8)
+ax.set_title("Snake Heightmap (cloth Z)" + (" + Camera Path" if has_path else ""),
+             fontsize=9)
+ax.set_xlabel("X (m)")
 plt.colorbar(im2, ax=ax, label="Z (m)")
 
 # Panel C: bridged columns (Laplacian filled NaN gaps)
@@ -179,14 +210,31 @@ for ax, coord2d, label_c in [(axes[0], XX, "X (m)"), (axes[1], YY, "Y (m)")]:
     ax.scatter(coord_f[vh][::8], hm_f[vh][::8],
                s=1, c="steelblue", alpha=0.15, label="snake cloth Z")
 
-    # path
-    pc = pts[:, 0] if label_c == "X (m)" else pts[:, 1]
-    ax.scatter(pc[::15], pts[:, 2][::15] + camera_height,
-               s=3, c="red", alpha=0.7, label=f"camera eye (+{camera_height} m)")
+    # camera path overlay (optional)
+    if has_path:
+        pc = pts[:, 0] if label_c == "X (m)" else pts[:, 1]
+        ax.scatter(pc[::15], pts[:, 2][::15] + camera_height,
+                   s=3, c="red", alpha=0.7, label=f"camera eye (+{camera_height} m)")
 
     ax.set_xlabel(label_c); ax.set_ylabel("Z (m)")
     ax.set_title(f"{label_c} profile", fontsize=10)
-    ax.set_ylim(max_z - 50, max_z + 5)  # zoom to top 50 m where action is
+    # Auto-range to the actual valid-cloth data, with a small padding.
+    valid_floor_z = fl_f[vf]
+    valid_hm_z    = hm_f[vh]
+    if valid_floor_z.size or valid_hm_z.size:
+        zs_parts = [
+            valid_floor_z if valid_floor_z.size else np.array([]),
+            valid_hm_z    if valid_hm_z.size    else np.array([]),
+        ]
+        if has_path:
+            zs_parts.append(np.array([pts[:, 2].min(),
+                                       pts[:, 2].max() + camera_height]))
+        zs = np.concatenate(zs_parts)
+        z_lo, z_hi = float(zs.min()), float(zs.max())
+        pad = max(2.0, (z_hi - z_lo) * 0.1)
+        ax.set_ylim(z_lo - pad, z_hi + pad)
+    else:
+        ax.set_ylim(max_z - 50, max_z + 5)
     ax.legend(fontsize=8, markerscale=4)
 
 plt.tight_layout()
@@ -195,64 +243,102 @@ fig.savefig(out2, dpi=150); plt.close(fig)
 print(f"Saved {out2}")
 
 
-# ── Figure 3: 2D bridging concept demo ────────────────────────────────────
+# ── Figure 3: flat-plane bridging demo (production params) ───────────────
+# Synthetic 1-D terrain at constant Z=50 m, with 3 NaN gap patches.  Uses the
+# same alpha/gravity/dt as the production fit so the bridging behaviour you
+# see here matches what the snake does on the real scene.
 from genesis_tools.active_contour.terrain_snake import TerrainSnake
 
-np.random.seed(42)
+PROD_ALPHA   = 0.5    # matches fit_terrain_contour default
+PROD_GRAVITY = 0.1
+PROD_DT      = 1.0
+
 N = 200
 x1d = np.linspace(-100, 100, N)
-true_z = 10 * np.sin(x1d / 30) + 4 * np.sin(x1d / 9) + 50.0
+flat_z = np.full(N, 50.0)
 
-# Three vegetation / obstacle gaps (no downward hit)
+# Three gap patches where the downward ray missed (vegetation, water, cloud).
 gaps = [(40, 20), (100, 15), (155, 12)]
 miss = np.zeros(N, bool)
 for s, l in gaps:
     miss[s:s + l] = True
-hits_1d = np.where(miss, np.nan, true_z + np.random.randn(N) * 0.2)
+hits_1d = np.where(miss, np.nan, flat_z)
 
+# Cloth sized (N, 1) — TerrainSnake is 2-D internally, but a 1-cell strip in
+# Y exercises only the X-direction Laplacian, which is what we want to show.
 floor_2d = hits_1d.reshape(N, 1)
 demo = TerrainSnake(
     terrain_z_floor=floor_2d,
-    bounds=(-100, -0.5, 100, 0.5, 0.0, 100.0),
-    res=1.0, alpha=0.5, gravity=0.5, dt=1.0,
+    bounds=(-100.0, -0.5, 100.0, 0.5, 0.0, 100.0),
+    res=1.0,
+    alpha=PROD_ALPHA, gravity=PROD_GRAVITY, dt=PROD_DT,
     max_iterations=600, convergence_threshold=1e-3,
-    # Large start_height so valid columns also begin at ~z_max (flat at top),
-    # matching the conceptual illustration of "cloth falls from high above".
-    start_height=float(100.0 - np.nanmean(hits_1d)),
+    # Start every cloth vertex high above the plane so the fall is visible
+    # in the figure (mirrors the production "cloth_init_z = camera_z" case
+    # where camera_z sits above the terrain).
+    cloth_init_z=80.0,
 )
 
+# Capture cloth at several iterations so the evolution is visible.
+snap_iters = [0, 20, 60, 150]
 snaps = {}
-for target in [0, 5, 20, 80]:
+for target in snap_iters:
     while demo.iterations_run < target:
         demo.step()
     snaps[target] = demo.to_heightmap()[:, 0].copy()
 demo.fit()
 snaps["final"] = demo.to_heightmap()[:, 0].copy()
+final_iters = demo.iterations_run
 
 fig, ax = plt.subplots(figsize=(14, 6))
 fig.suptitle(
-    "TerrainSnake — How the Cloth Bridges Vegetation Gaps\n"
-    "(synthetic 2-D profile, 3 gap patches in orange)",
-    fontsize=12,
+    f"TerrainSnake — Cloth bridging on a flat plane (production params: "
+    f"α={PROD_ALPHA}, gravity={PROD_GRAVITY}/step, dt={PROD_DT})\n"
+    f"Synthetic 1-D profile with 3 gap patches; cloth init Z = 80 m, true plane at 50 m",
+    fontsize=11,
 )
 
-ax.plot(x1d, true_z, "k--", lw=1.2, alpha=0.35, label="true terrain (not seen by rays)")
-ax.scatter(x1d[~miss], hits_1d[~miss], s=14, c="darkorange", zorder=5,
-           label="ray-cast hits (sampling points)")
+# Reference plane + ray-cast hits
+ax.axhline(50.0, color="k", lw=1.0, ls="--", alpha=0.5,
+           label="true terrain plane (Z = 50 m)")
+ax.scatter(x1d[~miss], hits_1d[~miss], s=10, c="darkorange", zorder=5,
+           label="ray-cast hits (valid columns)")
+
+# Gap shading
 for s, l in gaps:
     kw = {"alpha": 0.12, "color": "forestgreen"}
     if s == gaps[0][0]:
-        kw["label"] = "vegetation gap (NaN column)"
+        kw["label"] = "NaN gap (no ray hit — bridged by Laplacian)"
     ax.axvspan(x1d[s], x1d[min(s + l, N - 1)], **kw)
 
+# Cloth evolution
 evolution_colors = ["#ccccff", "#9999ee", "#6666cc", "#3333aa"]
-for (step, c) in zip([0, 5, 20, 80], evolution_colors):
-    ax.plot(x1d, snaps[step], color=c, lw=0.9, label=f"cloth @ iter {step}")
-ax.plot(x1d, snaps["final"], "b-", lw=2.2, label="final cloth (snake converged)")
-ax.plot(x1d, snaps["final"] + 1.7, "r--", lw=1.3, label="camera eye (cloth + 1.7 m)")
+for it, c in zip(snap_iters, evolution_colors):
+    ax.plot(x1d, snaps[it], color=c, lw=0.9, label=f"cloth @ iter {it}")
+ax.plot(x1d, snaps["final"], "b-", lw=2.2,
+        label=f"final cloth (iter {final_iters})")
+ax.plot(x1d, snaps["final"] + 1.7, "r--", lw=1.3,
+        label="camera eye (cloth + 1.7 m)")
+
+# Annotate gap droop = how far cloth dips below the plane in each gap
+gap_centres = [s + l // 2 for s, l in gaps]
+for c_idx in gap_centres:
+    droop = 50.0 - float(snaps["final"][c_idx])
+    if droop > 0.05:
+        ax.annotate(f"droop {droop:.2f} m",
+                    xy=(x1d[c_idx], snaps["final"][c_idx]),
+                    xytext=(x1d[c_idx], snaps["final"][c_idx] - 3.0),
+                    ha="center", fontsize=8, color="#222266",
+                    arrowprops=dict(arrowstyle="->", color="#222266", lw=0.7))
 
 ax.set_xlabel("X (m)"); ax.set_ylabel("Z (m)")
-ax.set_ylim(30, 105)
+# Auto-range to the data with a small pad
+all_z = np.concatenate([
+    np.array([50.0, 80.0]),
+    *[snaps[k] for k in (snap_iters + ["final"])],
+])
+ax.set_ylim(float(all_z.min()) - 3.0, float(all_z.max()) + 3.0)
+
 handles, labels = ax.get_legend_handles_labels()
 seen = {}
 for h, l in zip(handles, labels):

@@ -2,7 +2,7 @@
 
 **Scene**: `arctic_midnight_sun/fine_scene.blend` (917 MB, unit_scale=1.0, 1 BU = 1 m)
 **Date**: 2026-05-04
-**Render**: Windows Blender 4.5 + **EEVEE** (BLENDER_EEVEE_NEXT, 64 samples, ~8 s/frame)
+**Render**: Windows Blender 4.5 + **Cycles GPU (OPTIX, RTX 5090)**, 64 spp + OpenImageDenoise, 640 × 480, ~2.7 s/frame
 
 ---
 
@@ -71,33 +71,90 @@ Camera at first frame: `cloth_heightmap(−70, 10) + 1.7 m ≈ 11 m` above sea l
 
 ![arctic v56 walkthrough](assets/arctic_midnight_sun_v1/arctic_v56_walkthrough.gif)
 
-*(120 frames sampled every 12th frame, 83 ms/frame ≈ 12 fps. To be regenerated once full render completes.)*
+*(120 frames sampled every 8th frame from a 960-frame render @ 12 fps × 80 s, 83 ms/frame ≈ 12 fps preview)*
 
 For the first time in v54–v56, the rendered frames show the actual arctic landscape: golden midnight-sun horizon, brown/tan tundra hills, pale-blue lake patches, scattered grass tufts in the foreground.
+
+### Render config
+
+| Setting | Value |
+|---------|-------|
+| Engine | Cycles |
+| GPU | NVIDIA RTX 5090 via OPTIX (auto-detected by `_render_frames.py`) |
+| Resolution | 640 × 480 |
+| Samples | 64 |
+| Denoiser | OpenImageDenoise (RGB+Albedo+Normal passes, ACCURATE prefilter) |
+| Adaptive sampling | enabled, threshold 0.01, min samples 4 |
+| Frames | 960 (12 fps × 80 s, capped under the 1000-frame budget) |
+| Total render time | ~45 min (≈ 2.7 s/frame after first-frame scene sync of ~30 s) |
 
 ---
 
 ## Phase 1 Visualisations
 
+### Figure 0 — Initial Cloth vs Final Cloth
+
+![figure 0](assets/arctic_midnight_sun_v1/figure_0_initial_vs_final.png)
+
+- **Left (XY top)**: Blue = the 2 500 island columns with direct ray-cast hits.
+  Orange = 29 900 NaN columns (no hit) — these get bridged by the Laplacian
+  rather than constrained by a floor.
+- **Centre (XZ front) / Right (YZ side)**: Orange = initial cloth (flat at
+  z_max = 130 m as drawn here for scale, but the actual init in v56 is at
+  camera_z = 2.72 m).  Blue = final cloth, settled near terrain ≈ 0–20 m
+  on the island and free-fallen to ≈ −17 m on NaN ocean columns.
+
 ### Figure 1 — Top-Down: Ray Hits vs Snake Heightmap vs NaN columns
 
 ![figure 1](assets/arctic_midnight_sun_v1/figure_1_top_down.png)
 
-- **Left**: Ray-cast coverage. The 1000 m × 1000 m green square at the centre = the 2 500 columns where the downward ray hit the island terrain. The surrounding red area = open ocean / void columns where no terrain hit was registered.
-- **Centre**: Snake heightmap. The island shows the actual terrain elevations (brown ≈ 0 m, white-yellow ≈ +20 m). NaN columns surrounding the island fell to ≈ −17 m under unconstrained gravity (they are excluded from the walkable set via the `terrain_z_floor` mask). The red camera path covers the whole island; yellow waypoint at the seeded first-waypoint position.
+- **Left**: Ray-cast coverage. The 1000 m × 1000 m green square at the centre =
+  the 2 500 columns where the downward ray hit the island terrain. The
+  surrounding red area = open ocean / void columns where no terrain hit was
+  registered.
+- **Centre**: Snake heightmap. The island shows the actual terrain elevations
+  (brown ≈ 0 m, white-yellow ≈ +20 m). NaN columns surrounding the island fell
+  to ≈ −17 m under unconstrained gravity (excluded from the walkable set via
+  the `terrain_z_floor` mask). The red camera path covers the whole island;
+  yellow dots = the 20 waypoints (now correctly converted from voxel indices
+  → world XY).
 - **Right**: NaN-domain columns (29 900 cells, 92 % of grid).
 
 ### Figure 2 — Side Profiles
 
 ![figure 2](assets/arctic_midnight_sun_v1/figure_2_side_profiles.png)
 
-*(Note: the existing viz script's Y axis is hard-coded to the v54 cloud-altitude range 80–135 m, so this figure renders blank with the new −20 to +20 m data. Will be patched in a follow-up.)*
+XZ and YZ projections of every grid column. **Note that each X (or Y) bucket
+stacks all 180 rows worth of column Z values — the vertical streaks visible
+on the island portion are the ±500 m XY extent of the island compressed onto
+one axis.**
+
+- Orange ≈ ray-cast hit Z (only present on the 2 500 valid columns at
+  Z ∈ [0, 20 m])
+- Blue ≈ snake cloth Z. On the island the cloth tracks the ray hits closely.
+  Outside the island the cloth has no floor constraint, so 200 iterations of
+  gravity drop it from cloth_init_z = 2.72 m to ≈ −17 m (visible as the flat
+  blue floor at the bottom of the plot)
+- Red ≈ camera eye position (cloth + 1.7 m), confined to the path's X (or Y)
+  extent
+
+### Figure 3 — Bridging Demo (synthetic concept illustration)
+
+![figure 3](assets/arctic_midnight_sun_v1/figure_3_bridging_demo.png)
+
+This is a **synthetic 1-D illustration** (not derived from arctic data) showing
+how the cloth bridges three vegetation gaps where the downward ray returns no
+hit. `alpha = 0.5` is used to make the bridging visually obvious; production
+runs may want a smaller alpha for subtler blending.
 
 ### Figure 4 — Convergence
 
 ![figure 4](assets/arctic_midnight_sun_v1/figure_4_convergence.png)
 
-Max displacement drops from 16 m at iter 0 (cloth init at camera Z = 2.72 m → floor constraint immediately lifts each valid column to its terrain Z) down to 0.016 m at iter 200. The remaining displacement comes from Laplacian smoothing across the NaN ocean boundary.
+Max displacement drops from 16 m at iter 0 (cloth init at camera Z = 2.72 m →
+floor constraint immediately lifts each valid column to its terrain Z) down to
+0.016 m at iter 200. The remaining displacement comes from Laplacian smoothing
+across the NaN ocean boundary.
 
 ---
 
@@ -162,19 +219,40 @@ Phase 2: path planning + per-frame camera Z
 
 | Content | Path |
 |---------|------|
-| GIF (TBD) | `docs/assets/arctic_midnight_sun_v1/arctic_v56_walkthrough.gif` |
+| GIF (120 sampled frames) | `docs/assets/arctic_midnight_sun_v1/arctic_v56_walkthrough.gif` |
+| Fig 0 — initial vs final cloth | `docs/assets/arctic_midnight_sun_v1/figure_0_initial_vs_final.png` |
 | Fig 1 — top-down + path | `docs/assets/arctic_midnight_sun_v1/figure_1_top_down.png` |
+| Fig 2 — side profiles | `docs/assets/arctic_midnight_sun_v1/figure_2_side_profiles.png` |
+| Fig 3 — bridging demo | `docs/assets/arctic_midnight_sun_v1/figure_3_bridging_demo.png` |
 | Fig 4 — convergence | `docs/assets/arctic_midnight_sun_v1/figure_4_convergence.png` |
 | Run script | `run_arctic_midnight_sun_v1.py` |
 | Terrain NPZ | `results/arctic_midnight_sun_v1/terrain_snake.npz` |
 | Walkthrough blend | `results/arctic_midnight_sun_v1/fine_scene_walkthrough.blend` |
-| Frames (1440) | `results/arctic_midnight_sun_v1/frames/` |
+| Frames (960) | `results/arctic_midnight_sun_v1/frames/` |
 
 ---
 
 ## Known Issues / Future Work
 
-1. **`figure_2_side_profiles.png` Y-axis hard-coded** — viz script needs auto-ranging or a config knob; figure currently renders blank with v56's −20 to +20 m data
-2. **Reserved classifier labels not implemented** — `OPENVDB_VOLUME`, `HIDDEN`, `SKY_DOME`, `ENVIRONMENT_DOME`, `PARTICLE_INSTANCE` constants exist in `SceneObjectClassifier` with TODO comments. Add per scene that breaks the current heuristic.
-3. **`KoleClouds`-style detection only catches VolumeScatter** — Vegetation that uses VolumeScatter (rare) would also be skipped. Future heuristic should also consider bbox extent and surface contribution.
-4. **Sub-metre clipping into mesh detail** — cloth heightmap is a 20 m smoothed approximation; per-frame camera Z can still be a bit below local mesh peaks. Finer voxel resolution or per-frame `scene.ray_cast` verification would fix.
+1. **`atmosphere` / `atmosphere_fine` are not skipped** — these are Infinigen
+   fog/atmosphere meshes that use `ShaderNodeVolumePrincipled` (water-like) so
+   they pass the current `VolumeScatter`-only filter. They didn't show up as
+   ray hits in the arctic test column, but other scenes might. Future heuristic
+   may need to also flag Principled-volume meshes whose bbox is well above the
+   camera.
+2. **Reserved classifier labels not implemented** — `OPENVDB_VOLUME`,
+   `HIDDEN`, `SKY_DOME`, `ENVIRONMENT_DOME`, `PARTICLE_INSTANCE` constants
+   exist in `SceneObjectClassifier` with TODO comments. Add per scene that
+   breaks the current heuristic.
+3. **Wasted Pass-1 budget** — 92 % of the 180 × 180 grid lands in
+   ocean / void columns with no terrain hit. `fit_terrain_contour.py` was
+   recently extended with a two-pass refine that re-grids the tight XY bbox
+   of valid hits at finer resolution; the current v56 results predate that
+   refinement.
+4. **Sub-metre clipping into mesh detail** — cloth heightmap is a 20 m
+   smoothed approximation; per-frame camera Z can still be a bit below local
+   mesh peaks. Finer voxel resolution or per-frame `scene.ray_cast`
+   verification would fix.
+5. **Figure 3 is a synthetic illustration**, not a measurement — the cloth's
+   apparent stiffness comes from a deliberately-large `alpha = 0.5` for
+   visual clarity, not the production fit's behaviour.
