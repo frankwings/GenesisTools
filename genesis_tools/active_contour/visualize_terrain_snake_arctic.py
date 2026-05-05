@@ -1,17 +1,25 @@
 """Visualize TerrainSnake results for arctic_midnight_sun_*.
 
-Usage:
-    python visualize_terrain_snake_arctic.py [result_dir]
+Usage (from the GenesisTools repo root):
+    python genesis_tools/active_contour/visualize_terrain_snake_arctic.py [result_dir]
 
 Default result_dir = results/arctic_midnight_sun_v1.  path.npz is optional —
 when missing, fig 1/2 omit the camera-path overlay.
+
+Path conventions: `result_dir` is interpreted relative to the current
+working directory (the repo root in normal use).  The script writes
+figures to `<result_dir>/viz/`.
 
 5 figures (same style as Snake3D visualizations):
   fig0 -- initial cloth (flat at z_max) vs final cloth (settled on terrain)
   fig1 -- top-down: raw terrain hits vs snake heightmap
   fig2 -- XZ and YZ side profiles: hits, snake cloth, camera path
-  fig3 -- bridging demo: conceptual 2D cross-section showing gap bridging
+  fig3 -- camera-anchored projections: XY top-down + XZ + YZ cross-sections
   fig4 -- convergence: max displacement per iteration
+
+All 1-D slice / cross-section figures in this file are anchored at the
+original scene camera's XY — see `camera_anchored_slice.py` for the
+convention and the helpers used to pick the slice indices.
 """
 import sys
 sys.path.insert(0, ".")
@@ -21,6 +29,12 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
+
+from genesis_tools.active_contour.camera_anchored_slice import (
+    camera_anchored_iy as _camera_anchored_iy,
+    camera_anchored_ix as _camera_anchored_ix,
+)
+
 
 RESULT_DIR = Path(sys.argv[1]) if len(sys.argv) > 1 \
     else Path("results/arctic_midnight_sun_v1")
@@ -243,108 +257,193 @@ fig.savefig(out2, dpi=150); plt.close(fig)
 print(f"Saved {out2}")
 
 
-# ── Figure 3: flat-plane bridging demo (production params) ───────────────
-# Synthetic 1-D terrain at constant Z=50 m, with 3 NaN gap patches.  Uses the
-# same alpha/gravity/dt as the production fit so the bridging behaviour you
-# see here matches what the snake does on the real scene.
-from genesis_tools.active_contour.terrain_snake import TerrainSnake
-
-PROD_ALPHA   = 0.5    # matches fit_terrain_contour default
+# ── Figure 3: camera-anchored projections (XY + XZ + YZ) ────────────────
+# Three views of the v57 fit, all anchored at the original scene camera:
+#   Panel A — XY top-down: cloth heightmap with green overlay marking the
+#             bridged (NaN-floor) cells, plus dashed lines showing where
+#             Panel B and Panel C take their cuts.
+#   Panel B — XZ vertical cross-section (vary X along Y = camera_Y).
+#   Panel C — YZ vertical cross-section (vary Y along X = camera_X).
+# Same colour key across all three panels (orange = ray-cast hit,
+# blue = cloth, red = camera eye, green = bridged region, yellow ★ =
+# camera).  Panels B/C share `_draw_vertical_slice()`.  Real v57 data.
+PROD_ALPHA   = 0.5
 PROD_GRAVITY = 0.1
 PROD_DT      = 1.0
 
-N = 200
-x1d = np.linspace(-100, 100, N)
-flat_z = np.full(N, 50.0)
+camera_xyz = data["camera_xyz"] if "camera_xyz" in data.files else None
+if camera_xyz is None:
+    cam_x_w = (min_x + max_x) / 2.0
+    cam_y_w = (min_y + max_y) / 2.0
+    cam_z_w = float(max_z)
+else:
+    cam_x_w = float(camera_xyz[0])
+    cam_y_w = float(camera_xyz[1])
+    cam_z_w = float(camera_xyz[2])
 
-# Three gap patches where the downward ray missed (vegetation, water, cloud).
-gaps = [(40, 20), (100, 15), (155, 12)]
-miss = np.zeros(N, bool)
-for s, l in gaps:
-    miss[s:s + l] = True
-hits_1d = np.where(miss, np.nan, flat_z)
+slice_iy = _camera_anchored_iy(camera_xyz, min_y, res, ny)
+slice_ix = _camera_anchored_ix(camera_xyz, min_x, res, nx)
+slice_y_actual = min_y + (slice_iy + 0.5) * res
+slice_x_actual = min_x + (slice_ix + 0.5) * res
 
-# Cloth sized (N, 1) — TerrainSnake is 2-D internally, but a 1-cell strip in
-# Y exercises only the X-direction Laplacian, which is what we want to show.
-floor_2d = hits_1d.reshape(N, 1)
-demo = TerrainSnake(
-    terrain_z_floor=floor_2d,
-    bounds=(-100.0, -0.5, 100.0, 0.5, 0.0, 100.0),
-    res=1.0,
-    alpha=PROD_ALPHA, gravity=PROD_GRAVITY, dt=PROD_DT,
-    max_iterations=600, convergence_threshold=1e-3,
-    # Start every cloth vertex high above the plane so the fall is visible
-    # in the figure (mirrors the production "cloth_init_z = camera_z" case
-    # where camera_z sits above the terrain).
-    cloth_init_z=80.0,
-)
 
-# Capture cloth at several iterations so the evolution is visible.
-snap_iters = [0, 20, 60, 150]
-snaps = {}
-for target in snap_iters:
-    while demo.iterations_run < target:
-        demo.step()
-    snaps[target] = demo.to_heightmap()[:, 0].copy()
-demo.fit()
-snaps["final"] = demo.to_heightmap()[:, 0].copy()
-final_iters = demo.iterations_run
+def _draw_vertical_slice(ax, axis_label: str,
+                          coord_along: np.ndarray,
+                          floor_1d: np.ndarray, cloth_1d: np.ndarray,
+                          coord_lo: float, coord_hi: float,
+                          camera_along: float, camera_z: float,
+                          slice_other: float, other_label: str):
+    """Plot one vertical (XZ or YZ) slice through the camera.
 
-fig, ax = plt.subplots(figsize=(14, 6))
+    coord_along: 1-D array of world coords along the slice axis (X or Y).
+    floor_1d / cloth_1d: 1-D terrain-floor and cloth Z arrays along the slice.
+    coord_lo/hi: world-coord range of the slice axis.
+    camera_along: camera position on the slice axis.
+    slice_other: the constant value of the perpendicular axis (Y for an
+                 XZ slice, X for a YZ slice).
+    """
+    valid = ~np.isnan(floor_1d)
+    nan_   = ~valid
+    n_v = int(valid.sum()); n_n = int(nan_.sum())
+
+    # Shade NaN runs
+    nan_label_used = False
+    in_nan = False
+    nan_start = 0
+    n = len(coord_along)
+    cell = (coord_hi - coord_lo) / max(1, n)
+    for i in range(n):
+        if nan_[i] and not in_nan:
+            nan_start = i; in_nan = True
+        elif not nan_[i] and in_nan:
+            kw = {"alpha": 0.13, "color": "forestgreen"}
+            if not nan_label_used:
+                kw["label"] = "NaN gap (Laplacian-bridged)"
+                nan_label_used = True
+            ax.axvspan(coord_along[nan_start] - cell/2,
+                       coord_along[i-1]      + cell/2, **kw)
+            in_nan = False
+    if in_nan:
+        kw = {"alpha": 0.13, "color": "forestgreen"}
+        if not nan_label_used:
+            kw["label"] = "NaN gap (Laplacian-bridged)"
+        ax.axvspan(coord_along[nan_start] - cell/2,
+                   coord_along[n-1]      + cell/2, **kw)
+
+    # Hits + cloth (solid over hits, dashed over bridged)
+    ax.scatter(coord_along[valid], floor_1d[valid],
+               s=12, c="darkorange", zorder=5, label="ray-cast hits (terrain Z)")
+    cloth_on_hits = np.where(valid, cloth_1d, np.nan)
+    cloth_bridged = np.where(nan_,  cloth_1d, np.nan)
+    ax.plot(coord_along, cloth_on_hits, "b-", lw=1.6,
+            label="snake cloth (over real hits)")
+    if n_n > 0:
+        ax.plot(coord_along, cloth_bridged, "b--", lw=1.4, alpha=0.7,
+                label="snake cloth (Laplacian-bridged)")
+
+    # Camera eye + camera anchor
+    camera_eye = cloth_1d + 1.7
+    ax.plot(coord_along, camera_eye, "r-", lw=1.0, alpha=0.8,
+            label="camera eye (cloth + 1.7 m)")
+    ax.scatter([camera_along], [camera_z], marker="*", s=180, c="yellow",
+               edgecolor="black", linewidth=0.8, zorder=6,
+               label=f"original camera @ Z={camera_z:.2f} m")
+
+    title = f"{axis_label}Z cross-section ({other_label} = {slice_other:.1f} m) " \
+            f"— {n_v} valid / {n_n} NaN"
+    ax.set_title(title, fontsize=10)
+    ax.set_xlabel(f"{axis_label} (m)"); ax.set_ylabel("Z (m)")
+    all_z = np.concatenate([floor_1d[valid], cloth_1d, camera_eye,
+                            np.array([camera_z])])
+    z_lo, z_hi = float(np.nanmin(all_z)), float(np.nanmax(all_z))
+    pad = max(2.0, (z_hi - z_lo) * 0.1)
+    ax.set_ylim(z_lo - pad, z_hi + pad)
+    ax.set_xlim(coord_lo, coord_hi)
+    ax.grid(True, alpha=0.25)
+    ax.legend(fontsize=8, loc="upper right")
+
+
+# Slice arrays
+xs_slice = min_x + (np.arange(nx) + 0.5) * res        # (nx,)
+ys_slice = min_y + (np.arange(ny) + 0.5) * res        # (ny,)
+floor_xz = floor_raw[:, slice_iy]                     # XZ slice (vary X, fix Y)
+cloth_xz = heightmap[:, slice_iy]
+floor_yz = floor_raw[slice_ix, :]                     # YZ slice (vary Y, fix X)
+cloth_yz = heightmap[slice_ix, :]
+
+fig, axes = plt.subplots(1, 3, figsize=(24, 6),
+                         gridspec_kw={"width_ratios": [1.0, 1.4, 1.4]})
 fig.suptitle(
-    f"TerrainSnake — Cloth bridging on a flat plane (production params: "
-    f"α={PROD_ALPHA}, gravity={PROD_GRAVITY}/step, dt={PROD_DT})\n"
-    f"Synthetic 1-D profile with 3 gap patches; cloth init Z = 80 m, true plane at 50 m",
+    f"TerrainSnake — Camera-anchored projections (XY top-down + XZ + YZ cross-sections)\n"
+    f"Original scene camera @ ({cam_x_w:.1f}, {cam_y_w:.1f}, {cam_z_w:.2f}) m | "
+    f"Production params: α={PROD_ALPHA}, gravity={PROD_GRAVITY}/step, dt={PROD_DT}",
     fontsize=11,
 )
 
-# Reference plane + ray-cast hits
-ax.axhline(50.0, color="k", lw=1.0, ls="--", alpha=0.5,
-           label="true terrain plane (Z = 50 m)")
-ax.scatter(x1d[~miss], hits_1d[~miss], s=10, c="darkorange", zorder=5,
-           label="ray-cast hits (valid columns)")
+# ── Panel A: XY top-down bridging projection ───────────────────────────
+# Cloth heightmap as base; overlay a green semi-transparent mask on cells
+# whose terrain_z_floor is NaN (i.e. cloth is Laplacian-bridged here, not
+# pinned to a real ray-cast hit).  Mirrors the green NaN-gap shading in
+# Panels B/C so all three views show "the same bridging" from different
+# angles.
+ax = axes[0]
+hm_disp = np.where(valid_hmap, heightmap, np.nan)
+vmin = float(np.nanmin(hm_disp)) - 2; vmax = float(np.nanmax(hm_disp)) + 2
+im = ax.imshow(hm_disp.T, origin="lower",
+               extent=[min_x, max_x, min_y, max_y],
+               cmap="terrain", vmin=vmin, vmax=vmax, aspect="equal")
+plt.colorbar(im, ax=ax, label="cloth Z (m)", fraction=0.046, pad=0.04)
 
-# Gap shading
-for s, l in gaps:
-    kw = {"alpha": 0.12, "color": "forestgreen"}
-    if s == gaps[0][0]:
-        kw["label"] = "NaN gap (no ray hit — bridged by Laplacian)"
-    ax.axvspan(x1d[s], x1d[min(s + l, N - 1)], **kw)
+# Bridged cells: terrain_z_floor is NaN. Plot as a green RGBA overlay so
+# the user sees exactly where (in 2-D) the cloth is bridging without
+# floor support — green elsewhere fully transparent.
+bridged_xy = np.isnan(floor_raw) & ~np.isnan(heightmap)
+overlay = np.zeros((ny, nx, 4), dtype=np.float32)
+br_T = bridged_xy.T
+overlay[br_T, 0] = 0.13   # R
+overlay[br_T, 1] = 0.55   # G — forestgreen-ish
+overlay[br_T, 2] = 0.13   # B
+overlay[br_T, 3] = 0.55   # A
+ax.imshow(overlay, origin="lower",
+          extent=[min_x, max_x, min_y, max_y], aspect="equal",
+          interpolation="nearest")
 
-# Cloth evolution
-evolution_colors = ["#ccccff", "#9999ee", "#6666cc", "#3333aa"]
-for it, c in zip(snap_iters, evolution_colors):
-    ax.plot(x1d, snaps[it], color=c, lw=0.9, label=f"cloth @ iter {it}")
-ax.plot(x1d, snaps["final"], "b-", lw=2.2,
-        label=f"final cloth (iter {final_iters})")
-ax.plot(x1d, snaps["final"] + 1.7, "r--", lw=1.3,
-        label="camera eye (cloth + 1.7 m)")
+n_bridged_xy = int(bridged_xy.sum())
+# Slice lines for the XZ (Panel B) and YZ (Panel C) cuts
+ax.axhline(slice_y_actual, color="red", lw=1.2, ls="--", alpha=0.85,
+           label=f"XZ slice (Y={slice_y_actual:.1f} m)")
+ax.axvline(slice_x_actual, color="purple", lw=1.2, ls="--", alpha=0.85,
+           label=f"YZ slice (X={slice_x_actual:.1f} m)")
+ax.scatter([cam_x_w], [cam_y_w], marker="*", s=180, c="yellow",
+           edgecolor="black", linewidth=0.8, zorder=6,
+           label="original camera (XY)")
+from matplotlib.patches import Patch
+bridge_patch = Patch(facecolor=(0.13, 0.55, 0.13, 0.55),
+                     edgecolor="none",
+                     label=f"bridged cells ({n_bridged_xy:,}, "
+                           f"{100*n_bridged_xy//(nx*ny)}% of grid)")
+handles, _ = ax.get_legend_handles_labels()
+ax.legend(handles=handles + [bridge_patch], fontsize=8, loc="upper right")
+ax.set_title("XY top-down — heightmap + bridged cells (green)", fontsize=10)
+ax.set_xlabel("X (m)"); ax.set_ylabel("Y (m)")
+ax.set_xlim(min_x, max_x); ax.set_ylim(min_y, max_y)
 
-# Annotate gap droop = how far cloth dips below the plane in each gap
-gap_centres = [s + l // 2 for s, l in gaps]
-for c_idx in gap_centres:
-    droop = 50.0 - float(snaps["final"][c_idx])
-    if droop > 0.05:
-        ax.annotate(f"droop {droop:.2f} m",
-                    xy=(x1d[c_idx], snaps["final"][c_idx]),
-                    xytext=(x1d[c_idx], snaps["final"][c_idx] - 3.0),
-                    ha="center", fontsize=8, color="#222266",
-                    arrowprops=dict(arrowstyle="->", color="#222266", lw=0.7))
-
-ax.set_xlabel("X (m)"); ax.set_ylabel("Z (m)")
-# Auto-range to the data with a small pad
-all_z = np.concatenate([
-    np.array([50.0, 80.0]),
-    *[snaps[k] for k in (snap_iters + ["final"])],
-])
-ax.set_ylim(float(all_z.min()) - 3.0, float(all_z.max()) + 3.0)
-
-handles, labels = ax.get_legend_handles_labels()
-seen = {}
-for h, l in zip(handles, labels):
-    if l not in seen:
-        seen[l] = h
-ax.legend(seen.values(), seen.keys(), fontsize=9, loc="upper right")
+# ── Panel B: XZ cross-section (vary X along camera-Y row) ──────────────
+_draw_vertical_slice(
+    axes[1], axis_label="X",
+    coord_along=xs_slice, floor_1d=floor_xz, cloth_1d=cloth_xz,
+    coord_lo=min_x, coord_hi=max_x,
+    camera_along=cam_x_w, camera_z=cam_z_w,
+    slice_other=slice_y_actual, other_label="Y",
+)
+# ── Panel C: YZ cross-section (vary Y along camera-X column) ───────────
+_draw_vertical_slice(
+    axes[2], axis_label="Y",
+    coord_along=ys_slice, floor_1d=floor_yz, cloth_1d=cloth_yz,
+    coord_lo=min_y, coord_hi=max_y,
+    camera_along=cam_y_w, camera_z=cam_z_w,
+    slice_other=slice_x_actual, other_label="X",
+)
 
 plt.tight_layout()
 out3 = OUT_DIR / "figure_3_bridging_demo.png"
