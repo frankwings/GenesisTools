@@ -4,7 +4,16 @@ Called by BlenderRunner. Scene .blend is pre-loaded by blender --background.
 """
 import json
 import sys
+from pathlib import Path
 import bpy
+
+# Ensure genesis_tools is importable when running under an external Blender
+# (e.g. Windows Blender) whose Python env doesn't have genesis_tools installed.
+# __file__ is .../GenesisTools/genesis_tools/walkthrough_renderer/pipeline/_render_frames.py
+# → parents[3] is the GenesisTools root containing the genesis_tools package.
+_gt_root = str(Path(__file__).resolve().parents[3])
+if _gt_root not in sys.path:
+    sys.path.insert(0, _gt_root)
 
 # Parse --config argument
 config_path = None
