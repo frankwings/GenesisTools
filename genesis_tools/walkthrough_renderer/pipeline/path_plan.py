@@ -391,12 +391,48 @@ def _cast_all_hits_bidir(origin, direction, max_dist):
 def _build_smooth_path(tour: list, walkable: set, config: dict, bounds: tuple,
                        n_iters: int = 5) -> list:
     """BFS corridor + Laplacian smoothing + 4x upsample (requires bpy)."""
-    import bpy
+    import bpy, math
     from mathutils import Vector as _V
 
     min_x = bounds[0]; min_y = bounds[1]; min_z = bounds[4]
     res = config.get("_effective_grid_resolution", config["grid_resolution"])
     cam_h_bu = config.get("camera_height", 1.7) / config.get("_unit_scale", 1.0)
+
+    # --- Terrain heightmap for Z floor clamping ----------------------------
+    # When a terrain_npz is available, every smoothed and upsampled point is
+    # guaranteed to have Z >= heightmap[ix, iy] + cam_h_bu.  This prevents
+    # Laplacian averaging from pulling the path below the terrain surface
+    # (the voxel-grid Z clamp alone is too coarse: one voxel = hundreds of BU).
+    heightmap = None
+    h_min_x = h_min_y = h_res = 0.0
+    h_nx = h_ny = 0
+    terrain_npz = config.get("terrain_npz")
+    if terrain_npz:
+        import numpy as _np
+        _td = _np.load(terrain_npz)
+        heightmap = _td["heightmap"].astype(float)   # (nx, ny) world-space Z
+        _hb = _td["bounds"]
+        h_min_x, h_min_y = float(_hb[0]), float(_hb[1])
+        h_res = float(_td["res"])
+        h_nx, h_ny = heightmap.shape
+
+    def _terrain_floor_z(wx: float, wy: float) -> float | None:
+        """Return terrain Z at world (wx, wy), or None if outside grid / NaN."""
+        if heightmap is None:
+            return None
+        ix = max(0, min(h_nx - 1, int((wx - h_min_x) / h_res)))
+        iy = max(0, min(h_ny - 1, int((wy - h_min_y) / h_res)))
+        z = heightmap[ix, iy]
+        return None if math.isnan(z) else float(z)
+
+    def _clamp_above_terrain(pt: list) -> list:
+        """Ensure pt[2] >= terrain surface + camera height."""
+        floor_z = _terrain_floor_z(pt[0], pt[1])
+        if floor_z is not None:
+            pt[2] = max(pt[2], floor_z + cam_h_bu)
+        return pt
+
+    # -----------------------------------------------------------------------
 
     cell_path = []
     n = len(tour)
@@ -419,8 +455,6 @@ def _build_smooth_path(tour: list, walkable: set, config: dict, bounds: tuple,
             walkable_xy[(ix, iy)] = (min(lo, iz), max(hi, iz))
 
     def c2w(cell):
-        # Place path at voxel centre on all three axes so it aligns with the
-        # voxel spheres in the debug visualisation (primitives.py uses +0.5 everywhere).
         ix, iy, iz = cell
         return [min_x+(ix+0.5)*res, min_y+(iy+0.5)*res, min_z+(iz+0.5)*res]
 
@@ -440,29 +474,26 @@ def _build_smooth_path(tour: list, walkable: set, config: dict, bounds: tuple,
     for _ in range(n_iters):
         new_pts = [points[0]]
         for i in range(1, len(points)-1):
-            # Average all three axes — previously only XY was averaged and Z was
-            # snapped to the floor voxel, which destroyed aerial height information
-            # and caused large dZ jumps at voxel-cell boundaries.
             sx = (points[i-1][0]+points[i][0]+points[i+1][0])/3.0
             sy = (points[i-1][1]+points[i][1]+points[i+1][1])/3.0
             sz = (points[i-1][2]+points[i][2]+points[i+1][2])/3.0
             ix = int((sx-min_x)/res); iy = int((sy-min_y)/res)
             if (ix, iy) in walkable_xy:
-                # Clamp Z to the walkable voxel range at this XY cell so the
-                # path cannot drift above the scene ceiling or below the floor.
+                # Coarse voxel-grid Z clamp (keeps path inside walkable volume).
                 lo_iz, hi_iz = walkable_xy[(ix, iy)]
                 sz_min = min_z + (lo_iz + 0.5) * res
                 sz_max = min_z + (hi_iz + 0.5) * res
                 sz = max(sz_min, min(sz, sz_max))
-                candidate = [sx, sy, sz]
+                candidate = _clamp_above_terrain([sx, sy, sz])
                 if not _los_clear(new_pts[-1], candidate):
-                    candidate = points[i]
+                    candidate = _clamp_above_terrain(list(points[i]))
                 new_pts.append(candidate)
             else:
-                new_pts.append(points[i])
+                new_pts.append(_clamp_above_terrain(list(points[i])))
         new_pts.append(points[-1])
         points = new_pts
 
+    # 4× upsample; clamp every interpolated point above the terrain as well.
     upsampled = []
     steps = 4
     for i in range(len(points)-1):
@@ -470,12 +501,13 @@ def _build_smooth_path(tour: list, walkable: set, config: dict, bounds: tuple,
         if _los_clear(p_start, p_end):
             for j in range(steps):
                 t = j / steps
-                upsampled.append([p_start[0]+t*(p_end[0]-p_start[0]),
-                                   p_start[1]+t*(p_end[1]-p_start[1]),
-                                   p_start[2]+t*(p_end[2]-p_start[2])])
+                pt = [p_start[0]+t*(p_end[0]-p_start[0]),
+                      p_start[1]+t*(p_end[1]-p_start[1]),
+                      p_start[2]+t*(p_end[2]-p_start[2])]
+                upsampled.append(_clamp_above_terrain(pt))
         else:
-            upsampled.append(p_start)
-    upsampled.append(points[-1])
+            upsampled.append(_clamp_above_terrain(list(p_start)))
+    upsampled.append(_clamp_above_terrain(list(points[-1])))
     from mathutils import Vector
     return [Vector((p[0], p[1], p[2])) for p in upsampled]
 
