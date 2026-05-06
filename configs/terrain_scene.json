@@ -1,0 +1,38 @@
+{
+    "_description": "Canonical config for large outdoor terrain scenes (arctic, coastline, etc.). Phase 1 fits a TerrainSnake cloth to the scene. Phase 2 builds a walkable voxel grid from the cloth heightmap and renders a ground-level walkthrough. Override terrain_npz at runtime with the actual path.",
+
+    "terrain_npz": null,
+
+    "grid_resolution": 20.0,
+    "max_grid_cells_xy": 180,
+    "env_sphere_percentile": 5.0,
+    "terrain_ray_samples": 1,
+
+    "terrain_alpha": 0.5,
+    "terrain_gravity": 0.1,
+    "terrain_dt": 1.0,
+    "terrain_max_iterations": 200,
+    "terrain_convergence_threshold": 1e-3,
+    "terrain_start_height": 1.7,
+    "refine_pad_cells": 2,
+
+    "camera_height": 1.7,
+    "num_waypoints": 20,
+    "seed": 42,
+    "aerial": false,
+    "path_planner": "theta_star",
+    "laplacian_iters": 0,
+
+    "waypoint_gaze_mode": "waypoint",
+    "lookahead_fraction": 0.05,
+    "rotation_smooth_seconds": 2.0,
+
+    "fps": 12,
+    "max_duration_seconds": 83.4,
+    "walk_speed_mps": 5.0,
+    "render_engine": "CYCLES",
+    "render_width": 640,
+    "render_height": 480,
+    "render_samples": 64,
+    "use_denoise": true
+}

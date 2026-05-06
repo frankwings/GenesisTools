@@ -1,0 +1,28 @@
+{
+    "_description": "Canonical config for indoor / standard non-terrain scenes (rooms, objects, etc.). No Phase 1 terrain fitting. Walkable voxels are built directly from the blend geometry at fine resolution. Aerial mode + Theta* path planner are typical for complex indoor geometry.",
+
+    "camera_height": 1.7,
+    "num_waypoints": 20,
+    "seed": 42,
+    "aerial": true,
+    "path_planner": "theta_star",
+    "laplacian_iters": 0,
+
+    "grid_resolution": 0.5,
+    "max_grid_cells_xy": 80,
+    "max_grid_cells_z": 40,
+
+    "waypoint_gaze_mode": "free",
+    "lookahead_fraction": 0.05,
+    "rotation_smooth_seconds": 2.0,
+
+    "fps": 12,
+    "max_duration_seconds": 100.0,
+    "walk_speed_mps": 2.0,
+    "render_engine": "WORKBENCH",
+    "render_width": 1280,
+    "render_height": 720,
+    "render_samples": 32,
+    "use_denoise": false,
+    "panoramic": false
+}
