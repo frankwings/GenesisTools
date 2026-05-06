@@ -67,6 +67,26 @@ solid voxels on top of ray casting.
 
 ---
 
+## Path Overview
+
+![path overview](assets/the_hideaway_standard_v3/figure_path_overview.png)
+
+*Left: top-down walkable voxels (blue) + Held-Karp path (plasma: blue=start → yellow=end) + waypoints (white dots).  Right: camera altitude profile across the 1 200-frame walkthrough.*
+
+---
+
+## Sample Frames
+
+| Start (frame 1) | 25 % (frame 301) |
+|---|---|
+| ![frame_start](assets/the_hideaway_standard_v3/frame_start.png) | ![frame_q1](assets/the_hideaway_standard_v3/frame_q1.png) |
+
+| 50 % (frame 601) | End (frame 1200) |
+|---|---|
+| ![frame_mid](assets/the_hideaway_standard_v3/frame_mid.png) | ![frame_end](assets/the_hideaway_standard_v3/frame_end.png) |
+
+---
+
 ## Walkthrough GIF
 
 ![the_hideaway standard v3 walkthrough](assets/the_hideaway_standard_v3/the_hideaway_standard_v3_walkthrough.gif)
