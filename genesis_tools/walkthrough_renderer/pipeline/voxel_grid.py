@@ -260,6 +260,46 @@ def _build_local_voxel_grid(config, center, hit_collector=None):
     return solid, nx, ny, nz, res, local_bounds
 
 
+def _mark_vertex_voxels(solid: set, nx: int, ny: int, nz: int,
+                        res: float, bounds: tuple,
+                        clip: tuple | None = None) -> int:
+    """Mark voxels that contain at least one mesh vertex as solid.
+
+    Supplements ray-cast solid detection: thin walls whose faces never
+    intersect a ray axis are still caught because their vertices land in
+    a voxel.
+
+    clip: optional (min_x, min_y, max_x, max_y, min_z, max_z) world-space
+          bounding box — vertices outside it are ignored (used in local mode).
+    """
+    import bpy
+    min_x, min_y, max_x, max_y, min_z, max_z = bounds
+    added = 0
+    dg = bpy.context.evaluated_depsgraph_get()
+    for obj in bpy.context.scene.objects:
+        if obj.type != "MESH":
+            continue
+        eval_obj = obj.evaluated_get(dg)
+        mesh = eval_obj.to_mesh()
+        mat = eval_obj.matrix_world
+        for v in mesh.vertices:
+            wv = mat @ v.co
+            x, y, z = float(wv.x), float(wv.y), float(wv.z)
+            if clip is not None:
+                cx0, cy0, cx1, cy1, cz0, cz1 = clip
+                if x < cx0 or x > cx1 or y < cy0 or y > cy1 or z < cz0 or z > cz1:
+                    continue
+            ix = min(nx - 1, max(0, int((x - min_x) / res)))
+            iy = min(ny - 1, max(0, int((y - min_y) / res)))
+            iz = min(nz - 1, max(0, int((z - min_z) / res)))
+            cell = (ix, iy, iz)
+            if cell not in solid:
+                solid.add(cell)
+                added += 1
+        eval_obj.to_mesh_clear()
+    return added
+
+
 def _build_global_voxel_grid(config, scene_bounds, hit_collector=None):
     """Tri-axial sweep voxelisation over the full scene."""
     import bpy
@@ -452,6 +492,8 @@ def build(blend_path: str, config: dict) -> VoxelGridData:
         config["_local_radius_bu"] = config["local_area_ratio"] * span_xy * 0.5
         solid, nx, ny, nz, res, bounds = _build_local_voxel_grid(
             config, center, hit_collector=hit_collector)
+        n_vtx = _mark_vertex_voxels(solid, nx, ny, nz, res, bounds, clip=bounds)
+        print(f"[VoxelGrid] Vertex check: +{n_vtx} solid voxels")
         mode = "local"
         from mathutils import Vector
         ix = max(0, min(nx-1, int((center.x-bounds[0])/res)))
@@ -462,6 +504,8 @@ def build(blend_path: str, config: dict) -> VoxelGridData:
         scene_bds = _scene_bounds()
         solid, nx, ny, nz, res, bounds = _build_global_voxel_grid(
             config, scene_bds, hit_collector=hit_collector)
+        n_vtx = _mark_vertex_voxels(solid, nx, ny, nz, res, bounds)
+        print(f"[VoxelGrid] Vertex check: +{n_vtx} solid voxels")
         mode = "global"
         cam = _find_local_center(config)
         ix = max(0, min(nx-1, int((cam.x-bounds[0])/res)))
