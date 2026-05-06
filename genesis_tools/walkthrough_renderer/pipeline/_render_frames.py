@@ -88,4 +88,8 @@ frame_end_cap = config.get("frame_end")
 if frame_end_cap is not None:
     scene.frame_end = min(int(frame_end_cap), scene.frame_end)
 
+if config.get("preprocess_scene", True):
+    from genesis_tools.walkthrough_renderer.pipeline.scene_preprocessor import ScenePreprocessor
+    ScenePreprocessor().run()
+
 bpy.ops.render.render(animation=True)
