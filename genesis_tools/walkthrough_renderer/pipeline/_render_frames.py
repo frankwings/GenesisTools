@@ -7,13 +7,6 @@ import sys
 from pathlib import Path
 import bpy
 
-# Ensure genesis_tools is importable when running under an external Blender
-# (e.g. Windows Blender) whose Python env doesn't have genesis_tools installed.
-# __file__ is .../GenesisTools/genesis_tools/walkthrough_renderer/pipeline/_render_frames.py
-# → parents[3] is the GenesisTools root containing the genesis_tools package.
-_gt_root = str(Path(__file__).resolve().parents[3])
-if _gt_root not in sys.path:
-    sys.path.insert(0, _gt_root)
 
 # Parse --config argument
 config_path = None
@@ -98,7 +91,14 @@ if frame_end_cap is not None:
     scene.frame_end = min(int(frame_end_cap), scene.frame_end)
 
 if config.get("preprocess_scene", True):
-    from genesis_tools.walkthrough_renderer.pipeline.scene_preprocessor import ScenePreprocessor
-    ScenePreprocessor().run()
+    # Load scene_preprocessor.py directly from its file path — avoids going
+    # through the genesis_tools package (which may pull in PIL / other deps
+    # not available in the external Blender's Python env).
+    import importlib.util as _ilu
+    _sp_path = Path(__file__).resolve().parent / "scene_preprocessor.py"
+    _spec = _ilu.spec_from_file_location("scene_preprocessor", _sp_path)
+    _sp_mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_sp_mod)
+    _sp_mod.ScenePreprocessor().run()
 
 bpy.ops.render.render(animation=True)
