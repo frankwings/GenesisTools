@@ -67,6 +67,16 @@ solid voxels on top of ray casting.
 
 ---
 
+## Debug Visualization
+
+| Top view (XY) | Side view (XZ) |
+|---|---|
+| ![debug top](assets/the_hideaway_standard_v3/debug_top.png) | ![debug side](assets/the_hideaway_standard_v3/debug_side.png) |
+
+*Top: solid voxels (orange), walkable candidates (blue), Held-Karp path (green), camera poses (white).  Side: XZ profile showing camera altitude range (6.1 … 162.4 BU).*
+
+---
+
 ## Path Overview
 
 ![path overview](assets/the_hideaway_standard_v3/figure_path_overview.png)

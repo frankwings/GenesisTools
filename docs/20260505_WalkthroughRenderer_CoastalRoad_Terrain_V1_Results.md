@@ -4,7 +4,8 @@
 **Date**: 2026-05-05
 **Config**: `configs/terrain_scene.json` — TerrainSnake Phase 1, Held-Karp path, Cycles render
 **Run host**: local Linux + pip bpy 4.5 + Windows Blender 4.5.7 LTS (Cycles)
-**Commit**: `ac2deb9`
+**Commit**: `c322903`
+**Re-run**: heightmap Z floor clamp applied — Laplacian-smoothed camera Z always ≥ terrain heightmap + 1.7 BU
 
 ---
 
@@ -38,8 +39,8 @@ Held-Karp tour, animates the camera, and renders.
 | Waypoints | 20 (farthest-point sampling, seed 42) |
 | Path connectivity | 26-connected BFS |
 | Total path points | 3 421 |
-| Path Z range | 366.7 … 2 311.1 BU |
-| Solve time | 8.1 s |
+| Path Z range | 443.7 … 2 311.1 BU |
+| Solve time | 11.1 s |
 
 ---
 
@@ -124,5 +125,9 @@ Held-Karp tour, animates the camera, and renders.
   voxel resolution.
 - **Single-pass TerrainSnake**: Pass 1 achieved 100 % column coverage so Pass 2
   (tight-bbox refinement) was skipped automatically.
-- **High altitude path**: Path Z range spans 366–2 311 BU, reflecting the
+- **Heightmap Z floor clamp (re-run fix)**: After Laplacian smoothing, every
+  camera point is clamped to `max(z, heightmap[ix,iy] + 1.7)`.  This prevents
+  the path from dipping into terrain on steep slopes.  Path minimum rose from
+  366.7 BU (original) to 443.7 BU (re-run) after the clamp was applied.
+- **High altitude path**: Path Z range spans 444–2 311 BU, reflecting the
   dramatic elevation change in this coastal landscape.
