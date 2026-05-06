@@ -98,6 +98,8 @@ if config.get("preprocess_scene", True):
     _sp_path = Path(__file__).resolve().parent / "scene_preprocessor.py"
     _spec = _ilu.spec_from_file_location("scene_preprocessor", _sp_path)
     _sp_mod = _ilu.module_from_spec(_spec)
+    # Must register before exec_module so @dataclass can resolve cls.__module__
+    sys.modules.setdefault("scene_preprocessor", _sp_mod)
     _spec.loader.exec_module(_sp_mod)
     _sp_mod.ScenePreprocessor().run()
 
