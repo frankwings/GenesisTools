@@ -41,6 +41,7 @@ def build(blend_path: str, path_data, orient: "OrientData",
     # point's (x, y) via bilinear interpolation — the camera then walks at exactly
     # cloth_z + camera_height, eliminating voxel-quantisation clipping into hills.
     cloth_z_lookup = None
+    raycast_ground_z = None
     terrain_npz = config.get("terrain_npz")
     if terrain_npz and not config.get("aerial"):
         import numpy as _np
@@ -73,6 +74,30 @@ def build(blend_path: str, path_data, orient: "OrientData",
                              + (1-tx)*ty*z01 + tx*ty*z11)
             print(f"[CameraAnimate] Using cloth heightmap from {terrain_npz} "
                   f"for per-frame ground Z (eliminates voxel-Z quantisation)")
+
+    # Ray-cast ground Z: fires a downward ray through the actual terrain mesh at
+    # each frame's XY.  Scatter instances are render-time only — ray_cast hits
+    # only real mesh geometry — so we get exact terrain Z without tree noise.
+    # Fallback to cloth_z_lookup when ray misses (open edges, outside domain).
+    # _rc_dg[0] is filled in just before the frame loop once the scene is ready.
+    _rc_dg = [None]
+    if not config.get("aerial"):
+        _rc_max_z = float(path_data.bounds[5]) if (
+            hasattr(path_data, "bounds") and path_data.bounds is not None
+        ) else 1000.0
+        _rc_origin_z = _rc_max_z + 10.0
+        _rc_dir = Vector((0.0, 0.0, -1.0))
+
+        def raycast_ground_z(world_x: float, world_y: float) -> "float | None":
+            dg = _rc_dg[0]
+            if dg is None:
+                return None
+            origin = Vector((world_x, world_y, _rc_origin_z))
+            hit, loc, _n, _i, _o, _m = bpy.context.scene.ray_cast(dg, origin, _rc_dir)
+            return float(loc.z) if hit else None
+
+        print("[CameraAnimate] Ray-cast ground Z enabled (exact terrain surface, "
+              "heightmap fallback)")
 
     path_vecs = [Vector(tuple(p)) for p in path_data.path_points]
     if not path_vecs:
@@ -165,15 +190,23 @@ def build(blend_path: str, path_data, orient: "OrientData",
     rotation_tau = config.get("rotation_smooth_seconds", 3.5)
     slerp_alpha = 1.0 - math.exp(-1.0 / max(1, fps * rotation_tau))
 
+    # Freeze the evaluated depsgraph now — all objects are linked, camera created.
+    if raycast_ground_z is not None:
+        _rc_dg[0] = bpy.context.evaluated_depsgraph_get()
+
     for fi in range(total_frames):
         t = fi / max(1, total_frames - 1)
         path_pt = _sample_path(t)
-        # Override path Z with cloth-heightmap lookup at (x, y) when available.
-        # Falls back to the path point's own Z if the lookup is out of domain.
-        if cloth_z_lookup is not None:
+        # Get exact terrain Z: try ray_cast first (hits actual mesh, ignores
+        # scatter instances), then fall back to cloth heightmap, then keep
+        # the path point's own Z.
+        ground_z = None
+        if raycast_ground_z is not None:
+            ground_z = raycast_ground_z(path_pt.x, path_pt.y)
+        if ground_z is None and cloth_z_lookup is not None:
             ground_z = cloth_z_lookup(path_pt.x, path_pt.y)
-            if ground_z is not None:
-                path_pt = Vector((path_pt.x, path_pt.y, ground_z))
+        if ground_z is not None:
+            path_pt = Vector((path_pt.x, path_pt.y, ground_z))
         cam_pos = path_pt + Vector((0, 0, cam_h))
 
         if wp_gaze_mode == "waypoint" and wp_schedule:
