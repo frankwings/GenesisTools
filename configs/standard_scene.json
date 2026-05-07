@@ -17,7 +17,7 @@
     "rotation_smooth_seconds": 2.0,
 
     "fps": 12,
-    "max_duration_seconds": 100.0,
+    "max_duration_seconds": 83.4,
     "walk_speed_mps": 2.0,
     "render_engine": "WORKBENCH",
     "render_width": 1280,
