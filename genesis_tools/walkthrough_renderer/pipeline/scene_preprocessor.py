@@ -95,6 +95,28 @@ def _obj_has_particles(obj: bpy.types.Object) -> bool:
     return any(m.type == "PARTICLE_SYSTEM" for m in obj.modifiers)
 
 
+# Scatter-vegetation particle systems distribute mesh objects/collections as
+# instances.  bpy.ops.object.convert(target="MESH") in background mode creates
+# only the bare emitter surface — all scattered instances are silently dropped.
+# Skip these; only convert Hair-strand and Emitter types which bake cleanly.
+_SCATTER_RENDER_TYPES = {"OBJECT", "COLLECTION"}
+
+
+def _obj_has_only_scatter_particles(obj: bpy.types.Object) -> bool:
+    """Return True if every particle system on obj is a scatter type (OBJECT/COLLECTION).
+
+    If *any* system is not scatter (e.g. HALO, PATH, or EMITTER), the object
+    is still eligible for full conversion.
+    """
+    psys_mods = [m for m in obj.modifiers if m.type == "PARTICLE_SYSTEM"]
+    if not psys_mods:
+        return False
+    return all(
+        m.particle_system.settings.render_type in _SCATTER_RENDER_TYPES
+        for m in psys_mods
+    )
+
+
 def _can_modify(obj: bpy.types.Object) -> bool:
     """False for library-linked objects that cannot be edited in-place."""
     return obj.library is None and not obj.override_library
@@ -146,6 +168,7 @@ class ScenePreprocessor:
         """
         issues: dict[str, list[str]] = {
             "particle_systems":    [],
+            "scatter_vegetation":  [],
             "frame_dep_geonodes":  [],
             "linked_unmodifiable": [],
         }
@@ -160,7 +183,10 @@ class ScenePreprocessor:
                 issues["linked_unmodifiable"].append(obj.name)
                 continue
             if has_ptcl:
-                issues["particle_systems"].append(obj.name)
+                if _obj_has_only_scatter_particles(obj):
+                    issues["scatter_vegetation"].append(obj.name)
+                else:
+                    issues["particle_systems"].append(obj.name)
             if has_gn:
                 issues["frame_dep_geonodes"].append(obj.name)
         return issues
@@ -176,6 +202,10 @@ class ScenePreprocessor:
         and produces a plain static MESH.  Blender will then treat the object
         as clean between frames → BVH built once, reused for all frames.
 
+        Scatter-vegetation systems (render_type OBJECT or COLLECTION) are
+        skipped: in background mode the scattered instances are not baked into
+        the mesh, so converting them silently erases all vegetation.
+
         Returns: number of objects converted.
         """
         converted = 0
@@ -187,6 +217,11 @@ class ScenePreprocessor:
             if not _can_modify(obj):
                 self._log(f"  skip (linked): {obj.name}")
                 self._report.skipped_linked.append(obj.name)
+                continue
+            # Skip scatter vegetation — converting in background mode drops instances
+            if _obj_has_only_scatter_particles(obj):
+                self._log(f"  skip (scatter vegetation): {obj.name}")
+                self._report.skipped_linked.append(f"{obj.name} [scatter]")
                 continue
             try:
                 bpy.ops.object.select_all(action="DESELECT")
