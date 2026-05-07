@@ -20,7 +20,8 @@
     "num_waypoints": 20,
     "seed": 42,
     "aerial": false,
-    "laplacian_iters": 5,
+    "laplacian_iters": 0,
+    "particle_block_margin": 1.5,
 
     "waypoint_gaze_mode": "waypoint",
     "lookahead_fraction": 0.05,

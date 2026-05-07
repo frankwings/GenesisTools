@@ -192,12 +192,19 @@ def fit_terrain_contour(
 
     # --- Camera lookup (anchor for cloth init Z + volume classification) ---
     cam_x = cam_y = cam_z = None
+    cam_lookat_x = cam_lookat_y = None
     for obj in scene.objects:
         if obj.type == "CAMERA":
             loc = obj.matrix_world @ Vector((0.0, 0.0, 0.0))
             cam_x, cam_y, cam_z = float(loc.x), float(loc.y), float(loc.z)
+            # Camera forward = -Z axis of local frame; project to XY and normalise.
+            fwd = obj.matrix_world.to_3x3() @ Vector((0.0, 0.0, -1.0))
+            mag = (fwd.x ** 2 + fwd.y ** 2) ** 0.5
+            if mag > 1e-6:
+                cam_lookat_x, cam_lookat_y = float(fwd.x / mag), float(fwd.y / mag)
             print(f"[TerrainSnake] original camera '{obj.name}' "
-                  f"@ ({cam_x:.2f}, {cam_y:.2f}, {cam_z:.2f})")
+                  f"@ ({cam_x:.2f}, {cam_y:.2f}, {cam_z:.2f})  "
+                  f"lookat_xy=({cam_lookat_x:.3f}, {cam_lookat_y:.3f})")
             break
     if cam_z is None:
         cam_x = (min_x + max_x) / 2.0
@@ -321,6 +328,9 @@ def fit_terrain_contour(
         unit_scale=np.float64(unit_scale),
         cloth_init_z=np.float64(cam_z),
         camera_xyz=np.array([cam_x, cam_y, cam_z], dtype=np.float64),
+        camera_lookat=(np.array([cam_lookat_x, cam_lookat_y], dtype=np.float64)
+                       if cam_lookat_x is not None
+                       else np.array([0.0, 0.0], dtype=np.float64)),
         # Pass-1 (full-AABB) coverage saved for visualisation / debugging
         pass1_floor=floor_1.astype(np.float32),
         pass1_bounds=np.array(

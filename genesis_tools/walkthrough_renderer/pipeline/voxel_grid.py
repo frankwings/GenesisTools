@@ -300,6 +300,87 @@ def _mark_vertex_voxels(solid: set, nx: int, ny: int, nz: int,
     return added
 
 
+_SCATTER_RENDER_TYPES = {"OBJECT", "COLLECTION"}
+
+
+def _mark_particle_instance_voxels(solid: set, nx: int, ny: int, nz: int,
+                                    res: float, bounds: tuple,
+                                    clip: tuple | None = None,
+                                    margin: float = 1.0) -> int:
+    """Mark voxels occupied by scatter particle instances as solid.
+
+    ray_cast() only hits actual mesh objects; OBJECT/COLLECTION scatter
+    instances are render-time and invisible to it.  This function iterates
+    particle data directly: for each alive particle, it marks a box of voxels
+    around the particle location using the instance object's bounding radius.
+
+    Only OBJECT and COLLECTION render types are processed (scatter vegetation).
+    Hair/Halo/Path emitters produce actual geometry and are handled by ray_cast.
+
+    clip: optional world-space AABB — particles outside it are skipped.
+    """
+    import bpy
+
+    min_x, min_y, max_x, max_y, min_z, max_z = bounds
+
+    dg = bpy.context.evaluated_depsgraph_get()
+    added = 0
+
+    for obj in bpy.context.scene.objects:
+        if obj.type not in ("MESH", "CURVE", "SURFACE"):
+            continue
+        eval_obj = obj.evaluated_get(dg)
+        for psys in eval_obj.particle_systems:
+            settings = psys.settings
+            if settings.render_type not in _SCATTER_RENDER_TYPES:
+                continue
+
+            # Determine instance half-size from the instance object's bbox.
+            if settings.render_type == "OBJECT" and settings.instance_object:
+                inst = settings.instance_object
+                half_size = max(inst.dimensions) * 0.5 if max(inst.dimensions) > 0 else res
+            elif settings.render_type == "COLLECTION" and settings.instance_collection:
+                dims = [d for col_obj in settings.instance_collection.objects
+                        for d in col_obj.dimensions]
+                half_size = max(dims) * 0.5 if dims else res
+            else:
+                continue  # no instance target — nothing to mark
+
+            for p in psys.particles:
+                if p.alive_state != "ALIVE":
+                    continue
+
+                wx, wy, wz = float(p.location.x), float(p.location.y), float(p.location.z)
+                # particle.size scales the instance — apply to half_size and margin
+                scaled = (half_size * float(p.size) if p.size > 0 else half_size) * margin
+
+                if clip is not None:
+                    cx0, cy0, cx1, cy1, cz0, cz1 = clip
+                    if wx + scaled < cx0 or wx - scaled > cx1:
+                        continue
+                    if wy + scaled < cy0 or wy - scaled > cy1:
+                        continue
+                    if wz + scaled < cz0 or wz - scaled > cz1:
+                        continue
+
+                ix_lo = max(0,    int((wx - scaled - min_x) / res))
+                ix_hi = min(nx-1, int((wx + scaled - min_x) / res))
+                iy_lo = max(0,    int((wy - scaled - min_y) / res))
+                iy_hi = min(ny-1, int((wy + scaled - min_y) / res))
+                iz_lo = max(0,    int((wz - scaled - min_z) / res))
+                iz_hi = min(nz-1, int((wz + scaled - min_z) / res))
+
+                for ix in range(ix_lo, ix_hi + 1):
+                    for iy in range(iy_lo, iy_hi + 1):
+                        for iz in range(iz_lo, iz_hi + 1):
+                            cell = (ix, iy, iz)
+                            if cell not in solid:
+                                solid.add(cell)
+                                added += 1
+
+    return added
+
+
 def _build_global_voxel_grid(config, scene_bounds, hit_collector=None):
     """Tri-axial sweep voxelisation over the full scene."""
     import bpy
@@ -391,6 +472,51 @@ def _flood_fill_candidates(solid: set, center_ijk: tuple,
 # Terrain mode (no bpy required)
 # ---------------------------------------------------------------------------
 
+def _filter_terrain_by_particles(vgd: VoxelGridData, config: dict) -> VoxelGridData:
+    """Remove terrain candidates whose camera-eye column is blocked by scatter instances.
+
+    For each candidate (ix, iy, iz), checks all voxels in the vertical column
+    [iz, iz + camera_height_voxels] against the scatter particle solid set.
+    Any column that intersects a particle instance is excluded from the walkable set.
+
+    Must be called with an open bpy scene (particle data requires evaluated depsgraph).
+    """
+    unit_scale = _get_unit_scale()
+    camera_height_bu = config.get("camera_height", 1.7) / unit_scale
+    camera_height_voxels = max(1, int(round(camera_height_bu / vgd.res)))
+
+    particle_solid: set = set()
+    _mark_particle_instance_voxels(
+        particle_solid, vgd.nx, vgd.ny, vgd.nz, vgd.res, vgd.bounds,
+        margin=config.get("particle_block_margin", 1.0),
+    )
+
+    if not particle_solid:
+        print("[VoxelGrid] Terrain particle filter: no scatter instances found — all candidates kept")
+        return vgd
+
+    filtered = []
+    for row in vgd.candidates:
+        ix, iy, iz = int(row[0]), int(row[1]), int(row[2])
+        iz_top = min(vgd.nz - 1, iz + camera_height_voxels)
+        blocked = any((ix, iy, iz_col) in particle_solid for iz_col in range(iz, iz_top + 1))
+        if not blocked:
+            filtered.append((ix, iy, iz))
+
+    filtered_arr = (np.array(sorted(filtered), dtype=np.int32)
+                    if filtered else np.empty((0, 3), dtype=np.int32))
+    n_removed = len(vgd.candidates) - len(filtered_arr)
+    print(f"[VoxelGrid] Terrain particle filter: -{n_removed} blocked by scatter, "
+          f"{len(filtered_arr)} candidates remain")
+
+    return VoxelGridData(
+        solid=vgd.solid, candidates=filtered_arr,
+        nx=vgd.nx, ny=vgd.ny, nz=vgd.nz,
+        res=vgd.res, bounds=vgd.bounds, unit_scale=vgd.unit_scale,
+        mode=vgd.mode, hits=vgd.hits,
+    )
+
+
 def _build_terrain_candidates(config: dict) -> VoxelGridData:
     """Load terrain_snake.npz and map heightmap Z → one walkable voxel per column.
 
@@ -456,11 +582,19 @@ def _build_terrain_candidates(config: dict) -> VoxelGridData:
 def build(blend_path: str, config: dict) -> VoxelGridData:
     """Build VoxelGridData from a .blend file or terrain_snake.npz.
 
-    When config["terrain_npz"] is set, no bpy required — reads the pre-computed
-    heightmap directly. Otherwise must be called under blender's Python.
+    When config["terrain_npz"] is set, the heightmap is read directly without
+    bpy.  If mark_particle_instances is True (default), the blend file is then
+    opened to filter candidates blocked by scatter instances.  Set
+    mark_particle_instances=false to skip the particle pass and avoid opening
+    the blend file entirely (legacy / test behaviour).
     """
     if config.get("terrain_npz"):
-        return _build_terrain_candidates(config)
+        vgd = _build_terrain_candidates(config)
+        if config.get("mark_particle_instances", True):
+            import bpy
+            bpy.ops.wm.open_mainfile(filepath=blend_path)
+            vgd = _filter_terrain_by_particles(vgd, config)
+        return vgd
 
     import bpy
     bpy.ops.wm.open_mainfile(filepath=blend_path)
@@ -494,6 +628,10 @@ def build(blend_path: str, config: dict) -> VoxelGridData:
             config, center, hit_collector=hit_collector)
         n_vtx = _mark_vertex_voxels(solid, nx, ny, nz, res, bounds, clip=bounds)
         print(f"[VoxelGrid] Vertex check: +{n_vtx} solid voxels")
+        if config.get("mark_particle_instances", True):
+            n_ptcl = _mark_particle_instance_voxels(solid, nx, ny, nz, res, bounds, clip=bounds,
+                                                     margin=config.get("particle_block_margin", 1.0))
+            print(f"[VoxelGrid] Particle instances: +{n_ptcl} solid voxels")
         mode = "local"
         from mathutils import Vector
         ix = max(0, min(nx-1, int((center.x-bounds[0])/res)))
@@ -506,6 +644,10 @@ def build(blend_path: str, config: dict) -> VoxelGridData:
             config, scene_bds, hit_collector=hit_collector)
         n_vtx = _mark_vertex_voxels(solid, nx, ny, nz, res, bounds)
         print(f"[VoxelGrid] Vertex check: +{n_vtx} solid voxels")
+        if config.get("mark_particle_instances", True):
+            n_ptcl = _mark_particle_instance_voxels(solid, nx, ny, nz, res, bounds,
+                                                     margin=config.get("particle_block_margin", 1.0))
+            print(f"[VoxelGrid] Particle instances: +{n_ptcl} solid voxels")
         mode = "global"
         cam = _find_local_center(config)
         ix = max(0, min(nx-1, int((cam.x-bounds[0])/res)))

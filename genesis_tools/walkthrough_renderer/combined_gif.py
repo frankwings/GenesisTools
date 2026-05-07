@@ -211,7 +211,7 @@ def make_combined_mp4(
 
     writer = imageio.get_writer(str(output_mp4), fps=fps,
                                 codec="libx264", quality=7,
-                                macro_block_size=None)
+                                macro_block_size=2)
     try:
         for img in _iter_combined_frames(frames_sub, path_npz, terrain_npz,
                                          map_px=map_px, output_scale=output_scale):

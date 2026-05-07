@@ -395,6 +395,7 @@ def _build_smooth_path(tour: list, walkable: set, config: dict, bounds: tuple,
     from mathutils import Vector as _V
 
     min_x = bounds[0]; min_y = bounds[1]; min_z = bounds[4]
+    max_z = bounds[5]
     res = config.get("_effective_grid_resolution", config["grid_resolution"])
     cam_h_bu = config.get("camera_height", 1.7) / config.get("_unit_scale", 1.0)
 
@@ -431,6 +432,22 @@ def _build_smooth_path(tour: list, walkable: set, config: dict, bounds: tuple,
         if floor_z is not None:
             pt[2] = max(pt[2], floor_z + cam_h_bu)
         return pt
+
+    def _raycast_ground_z(wx: float, wy: float) -> float | None:
+        """Shoot a ray straight down from above and return the hit Z, or None."""
+        origin = _V((wx, wy, max_z + 10.0))
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        hit, loc, normal, *_ = bpy.context.scene.ray_cast(
+            depsgraph, origin, _V((0.0, 0.0, -1.0))
+        )
+        return float(loc.z) if hit else None
+
+    def _best_z(wx: float, wy: float, lin_z: float) -> list:
+        """Return camera-above-ground Z using downward ray_cast, with heightmap fallback."""
+        gz = _raycast_ground_z(wx, wy)
+        if gz is not None:
+            return [wx, wy, gz + cam_h_bu]
+        return _clamp_above_terrain([wx, wy, lin_z])
 
     # -----------------------------------------------------------------------
 
@@ -493,7 +510,8 @@ def _build_smooth_path(tour: list, walkable: set, config: dict, bounds: tuple,
         new_pts.append(points[-1])
         points = new_pts
 
-    # 4× upsample; clamp every interpolated point above the terrain as well.
+    # 4× upsample; snap every interpolated point to the actual mesh surface via
+    # downward ray_cast (falls back to coarse heightmap when ray misses).
     upsampled = []
     steps = 4
     for i in range(len(points)-1):
@@ -501,13 +519,13 @@ def _build_smooth_path(tour: list, walkable: set, config: dict, bounds: tuple,
         if _los_clear(p_start, p_end):
             for j in range(steps):
                 t = j / steps
-                pt = [p_start[0]+t*(p_end[0]-p_start[0]),
-                      p_start[1]+t*(p_end[1]-p_start[1]),
-                      p_start[2]+t*(p_end[2]-p_start[2])]
-                upsampled.append(_clamp_above_terrain(pt))
+                wx = p_start[0]+t*(p_end[0]-p_start[0])
+                wy = p_start[1]+t*(p_end[1]-p_start[1])
+                wz = p_start[2]+t*(p_end[2]-p_start[2])
+                upsampled.append(_best_z(wx, wy, wz))
         else:
-            upsampled.append(_clamp_above_terrain(list(p_start)))
-    upsampled.append(_clamp_above_terrain(list(points[-1])))
+            upsampled.append(_best_z(p_start[0], p_start[1], p_start[2]))
+    upsampled.append(_best_z(points[-1][0], points[-1][1], points[-1][2]))
     from mathutils import Vector
     return [Vector((p[0], p[1], p[2])) for p in upsampled]
 
@@ -740,9 +758,50 @@ def build(vg, wk, config: dict) -> PathData:
                     cam_iz = max(0, min(vg.nz - 1, int((float(cz) - min_z_b) / vg.res)))
                 fixed_first = (cam_ix, cam_iy, cam_iz)
                 if fixed_first not in component:
-                    component.add(fixed_first)
-                    walkable_set.add(fixed_first)
-                    print(f"[PathPlan] Camera cell {fixed_first} not in walkable — forced as first waypoint")
+                    # Camera voxel was filtered out (e.g. particle-blocked).
+                    # March along the camera's XY look-at direction until we reach
+                    # the first walkable voxel — the path starts where the camera
+                    # is already facing rather than jumping sideways.
+                    lookat = (tdata["camera_lookat"]
+                              if "camera_lookat" in tdata.files else None)
+                    found_near = None
+                    if lookat is not None:
+                        ldx, ldy = float(lookat[0]), float(lookat[1])
+                        mag = (ldx ** 2 + ldy ** 2) ** 0.5
+                        if mag > 1e-6:
+                            ldx /= mag; ldy /= mag
+                            # March in both forward (+) and backward (-) directions;
+                            # take whichever finds a walkable voxel first.
+                            found_fwd = found_bwd = None
+                            prev_fwd = prev_bwd = None
+                            for step in range(1, min(vg.nx, vg.ny) * 2):
+                                t = step * 0.5  # half-voxel increments
+                                if found_fwd is None:
+                                    cix = max(0, min(vg.nx-1, int(round(cam_ix + ldx*t))))
+                                    ciy = max(0, min(vg.ny-1, int(round(cam_iy + ldy*t))))
+                                    c = (cix, ciy, cam_iz)
+                                    if c != prev_fwd and c in component:
+                                        found_fwd = c
+                                    prev_fwd = c
+                                if found_bwd is None:
+                                    cix = max(0, min(vg.nx-1, int(round(cam_ix - ldx*t))))
+                                    ciy = max(0, min(vg.ny-1, int(round(cam_iy - ldy*t))))
+                                    c = (cix, ciy, cam_iz)
+                                    if c != prev_bwd and c in component:
+                                        found_bwd = c
+                                    prev_bwd = c
+                                if found_fwd is not None and found_bwd is not None:
+                                    break
+                            # Prefer forward; fall back to backward.
+                            found_near = found_fwd if found_fwd is not None else found_bwd
+                    if found_near:
+                        fixed_first = found_near
+                        print(f"[PathPlan] Camera cell ({cam_ix},{cam_iy},{cam_iz}) particle-blocked "
+                              f"— moved along lookat to first walkable cell {fixed_first}")
+                    else:
+                        component.add(fixed_first)
+                        walkable_set.add(fixed_first)
+                        print(f"[PathPlan] Camera cell {fixed_first} not in walkable — forced (no nearby walkable)")
                 else:
                     print(f"[PathPlan] First waypoint forced to camera cell {fixed_first}")
         except Exception as exc:

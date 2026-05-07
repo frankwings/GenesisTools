@@ -35,6 +35,7 @@ else:
     # METAL for Apple, ONEAPI for Intel) — fall back to CPU if none enabled.
     prefs = bpy.context.preferences.addons["cycles"].preferences
     enabled_gpu = False
+    active_backend = None
     for backend in ("OPTIX", "CUDA", "HIP", "METAL", "ONEAPI"):
         try:
             prefs.compute_device_type = backend
@@ -45,6 +46,7 @@ else:
                     d.use = (d.type == backend)  # enable all of this backend, disable CPU
                 scene.cycles.device = "GPU"
                 enabled_gpu = True
+                active_backend = backend
                 names = [d.name for d in gpu_devices]
                 print(f"[Cycles] GPU enabled ({backend}): {names}")
                 break
@@ -57,13 +59,12 @@ else:
     scene.cycles.use_adaptive_sampling = True
     scene.cycles.adaptive_threshold = 0.01
     scene.cycles.adaptive_min_samples = 4
-    # Final-pass denoiser: OpenImageDenoise (best quality, runs on CPU/GPU).
-    # Both flags are needed — view_layer.use_denoising marks the layer as
-    # denoiseable, scene.cycles.use_denoising actually triggers the pass.
+    # Denoiser: prefer OptiX (GPU-side, lower latency) when OptiX is active;
+    # fall back to OpenImageDenoise (CPU/GPU) for all other backends.
     use_denoise = config.get("use_denoise", True)
     scene.cycles.use_denoising = use_denoise
     if use_denoise:
-        scene.cycles.denoiser = "OPENIMAGEDENOISE"
+        scene.cycles.denoiser = "OPTIX" if active_backend == "OPTIX" else "OPENIMAGEDENOISE"
         scene.cycles.denoising_input_passes = "RGB_ALBEDO_NORMAL"
         scene.cycles.denoising_prefilter = "ACCURATE"
         scene.view_layers[0].cycles.use_denoising = True
