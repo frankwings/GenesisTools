@@ -62,10 +62,12 @@ def build(blend_path: str, config: dict, output_dir: str) -> List[str]:
     }
 
     if _is_win_blender(blender_exe):
-        # Write config to Windows-accessible location
+        # Write config to Windows-accessible location — unique name per run to
+        # avoid collisions when multiple renders run concurrently.
+        import uuid as _uuid
         win_tmp = Path("/mnt/c/tmp/genesis_render")
         win_tmp.mkdir(parents=True, exist_ok=True)
-        cfg_path = win_tmp / "render_config.json"
+        cfg_path = win_tmp / f"render_config_{_uuid.uuid4().hex}.json"
         render_config["frames_dir"] = _to_win_path(str(frames_dir))
         render_config["_windows_blender"] = True
         cfg_path.write_text(json.dumps(render_config))
@@ -75,7 +77,7 @@ def build(blend_path: str, config: dict, output_dir: str) -> List[str]:
             "--python", _to_win_path(str(render_script)),
             "--", "--config", _to_win_path(str(cfg_path)),
         ]
-        tf_to_clean = None
+        tf_to_clean = str(cfg_path)
     else:
         tf = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
         json.dump(render_config, tf)
