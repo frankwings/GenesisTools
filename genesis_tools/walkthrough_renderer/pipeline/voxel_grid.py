@@ -529,20 +529,61 @@ def _build_terrain_candidates(config: dict) -> VoxelGridData:
     are excluded regardless of any Laplacian-interpolated heightmap value.
     """
     data = np.load(config["terrain_npz"])
-    heightmap = data["heightmap"].astype(np.float64)   # (nx, ny)
-    bounds = tuple(float(b) for b in data["bounds"])   # 6-tuple
-    res = float(data["res"])
+    heightmap = data["heightmap"].astype(np.float64)   # (fine_nx, fine_ny)
+    bounds = list(float(b) for b in data["bounds"])    # 6-element list [minx,miny,maxx,maxy,minz,maxz]
+    fine_res = float(data["res"])
     unit_scale = float(data["unit_scale"]) if "unit_scale" in data else 1.0
 
     # terrain_z_floor distinguishes columns with real geometry from those that
     # were only Laplacian-bridged (e.g. corners outside a circular terrain disk).
     if "terrain_z_floor" in data:
         terrain_floor = data["terrain_z_floor"].astype(np.float64)
-        valid_domain = ~np.isnan(terrain_floor)
+        valid_domain = ~np.isnan(terrain_floor)   # bool (fine_nx, fine_ny)
     else:
-        valid_domain = None   # legacy npz without terrain_z_floor — fall back to heightmap NaN check
+        valid_domain = None
 
-    nx, ny = heightmap.shape
+    fine_nx, fine_ny = heightmap.shape
+
+    # Downsample the fine TerrainSnake heightmap to the coarser voxel-grid
+    # resolution.  The snake runs at terrain_snake_resolution (e.g. 2 BU) so the
+    # cloth can distinguish tree-scale bumps from real terrain features; the path
+    # planner only needs grid_resolution (e.g. 20 BU) voxels.
+    coarse_res = config.get("grid_resolution", fine_res * unit_scale) / unit_scale
+    if coarse_res > fine_res * 1.01:
+        scale = coarse_res / fine_res          # e.g. 10.0
+        coarse_nx = max(1, int(math.ceil(fine_nx / scale)))
+        coarse_ny = max(1, int(math.ceil(fine_ny / scale)))
+        coarse_hm = np.full((coarse_nx, coarse_ny), np.nan, dtype=np.float64)
+        coarse_valid = np.zeros((coarse_nx, coarse_ny), dtype=bool)
+        for ix_c in range(coarse_nx):
+            for iy_c in range(coarse_ny):
+                ix_lo = int(ix_c * scale)
+                ix_hi = min(fine_nx, int(math.ceil((ix_c + 1) * scale)))
+                iy_lo = int(iy_c * scale)
+                iy_hi = min(fine_ny, int(math.ceil((iy_c + 1) * scale)))
+                sub = heightmap[ix_lo:ix_hi, iy_lo:iy_hi]
+                if valid_domain is not None:
+                    mask = valid_domain[ix_lo:ix_hi, iy_lo:iy_hi] & ~np.isnan(sub)
+                else:
+                    mask = ~np.isnan(sub)
+                vals = sub[mask]
+                if len(vals) > 0:
+                    coarse_hm[ix_c, iy_c] = float(np.mean(vals))
+                    coarse_valid[ix_c, iy_c] = True
+        heightmap = coarse_hm
+        valid_domain = coarse_valid
+        res = coarse_res
+        nx, ny = coarse_nx, coarse_ny
+        # Update XY extents in bounds to match the coarse grid
+        bounds[2] = bounds[0] + coarse_nx * coarse_res
+        bounds[3] = bounds[1] + coarse_ny * coarse_res
+        print(f"[VoxelGrid] Downsampled heightmap {fine_nx}×{fine_ny} "
+              f"({fine_res:.2f} BU) → {nx}×{ny} ({res:.2f} BU)")
+    else:
+        res = fine_res
+        nx, ny = fine_nx, fine_ny
+
+    bounds = tuple(bounds)
     min_z = bounds[4]
     max_z = bounds[5]
     nz = max(1, int(math.ceil((max_z - min_z) / res)))
@@ -550,12 +591,11 @@ def _build_terrain_candidates(config: dict) -> VoxelGridData:
     candidates = []
     for ix in range(nx):
         for iy in range(ny):
-            # Skip columns outside the terrain domain (no real ray-cast hit)
             if valid_domain is not None and not valid_domain[ix, iy]:
                 continue
             z_val = float(heightmap[ix, iy])
             if not math.isnan(z_val):
-                iz = int((z_val - min_z) / res)  # floor: voxel that contains terrain surface
+                iz = int((z_val - min_z) / res)
                 iz = max(0, min(nz - 1, iz))
                 candidates.append((ix, iy, iz))
 

@@ -26,7 +26,7 @@ if not NPZ.exists():
         BLENDER, "--background", BLEND,
         "--python-exit-code", "1", "--python", FIT_SCRIPT, "--",
         "--blend", BLEND, "--output-dir", str(OUT_DIR),
-        "--grid-resolution",          str(config["grid_resolution"]),
+        "--grid-resolution",          str(config.get("terrain_snake_resolution", config["grid_resolution"])),
         "--max-grid-cells-xy",        str(config["max_grid_cells_xy"]),
         "--env-sphere-percentile",    str(config["env_sphere_percentile"]),
         "--ray-samples",              str(config["terrain_ray_samples"]),

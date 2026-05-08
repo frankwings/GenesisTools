@@ -3,6 +3,7 @@
 
     "terrain_npz": null,
 
+    "terrain_snake_resolution": 2.0,
     "grid_resolution": 20.0,
     "max_grid_cells_xy": 180,
     "env_sphere_percentile": 5.0,
