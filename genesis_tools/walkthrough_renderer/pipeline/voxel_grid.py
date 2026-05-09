@@ -520,79 +520,112 @@ def _filter_terrain_by_particles(vgd: VoxelGridData, config: dict) -> VoxelGridD
 def _filter_terrain_by_mesh_objects(vgd: VoxelGridData, config: dict) -> VoxelGridData:
     """Remove terrain candidates whose camera-eye falls inside any mesh object.
 
-    Ray parity test: fire a +Z ray from the camera-eye position and count how
-    many mesh surfaces it crosses.  Odd = inside a closed mesh (tree trunk,
-    rock, building) → block.  Works for both scatter-base mesh trees and
-    individually placed mesh objects — anything the bpy ray_cast can see.
+    Ray parity test: fire a +Z ray from the camera-eye position, counting only
+    hits against SMALL discrete objects (trees, rocks).  Large landscape objects
+    (terrain, background, sky dome) are auto-detected by XY bounding-box size
+    and excluded from the count — they would otherwise cause false positives
+    because their geometry can extend above the camera-eye position.
 
-    Sky/env spheres are avoided by capping the ray at MAX_DIST (50 BU).
+    Actual terrain Z is obtained by firing a downward ray and taking the lowest
+    hit above the scene floor, which correctly handles cases where the cloth
+    heightmap under-estimates terrain Z (cloth bridged over a bump).
+
     Must be called with an open bpy scene.
     """
     import bpy
     from mathutils import Vector
-
     import numpy as _np
 
     unit_scale = _get_unit_scale()
-    cam_h = config.get("camera_height", 1.7) / unit_scale
-    min_x, min_y = vgd.bounds[0], vgd.bounds[1]
-    up = Vector((0.0, 0.0, 1.0))
+    cam_h     = config.get("camera_height", 1.7) / unit_scale
+    min_x, min_y   = vgd.bounds[0], vgd.bounds[1]
+    scene_floor    = vgd.bounds[4]
+    scene_top      = vgd.bounds[5]
+    up   = Vector((0.0, 0.0,  1.0))
+    down = Vector((0.0, 0.0, -1.0))
     depsgraph = bpy.context.evaluated_depsgraph_get()
     scene = bpy.context.scene
-    # Stay well below any sky/env sphere (typically radius > 500 BU)
-    MAX_DIST = 50.0 / unit_scale
 
-    # Build a bilinear lookup into the fine TerrainSnake heightmap so eye_z is
-    # the actual terrain surface Z, not a coarse voxel-floor approximation.
+    # --- Identify large landscape objects to exclude from the parity count ---
+    # Heuristic: any mesh whose world-space XY span exceeds 40% of the scene XY
+    # span is terrain / background / sky dome, not a discrete obstacle.
+    scene_x_span = vgd.bounds[2] - vgd.bounds[0]
+    scene_y_span = vgd.bounds[3] - vgd.bounds[1]
+    excluded_objs: set = set()
+    for obj in bpy.context.scene.objects:
+        if obj.type != 'MESH':
+            continue
+        wbb  = [obj.matrix_world @ Vector(c) for c in obj.bound_box]
+        ox   = max(v.x for v in wbb) - min(v.x for v in wbb)
+        oy   = max(v.y for v in wbb) - min(v.y for v in wbb)
+        if ox > 0.4 * scene_x_span or oy > 0.4 * scene_y_span:
+            excluded_objs.add(obj.name)
+    if excluded_objs:
+        print(f"[VoxelGrid] Mesh filter: excluding large objects from parity: "
+              f"{sorted(excluded_objs)}")
+
+    # --- Get actual terrain Z by collecting all downward hits, taking minimum ---
+    def _actual_terrain_z(wx: float, wy: float) -> "float | None":
+        pos     = Vector((wx, wy, scene_top + 10.0))
+        lowest  = None
+        while True:
+            hit, loc, _n, _i, _o, _m = scene.ray_cast(depsgraph, pos, down)
+            if not hit or loc.z < scene_floor - 0.5:
+                break
+            if lowest is None or loc.z < lowest:
+                lowest = loc.z
+            pos = loc + Vector((0.0, 0.0, -1e-4))
+        return lowest
+
+    # Cloth heightmap as fallback when the downward ray finds nothing.
     _hm_lookup = None
     terrain_npz = config.get("terrain_npz")
     if terrain_npz:
-        _td = _np.load(terrain_npz)
-        _hm = _td["heightmap"].astype(_np.float64)
-        _fine_res = float(_td["res"])
-        _hm_min_x = float(_td["bounds"][0])
-        _hm_min_y = float(_td["bounds"][1])
+        _td     = _np.load(terrain_npz)
+        _hm     = _td["heightmap"].astype(_np.float64)
+        _fres   = float(_td["res"])
+        _hm_mx  = float(_td["bounds"][0])
+        _hm_my  = float(_td["bounds"][1])
         _hm_nx, _hm_ny = _hm.shape
 
         def _hm_lookup(wx: float, wy: float) -> "float | None":
-            fx = (wx - _hm_min_x) / _fine_res - 0.5
-            fy = (wy - _hm_min_y) / _fine_res - 0.5
+            fx = (wx - _hm_mx) / _fres - 0.5
+            fy = (wy - _hm_my) / _fres - 0.5
             ix = max(0, min(_hm_nx - 2, int(fx)))
             iy = max(0, min(_hm_ny - 2, int(fy)))
-            tx = max(0.0, min(1.0, fx - ix))
-            ty = max(0.0, min(1.0, fy - iy))
-            z00 = _hm[ix, iy]; z10 = _hm[ix+1, iy]
-            z01 = _hm[ix, iy+1]; z11 = _hm[ix+1, iy+1]
-            if any(_np.isnan(v) for v in (z00, z10, z01, z11)):
+            tx = max(0.0, min(1.0, fx - ix)); ty = max(0.0, min(1.0, fy - iy))
+            z00=_hm[ix,iy]; z10=_hm[ix+1,iy]; z01=_hm[ix,iy+1]; z11=_hm[ix+1,iy+1]
+            if any(_np.isnan(v) for v in (z00,z10,z01,z11)):
                 return None
-            return float((1-tx)*(1-ty)*z00 + tx*(1-ty)*z10
-                         + (1-tx)*ty*z01 + tx*ty*z11)
+            return float((1-tx)*(1-ty)*z00+tx*(1-ty)*z10+(1-tx)*ty*z01+tx*ty*z11)
 
+    # --- Parity test (excludes large landscape objects) ---
+    MAX_DIST = (scene_top - scene_floor + 20.0)
     def _inside_mesh(wx: float, wy: float, wz: float) -> bool:
-        """Return True if (wx, wy, wz) is inside a closed mesh (parity test)."""
-        pos = Vector((wx, wy, wz))
+        pos       = Vector((wx, wy, wz))
         remaining = MAX_DIST
-        count = 0
+        count     = 0
         while remaining > 1e-3:
-            hit, loc, _n, _i, _o, _m = scene.ray_cast(
+            hit, loc, _n, _i, obj, _m = scene.ray_cast(
                 depsgraph, pos, up, distance=remaining)
             if not hit:
                 break
-            count += 1
+            if obj is None or obj.name not in excluded_objs:
+                count += 1
             remaining -= (loc - pos).length + 1e-4
             pos = loc + Vector((0.0, 0.0, 1e-4))
         return (count % 2) == 1
 
-    filtered = []
+    filtered  = []
     n_blocked = 0
     for row in vgd.candidates:
         ix, iy, iz = int(row[0]), int(row[1]), int(row[2])
         cx = min_x + (ix + 0.5) * vgd.res
         cy = min_y + (iy + 0.5) * vgd.res
-        # Use actual terrain Z from heightmap; fall back to voxel-centre approx.
-        terrain_z = (_hm_lookup(cx, cy) if _hm_lookup is not None else None)
+        terrain_z = _actual_terrain_z(cx, cy)
         if terrain_z is None:
-            terrain_z = vgd.bounds[4] + (iz + 0.5) * vgd.res
+            terrain_z = (_hm_lookup(cx, cy) if _hm_lookup is not None
+                         else vgd.bounds[4] + (iz + 0.5) * vgd.res)
         eye_z = terrain_z + cam_h
         if _inside_mesh(cx, cy, eye_z):
             n_blocked += 1
