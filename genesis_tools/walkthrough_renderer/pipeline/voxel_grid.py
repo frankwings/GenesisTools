@@ -531,15 +531,42 @@ def _filter_terrain_by_mesh_objects(vgd: VoxelGridData, config: dict) -> VoxelGr
     import bpy
     from mathutils import Vector
 
+    import numpy as _np
+
     unit_scale = _get_unit_scale()
     cam_h = config.get("camera_height", 1.7) / unit_scale
     min_x, min_y = vgd.bounds[0], vgd.bounds[1]
-    min_z = vgd.bounds[4]
     up = Vector((0.0, 0.0, 1.0))
     depsgraph = bpy.context.evaluated_depsgraph_get()
     scene = bpy.context.scene
     # Stay well below any sky/env sphere (typically radius > 500 BU)
     MAX_DIST = 50.0 / unit_scale
+
+    # Build a bilinear lookup into the fine TerrainSnake heightmap so eye_z is
+    # the actual terrain surface Z, not a coarse voxel-floor approximation.
+    _hm_lookup = None
+    terrain_npz = config.get("terrain_npz")
+    if terrain_npz:
+        _td = _np.load(terrain_npz)
+        _hm = _td["heightmap"].astype(_np.float64)
+        _fine_res = float(_td["res"])
+        _hm_min_x = float(_td["bounds"][0])
+        _hm_min_y = float(_td["bounds"][1])
+        _hm_nx, _hm_ny = _hm.shape
+
+        def _hm_lookup(wx: float, wy: float) -> "float | None":
+            fx = (wx - _hm_min_x) / _fine_res - 0.5
+            fy = (wy - _hm_min_y) / _fine_res - 0.5
+            ix = max(0, min(_hm_nx - 2, int(fx)))
+            iy = max(0, min(_hm_ny - 2, int(fy)))
+            tx = max(0.0, min(1.0, fx - ix))
+            ty = max(0.0, min(1.0, fy - iy))
+            z00 = _hm[ix, iy]; z10 = _hm[ix+1, iy]
+            z01 = _hm[ix, iy+1]; z11 = _hm[ix+1, iy+1]
+            if any(_np.isnan(v) for v in (z00, z10, z01, z11)):
+                return None
+            return float((1-tx)*(1-ty)*z00 + tx*(1-ty)*z10
+                         + (1-tx)*ty*z01 + tx*ty*z11)
 
     def _inside_mesh(wx: float, wy: float, wz: float) -> bool:
         """Return True if (wx, wy, wz) is inside a closed mesh (parity test)."""
@@ -562,8 +589,11 @@ def _filter_terrain_by_mesh_objects(vgd: VoxelGridData, config: dict) -> VoxelGr
         ix, iy, iz = int(row[0]), int(row[1]), int(row[2])
         cx = min_x + (ix + 0.5) * vgd.res
         cy = min_y + (iy + 0.5) * vgd.res
-        # Camera-eye Z: terrain voxel floor + camera height
-        eye_z = min_z + iz * vgd.res + cam_h
+        # Use actual terrain Z from heightmap; fall back to voxel-centre approx.
+        terrain_z = (_hm_lookup(cx, cy) if _hm_lookup is not None else None)
+        if terrain_z is None:
+            terrain_z = vgd.bounds[4] + (iz + 0.5) * vgd.res
+        eye_z = terrain_z + cam_h
         if _inside_mesh(cx, cy, eye_z):
             n_blocked += 1
         else:
