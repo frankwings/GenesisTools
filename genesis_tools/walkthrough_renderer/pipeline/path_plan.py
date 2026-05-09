@@ -543,13 +543,16 @@ def _build_smooth_path(tour: list, walkable: set, config: dict, bounds: tuple,
                         continue
                     _px = float(_p.location.x); _py = float(_p.location.y)
                     _r = (_hsz * float(_p.size) if _p.size > 0 else _hsz) * _ptcl_margin
-                    _rc = max(1, math.ceil(_r / _pstep))
-                    _cx = int((_px - min_x) / _pstep)
-                    _cy = int((_py - min_y) / _pstep)
-                    for _dx in range(-_rc, _rc + 1):
-                        for _dy in range(-_rc, _rc + 1):
-                            if _dx * _dx + _dy * _dy <= _rc * _rc:
-                                _ptcl_blocked.add((_cx + _dx, _cy + _dy))
+                    # Intersection test: mark every sub-voxel cell whose range
+                    # overlaps [px-r, px+r] × [py-r, py+r] (same logic as
+                    # _mark_particle_instance_voxels in voxel_grid.py).
+                    _ix_lo = int((_px - _r - min_x) / _pstep)
+                    _ix_hi = int((_px + _r - min_x) / _pstep)
+                    _iy_lo = int((_py - _r - min_y) / _pstep)
+                    _iy_hi = int((_py + _r - min_y) / _pstep)
+                    for _ix in range(max(0, _ix_lo), _ix_hi + 1):
+                        for _iy in range(max(0, _iy_lo), _iy_hi + 1):
+                            _ptcl_blocked.add((_ix, _iy))
         print(f"[PathPlan] Particle sub-voxel set: {len(_ptcl_blocked)} blocked cells "
               f"at step={_pstep:.2f} BU")
     except Exception as _e:
