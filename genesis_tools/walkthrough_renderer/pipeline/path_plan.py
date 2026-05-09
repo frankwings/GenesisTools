@@ -510,8 +510,74 @@ def _build_smooth_path(tour: list, walkable: set, config: dict, bounds: tuple,
         new_pts.append(points[-1])
         points = new_pts
 
+    # --- Sub-voxel particle-blocked set -------------------------------------
+    # Scatter instances (OBJECT/COLLECTION render type) are invisible to
+    # ray_cast, so _los_clear cannot detect them.  Build a 2D blocked set at
+    # upsampled-step resolution so each interpolated point can be deflected
+    # laterally out of particle tree/rock columns before Z-snapping.
+    _SCATTER_RT = {"OBJECT", "COLLECTION"}
+    _pstep = res / 4.0  # matches 4× upsample step
+    _ptcl_blocked: set = set()
+    _ptcl_margin = config.get("particle_block_margin", 1.5)
+    try:
+        _dg_ptcl = bpy.context.evaluated_depsgraph_get()
+        for _obj in bpy.context.scene.objects:
+            if _obj.type not in ("MESH", "CURVE", "SURFACE"):
+                continue
+            _eval_obj = _obj.evaluated_get(_dg_ptcl)
+            for _psys in _eval_obj.particle_systems:
+                _sett = _psys.settings
+                if _sett.render_type not in _SCATTER_RT:
+                    continue
+                if _sett.render_type == "OBJECT" and _sett.instance_object:
+                    _inst = _sett.instance_object
+                    _hsz = max(_inst.dimensions) * 0.5 if max(_inst.dimensions) > 0 else _pstep
+                elif _sett.render_type == "COLLECTION" and _sett.instance_collection:
+                    _dims = [d for _co in _sett.instance_collection.objects
+                             for d in _co.dimensions]
+                    _hsz = max(_dims) * 0.5 if _dims else _pstep
+                else:
+                    continue
+                for _p in _psys.particles:
+                    if _p.alive_state != "ALIVE":
+                        continue
+                    _px = float(_p.location.x); _py = float(_p.location.y)
+                    _r = (_hsz * float(_p.size) if _p.size > 0 else _hsz) * _ptcl_margin
+                    _rc = max(1, math.ceil(_r / _pstep))
+                    _cx = int((_px - min_x) / _pstep)
+                    _cy = int((_py - min_y) / _pstep)
+                    for _dx in range(-_rc, _rc + 1):
+                        for _dy in range(-_rc, _rc + 1):
+                            if _dx * _dx + _dy * _dy <= _rc * _rc:
+                                _ptcl_blocked.add((_cx + _dx, _cy + _dy))
+        print(f"[PathPlan] Particle sub-voxel set: {len(_ptcl_blocked)} blocked cells "
+              f"at step={_pstep:.2f} BU")
+    except Exception as _e:
+        print(f"[PathPlan] Warning: particle sub-voxel set failed ({_e}) — skipping")
+
+    def _deflect_particle(wx: float, wy: float) -> "tuple[float, float]":
+        """Return nearest non-particle-blocked XY; original if set is empty or point is clear."""
+        if not _ptcl_blocked:
+            return wx, wy
+        cx = int((wx - min_x) / _pstep)
+        cy = int((wy - min_y) / _pstep)
+        if (cx, cy) not in _ptcl_blocked:
+            return wx, wy
+        for r in range(1, 12):
+            for ddx in range(-r, r + 1):
+                for ddy in range(-r, r + 1):
+                    if abs(ddx) == r or abs(ddy) == r:
+                        if (cx + ddx, cy + ddy) not in _ptcl_blocked:
+                            return (min_x + (cx + ddx + 0.5) * _pstep,
+                                    min_y + (cy + ddy + 0.5) * _pstep)
+        return wx, wy  # no clear cell within search radius — keep original
+
+    # -----------------------------------------------------------------------
+
     # 4× upsample; snap every interpolated point to the actual mesh surface via
     # downward ray_cast (falls back to coarse heightmap when ray misses).
+    # Each intermediate XY is also deflected laterally out of particle-blocked
+    # columns (scatter instances are invisible to ray_cast / _los_clear).
     upsampled = []
     steps = 4
     for i in range(len(points)-1):
@@ -522,6 +588,7 @@ def _build_smooth_path(tour: list, walkable: set, config: dict, bounds: tuple,
                 wx = p_start[0]+t*(p_end[0]-p_start[0])
                 wy = p_start[1]+t*(p_end[1]-p_start[1])
                 wz = p_start[2]+t*(p_end[2]-p_start[2])
+                wx, wy = _deflect_particle(wx, wy)
                 upsampled.append(_best_z(wx, wy, wz))
         else:
             upsampled.append(_best_z(p_start[0], p_start[1], p_start[2]))
