@@ -517,6 +517,70 @@ def _filter_terrain_by_particles(vgd: VoxelGridData, config: dict) -> VoxelGridD
     )
 
 
+def _filter_terrain_by_mesh_objects(vgd: VoxelGridData, config: dict) -> VoxelGridData:
+    """Remove terrain candidates whose camera-eye falls inside any mesh object.
+
+    Ray parity test: fire a +Z ray from the camera-eye position and count how
+    many mesh surfaces it crosses.  Odd = inside a closed mesh (tree trunk,
+    rock, building) → block.  Works for both scatter-base mesh trees and
+    individually placed mesh objects — anything the bpy ray_cast can see.
+
+    Sky/env spheres are avoided by capping the ray at MAX_DIST (50 BU).
+    Must be called with an open bpy scene.
+    """
+    import bpy
+    from mathutils import Vector
+
+    unit_scale = _get_unit_scale()
+    cam_h = config.get("camera_height", 1.7) / unit_scale
+    min_x, min_y = vgd.bounds[0], vgd.bounds[1]
+    min_z = vgd.bounds[4]
+    up = Vector((0.0, 0.0, 1.0))
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    scene = bpy.context.scene
+    # Stay well below any sky/env sphere (typically radius > 500 BU)
+    MAX_DIST = 50.0 / unit_scale
+
+    def _inside_mesh(wx: float, wy: float, wz: float) -> bool:
+        """Return True if (wx, wy, wz) is inside a closed mesh (parity test)."""
+        pos = Vector((wx, wy, wz))
+        remaining = MAX_DIST
+        count = 0
+        while remaining > 1e-3:
+            hit, loc, _n, _i, _o, _m = scene.ray_cast(
+                depsgraph, pos, up, distance=remaining)
+            if not hit:
+                break
+            count += 1
+            remaining -= (loc - pos).length + 1e-4
+            pos = loc + Vector((0.0, 0.0, 1e-4))
+        return (count % 2) == 1
+
+    filtered = []
+    n_blocked = 0
+    for row in vgd.candidates:
+        ix, iy, iz = int(row[0]), int(row[1]), int(row[2])
+        cx = min_x + (ix + 0.5) * vgd.res
+        cy = min_y + (iy + 0.5) * vgd.res
+        # Camera-eye Z: terrain voxel floor + camera height
+        eye_z = min_z + iz * vgd.res + cam_h
+        if _inside_mesh(cx, cy, eye_z):
+            n_blocked += 1
+        else:
+            filtered.append((ix, iy, iz))
+
+    filtered_arr = (np.array(sorted(filtered), dtype=np.int32)
+                    if filtered else np.empty((0, 3), dtype=np.int32))
+    print(f"[VoxelGrid] Terrain mesh filter: -{n_blocked} inside mesh objects, "
+          f"{len(filtered_arr)} candidates remain")
+    return VoxelGridData(
+        solid=vgd.solid, candidates=filtered_arr,
+        nx=vgd.nx, ny=vgd.ny, nz=vgd.nz,
+        res=vgd.res, bounds=vgd.bounds, unit_scale=vgd.unit_scale,
+        mode=vgd.mode, hits=vgd.hits,
+    )
+
+
 def _build_terrain_candidates(config: dict) -> VoxelGridData:
     """Load terrain_snake.npz and map heightmap Z → one walkable voxel per column.
 
@@ -634,6 +698,7 @@ def build(blend_path: str, config: dict) -> VoxelGridData:
             import bpy
             bpy.ops.wm.open_mainfile(filepath=blend_path)
             vgd = _filter_terrain_by_particles(vgd, config)
+            vgd = _filter_terrain_by_mesh_objects(vgd, config)
         return vgd
 
     import bpy
