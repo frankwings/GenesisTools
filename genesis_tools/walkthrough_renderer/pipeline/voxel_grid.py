@@ -858,6 +858,89 @@ def _build_terrain_candidates(config: dict) -> VoxelGridData:
 
 
 # ---------------------------------------------------------------------------
+# Auto-resolution terrain build
+# ---------------------------------------------------------------------------
+
+def _camera_walkable(vgd: VoxelGridData, camera_xyz) -> bool:
+    """Return True if the camera's XY maps to a walkable candidate cell."""
+    if camera_xyz is None or not len(vgd.candidates):
+        return False
+    cx, cy = float(camera_xyz[0]), float(camera_xyz[1])
+    cam_ix = max(0, min(vgd.nx - 1, int((cx - vgd.bounds[0]) / vgd.res)))
+    cam_iy = max(0, min(vgd.ny - 1, int((cy - vgd.bounds[1]) / vgd.res)))
+    cands_xy = {(int(r[0]), int(r[1])) for r in vgd.candidates}
+    return (cam_ix, cam_iy) in cands_xy
+
+
+def _build_terrain_auto_resolution(blend_path: str, config: dict) -> VoxelGridData:
+    """Terrain build with automatic resolution halving until camera voxel is walkable.
+
+    Starting from config["grid_resolution_start"] (default 20.0 BU), the
+    resolution is halved each iteration until:
+      (a) the camera's coarse cell appears in the final walkable candidate set, OR
+      (b) the next halving would produce a grid with more than
+          config["max_total_voxels_xy"] cells (default 14400).
+
+    bpy is opened exactly once regardless of how many iterations are needed.
+    If config["mark_particle_instances"] is False, bpy is not opened at all.
+
+    The chosen resolution is printed at the end; downstream steps read
+    VoxelGridData.res to know the actual resolution used.
+    """
+    start_res = float(config.get("grid_resolution_start", 20.0))
+    max_cells = int(config.get("max_total_voxels_xy", 14400))
+    use_particles = config.get("mark_particle_instances", True)
+
+    # Camera position for walkability check (from terrain_snake.npz)
+    ts_data  = np.load(config["terrain_npz"])
+    cam_xyz  = ts_data["camera_xyz"] if "camera_xyz" in ts_data.files else None
+
+    # Open bpy once so particle/mesh filters can run without re-opening each iter
+    if use_particles:
+        import bpy as _bpy
+        _bpy.ops.wm.open_mainfile(filepath=blend_path)
+        print(f"[VoxelGrid] Auto-res: blend opened for particle filtering")
+
+    current_res = start_res
+    vgd: VoxelGridData | None = None
+
+    for iteration in range(1, 32):   # 31 halvings = sub-millimetre, never reached in practice
+        cfg = dict(config)
+        cfg["grid_resolution"] = current_res
+
+        vgd = _build_terrain_candidates(cfg)
+        if use_particles:
+            vgd = _filter_terrain_by_particles(vgd, cfg)
+            vgd = _filter_terrain_by_mesh_objects(vgd, cfg)
+        vgd = _filter_terrain_by_boundary_margin(vgd, cfg)
+
+        walkable = _camera_walkable(vgd, cam_xyz)
+        # Predict next grid size (halving res ≈ doubling cells per axis)
+        next_cells = (vgd.nx * 2) * (vgd.ny * 2)
+
+        print(f"[VoxelGrid] Auto-res iter {iteration}: "
+              f"res={current_res:.2f} BU  grid {vgd.nx}×{vgd.ny} ({vgd.nx * vgd.ny} cells)  "
+              f"walkable={len(vgd.candidates)}  camera_walkable={walkable}")
+
+        if walkable:
+            print(f"[VoxelGrid] Auto-res: camera walkable ✓  final res={current_res:.2f} BU")
+            break
+
+        if next_cells > max_cells:
+            print(f"[VoxelGrid] Auto-res: next step {current_res/2:.2f} BU would give "
+                  f"~{next_cells} cells > max_total_voxels_xy={max_cells} — "
+                  f"stopping at {current_res:.2f} BU "
+                  f"(camera not walkable; path_plan will route to nearest walkable cell)")
+            break
+
+        current_res /= 2.0
+    else:
+        print(f"[VoxelGrid] Auto-res: iteration limit reached at res={current_res:.2f} BU")
+
+    return vgd
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -869,8 +952,14 @@ def build(blend_path: str, config: dict) -> VoxelGridData:
     opened to filter candidates blocked by scatter instances.  Set
     mark_particle_instances=false to skip the particle pass and avoid opening
     the blend file entirely (legacy / test behaviour).
+
+    grid_resolution may be set to the string "auto" to enable automatic
+    resolution halving until the original scene camera's voxel is walkable.
+    See _build_terrain_auto_resolution for details.
     """
     if config.get("terrain_npz"):
+        if str(config.get("grid_resolution", "")).lower() == "auto":
+            return _build_terrain_auto_resolution(blend_path, config)
         vgd = _build_terrain_candidates(config)
         if config.get("mark_particle_instances", True):
             import bpy

@@ -5,6 +5,8 @@
 
     "terrain_snake_resolution": 2.0,
     "grid_resolution": 20.0,
+    "grid_resolution_start": 20.0,
+    "max_total_voxels_xy": 14400,
     "max_grid_cells_xy": 180,
     "env_sphere_percentile": 5.0,
     "terrain_ray_samples": 1,
@@ -22,6 +24,7 @@
     "seed": 42,
     "aerial": false,
     "laplacian_iters": 0,
+    "terrain_boundary_margin": 1,
     "particle_block_margin": 1.5,
 
     "waypoint_gaze_mode": "waypoint",
