@@ -332,17 +332,27 @@ def _load_terrain_data(result_dir: Path) -> TerrainData:
 
     camera_xyz = data["camera_xyz"] if "camera_xyz" in data.files else None
 
+    # Waypoints in path.npz are coarse-voxel-grid indices (not fine-terrain indices).
+    # Peek at voxel_grid.npz to get the coarse resolution so conversion is correct.
+    # Falls back to fine terrain res only if voxel_grid.npz is absent.
+    vg_path = result_dir / "voxel_grid.npz"
+    _wp_res = res   # will be replaced with vg_res when file exists
+    if vg_path.exists():
+        try:
+            _vgd_peek = np.load(vg_path)
+            _wp_res = float(_vgd_peek["res"])
+        except Exception:
+            pass
+
     if pnpz_path.exists():
         pdata = np.load(pnpz_path)
         pts   = pdata["path_points"]
-        wps_v = pdata["waypoints"]            # voxel indices (int32)
+        wps_v = pdata["waypoints"]            # coarse voxel-grid indices (int32)
         camera_height = float(pdata["camera_height"])
-        # Convert voxel-index waypoints → world XY for plotting on a
-        # world-coord axis. (path_points are already in world coords;
-        # waypoints are not — easy bug.)
-        wx = min_x + (wps_v[:, 0].astype(float) + 0.5) * res
-        wy = min_y + (wps_v[:, 1].astype(float) + 0.5) * res
-        wz = bounds[4] + (wps_v[:, 2].astype(float) + 0.5) * res
+        # Waypoints are coarse-grid indices — convert using vg_res (not fine res).
+        wx = min_x + (wps_v[:, 0].astype(float) + 0.5) * _wp_res
+        wy = min_y + (wps_v[:, 1].astype(float) + 0.5) * _wp_res
+        wz = bounds[4] + (wps_v[:, 2].astype(float) + 0.5) * _wp_res
         wps = np.column_stack([wx, wy, wz])
         has_path = True
     else:
