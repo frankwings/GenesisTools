@@ -183,7 +183,74 @@ _build_terrain_candidates
 
 ---
 
-## 6. 验证
+---
 
-渲染验证进行中（1000 帧，Windows Blender 4.5 Cycles，640×480，64 samples）。
-待 frame_0438 和 frame_0767 渲染完成后确认是否仍为黑帧。
+## 6. Particle 检测架构问题与修复
+
+### 问题：Step 3 无 blend，particle 检测永远返回 0
+
+`_build_smooth_path`（在 path_plan.py 中）内有正确的 particle 子体素检测逻辑，会遍历 bpy scene 中的所有 scatter 实例，为每棵树/岩石建立 `_ptcl_blocked` 集合，阻挡路径插值点进入树干区域。
+
+但实际运行时检测永远返回 0，原因：
+
+```
+walkthrough.py Step 3 调用：
+  python3 -m genesis_tools...path_plan
+    --voxel-grid ...
+    --walkable ...
+    --config ...
+    --output ...
+    # ← 没有 --blend !
+```
+
+pip bpy 启动时场景为空，`bpy.context.scene.objects` 里没有任何对象，particle 系统不可见，`_ptcl_blocked` 永远为空集合。
+
+### 解法：三处改动（commit `f33b134`）
+
+**1. `path_plan.build()` 加 `blend_path` 参数**
+
+```python
+def build(vg, wk, config: dict, blend_path: str = None) -> PathData:
+    if blend_path:
+        try:
+            import bpy as _bpy
+            _bpy.ops.wm.open_mainfile(filepath=str(blend_path))
+        except Exception as _e:
+            print(f"[PathPlan] Warning: could not open blend ({_e})")
+```
+
+在 `_build_smooth_path` 被调用之前打开场景，particle 数据可用。
+
+**2. `path_plan._cli()` 加 `--blend` 可选参数**
+
+```python
+parser.add_argument("--blend", required=False, default=None)
+...
+data = build(vg, wk, config, blend_path=args.blend)
+```
+
+**3. `walkthrough.py` Step 3 传入 `--blend`**
+
+```python
+_run_bpy_module(
+    "genesis_tools.walkthrough_renderer.pipeline.path_plan",
+    ["--voxel-grid", str(vg_path), "--walkable", str(wk_path),
+     "--blend", blend_path,          # ← 新增
+     "--config", config_path, "--output", str(pd_path)],
+)
+```
+
+### 效果
+
+修复后 Step 3 有完整 bpy 场景，`_ptcl_blocked` 会正确填充，路径插值点会被 `_deflect_particle` 推离树干。此 bug 在当前 forest_paths 场景中不是黑帧根因（因为问题区域附近 210 BU 内没有 particle），但在树木密集区域可能导致路径穿树问题。
+
+---
+
+## 7. 验证
+
+渲染验证（1000 帧，Windows Blender 4.5 Cycles，640×480，64 samples）：
+
+| 帧 | 修复前 | 修复后 |
+|----|--------|--------|
+| frame_0438 | 全黑 | mean=45.7，black_pct=0.0% ✅ |
+| frame_0767 | 全黑 | 待确认（渲染中） |
