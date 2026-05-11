@@ -37,6 +37,10 @@ from genesis_tools.walkthrough_renderer.walkthrough import run
 print(f"[forest_paths v4] Phase 2 → {OUT_DIR}")
 run(BLEND, config, str(OUT_DIR), render=True)
 
+# run_terrain_snake reads terrain_snake.npz from OUT_DIR; copy from v1 if not present
+if not (OUT_DIR / "terrain_snake.npz").exists():
+    shutil.copy2(NPZ, OUT_DIR / "terrain_snake.npz")
+
 # --- Terrain figures ---
 from genesis_tools.active_contour.visualize import run_terrain_snake
 run_terrain_snake(OUT_DIR)
