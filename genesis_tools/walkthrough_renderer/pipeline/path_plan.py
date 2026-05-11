@@ -862,50 +862,57 @@ def build(vg, wk, config: dict, blend_path: str = None) -> PathData:
                     cam_iz = max(0, min(vg.nz - 1, int((h_val - min_z_b) / vg.res)))
                 fixed_first = (cam_ix, cam_iy, cam_iz)
                 if fixed_first not in component:
-                    # Camera voxel was filtered out (e.g. particle-blocked).
-                    # March along the camera's XY look-at direction until we reach
-                    # the first walkable voxel — the path starts where the camera
-                    # is already facing rather than jumping sideways.
-                    lookat = (tdata["camera_lookat"]
-                              if "camera_lookat" in tdata.files else None)
-                    found_near = None
-                    if lookat is not None:
-                        ldx, ldy = float(lookat[0]), float(lookat[1])
-                        mag = (ldx ** 2 + ldy ** 2) ** 0.5
-                        if mag > 1e-6:
-                            ldx /= mag; ldy /= mag
-                            # March in both forward (+) and backward (-) directions;
-                            # take whichever finds a walkable voxel first.
-                            found_fwd = found_bwd = None
-                            prev_fwd = prev_bwd = None
-                            for step in range(1, min(vg.nx, vg.ny) * 2):
-                                t = step * 0.5  # half-voxel increments
-                                if found_fwd is None:
-                                    cix = max(0, min(vg.nx-1, int(round(cam_ix + ldx*t))))
-                                    ciy = max(0, min(vg.ny-1, int(round(cam_iy + ldy*t))))
-                                    c = (cix, ciy, cam_iz)
-                                    if c != prev_fwd and c in component:
-                                        found_fwd = c
-                                    prev_fwd = c
-                                if found_bwd is None:
-                                    cix = max(0, min(vg.nx-1, int(round(cam_ix - ldx*t))))
-                                    ciy = max(0, min(vg.ny-1, int(round(cam_iy - ldy*t))))
-                                    c = (cix, ciy, cam_iz)
-                                    if c != prev_bwd and c in component:
-                                        found_bwd = c
-                                    prev_bwd = c
-                                if found_fwd is not None and found_bwd is not None:
-                                    break
-                            # Prefer forward; fall back to backward.
-                            found_near = found_fwd if found_fwd is not None else found_bwd
-                    if found_near:
-                        fixed_first = found_near
-                        print(f"[PathPlan] Camera cell ({cam_ix},{cam_iy},{cam_iz}) particle-blocked "
-                              f"— moved along lookat to first walkable cell {fixed_first}")
-                    else:
+                    if config.get("force_camera_walkable", True):
+                        # Honour the designer's camera position unconditionally.
+                        # Inject the cell into component + walkable_set so FPS
+                        # spreads from it.  If it is geometrically isolated (e.g.
+                        # inside a tree canopy cluster at different height from the
+                        # floor), _bfs_path returns a direct [start, end] jump
+                        # that camera_animate interpolates as a smooth approach.
                         component.add(fixed_first)
                         walkable_set.add(fixed_first)
-                        print(f"[PathPlan] Camera cell {fixed_first} not in walkable — forced (no nearby walkable)")
+                        print(f"[PathPlan] Camera cell {fixed_first} forced into component "
+                              f"(force_camera_walkable=true)")
+                    else:
+                        # Legacy: march along the camera's XY look-at direction
+                        # until we reach the first walkable voxel in the main component.
+                        lookat = (tdata["camera_lookat"]
+                                  if "camera_lookat" in tdata.files else None)
+                        found_near = None
+                        if lookat is not None:
+                            ldx, ldy = float(lookat[0]), float(lookat[1])
+                            mag = (ldx ** 2 + ldy ** 2) ** 0.5
+                            if mag > 1e-6:
+                                ldx /= mag; ldy /= mag
+                                found_fwd = found_bwd = None
+                                prev_fwd = prev_bwd = None
+                                for step in range(1, min(vg.nx, vg.ny) * 2):
+                                    t = step * 0.5
+                                    if found_fwd is None:
+                                        cix = max(0, min(vg.nx-1, int(round(cam_ix + ldx*t))))
+                                        ciy = max(0, min(vg.ny-1, int(round(cam_iy + ldy*t))))
+                                        c = (cix, ciy, cam_iz)
+                                        if c != prev_fwd and c in component:
+                                            found_fwd = c
+                                        prev_fwd = c
+                                    if found_bwd is None:
+                                        cix = max(0, min(vg.nx-1, int(round(cam_ix - ldx*t))))
+                                        ciy = max(0, min(vg.ny-1, int(round(cam_iy - ldy*t))))
+                                        c = (cix, ciy, cam_iz)
+                                        if c != prev_bwd and c in component:
+                                            found_bwd = c
+                                        prev_bwd = c
+                                    if found_fwd is not None and found_bwd is not None:
+                                        break
+                                found_near = found_fwd if found_fwd is not None else found_bwd
+                        if found_near:
+                            fixed_first = found_near
+                            print(f"[PathPlan] Camera cell ({cam_ix},{cam_iy},{cam_iz}) not walkable "
+                                  f"— moved along lookat to {fixed_first}")
+                        else:
+                            component.add(fixed_first)
+                            walkable_set.add(fixed_first)
+                            print(f"[PathPlan] Camera cell {fixed_first} not walkable — forced (no lookat cell found)")
                 else:
                     print(f"[PathPlan] First waypoint forced to camera cell {fixed_first}")
         except Exception as exc:
