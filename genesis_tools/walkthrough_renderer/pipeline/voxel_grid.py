@@ -858,6 +858,70 @@ def _build_terrain_candidates(config: dict) -> VoxelGridData:
 
 
 # ---------------------------------------------------------------------------
+# Camera-cell force-walkable
+# ---------------------------------------------------------------------------
+
+def _force_camera_walkable(vgd: VoxelGridData, config: dict) -> VoxelGridData:
+    """Ensure the original scene camera's coarse cell is always in candidates.
+
+    Particle and mesh filters can remove the camera cell if the Blender scene
+    camera was placed inside a tree canopy or object bounding sphere.  Since
+    the scene designer chose that position intentionally, we re-insert it so
+    path_plan always starts from (or very near) the actual camera.
+
+    The iz for the forced cell is read from the terrain heightmap so the
+    camera height on the path is consistent with surrounding walkable cells.
+    Controlled by config["force_camera_walkable"] (default True).
+    """
+    if not config.get("force_camera_walkable", True):
+        return vgd
+    terrain_npz = config.get("terrain_npz")
+    if not terrain_npz:
+        return vgd
+
+    ts = np.load(terrain_npz)
+    if "camera_xyz" not in ts.files:
+        return vgd
+    cam_xyz = ts["camera_xyz"]
+    cx, cy = float(cam_xyz[0]), float(cam_xyz[1])
+    cam_ix = max(0, min(vgd.nx - 1, int((cx - vgd.bounds[0]) / vgd.res)))
+    cam_iy = max(0, min(vgd.ny - 1, int((cy - vgd.bounds[1]) / vgd.res)))
+
+    if any(int(r[0]) == cam_ix and int(r[1]) == cam_iy for r in vgd.candidates):
+        return vgd  # already walkable
+
+    # Compute terrain Z for this coarse cell by averaging the fine heightmap patch
+    hm        = ts["heightmap"].astype(np.float64)
+    fine_res  = float(ts["res"])
+    unit_scale = float(ts["unit_scale"]) if "unit_scale" in ts.files else 1.0
+    scale     = (vgd.res * unit_scale) / fine_res  # fine pixels per coarse cell
+    ix_lo = int(cam_ix * scale)
+    ix_hi = min(hm.shape[0], int(math.ceil((cam_ix + 1) * scale)))
+    iy_lo = int(cam_iy * scale)
+    iy_hi = min(hm.shape[1], int(math.ceil((cam_iy + 1) * scale)))
+    sub   = hm[ix_lo:ix_hi, iy_lo:iy_hi]
+    valid = ~np.isnan(sub)
+    if not valid.any():
+        return vgd  # no terrain data — can't force
+
+    z_val = float(np.mean(sub[valid]))
+    min_z = vgd.bounds[4]
+    iz    = max(0, min(vgd.nz - 1, int((z_val - min_z) / vgd.res)))
+
+    forced = np.array([[cam_ix, cam_iy, iz]], dtype=np.int32)
+    new_candidates = np.vstack([forced, vgd.candidates])
+    print(f"[VoxelGrid] Camera cell ({cam_ix},{cam_iy}) was filtered out — "
+          f"force-added to candidates (z={z_val:.1f} BU, iz={iz})")
+
+    return VoxelGridData(
+        solid=vgd.solid, candidates=new_candidates,
+        nx=vgd.nx, ny=vgd.ny, nz=vgd.nz, res=vgd.res,
+        bounds=vgd.bounds, unit_scale=vgd.unit_scale,
+        mode=vgd.mode, hits=vgd.hits,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Auto-resolution terrain build
 # ---------------------------------------------------------------------------
 
@@ -915,6 +979,9 @@ def _build_terrain_auto_resolution(blend_path: str, config: dict) -> VoxelGridDa
         vgd = _filter_terrain_by_boundary_margin(vgd, cfg)
 
         walkable = _camera_walkable(vgd, cam_xyz)
+        # Note: _force_camera_walkable is NOT called here — the auto-res loop
+        # uses natural walkability to decide resolution.  It is applied once
+        # after the loop exits (via build() which calls _force_camera_walkable).
         # Predict next grid size (halving res ≈ doubling cells per axis)
         next_cells = (vgd.nx * 2) * (vgd.ny * 2)
 
@@ -937,7 +1004,7 @@ def _build_terrain_auto_resolution(blend_path: str, config: dict) -> VoxelGridDa
     else:
         print(f"[VoxelGrid] Auto-res: iteration limit reached at res={current_res:.2f} BU")
 
-    return vgd
+    return _force_camera_walkable(vgd, config)
 
 
 # ---------------------------------------------------------------------------
@@ -972,6 +1039,7 @@ def build(blend_path: str, config: dict) -> VoxelGridData:
             # unreliable.  _filter_terrain_by_boundary_margin handles the same use-case
             # (removing scene-boundary cliff-edge candidates) without any ray_cast.
         vgd = _filter_terrain_by_boundary_margin(vgd, config)
+        vgd = _force_camera_walkable(vgd, config)
         return vgd
 
     import bpy

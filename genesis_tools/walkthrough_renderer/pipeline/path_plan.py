@@ -834,11 +834,32 @@ def build(vg, wk, config: dict, blend_path: str = None) -> PathData:
                 min_x_b, min_y_b, min_z_b = vg.bounds[0], vg.bounds[1], vg.bounds[4]
                 cam_ix = max(0, min(vg.nx - 1, int((float(cx) - min_x_b) / vg.res)))
                 cam_iy = max(0, min(vg.ny - 1, int((float(cy) - min_y_b) / vg.res)))
-                h_val = float(tdata["heightmap"][cam_ix, cam_iy])
-                if not math.isnan(h_val):
-                    cam_iz = max(0, min(vg.nz - 1, int((h_val - min_z_b) / vg.res)))
+                # Prefer iz from walkable_set (populated by voxel_grid with coarse
+                # heightmap average).  The raw heightmap in terrain_snake.npz is the
+                # fine grid (e.g. 180×180); indexing it with coarse cam_ix/cam_iy gives
+                # the wrong cell when coarse_res ≠ fine_res.
+                iz_from_set = next(
+                    (int(r[2]) for r in walkable_set if int(r[0]) == cam_ix and int(r[1]) == cam_iy),
+                    None,
+                )
+                if iz_from_set is not None:
+                    cam_iz = iz_from_set
                 else:
-                    cam_iz = max(0, min(vg.nz - 1, int((float(cz) - min_z_b) / vg.res)))
+                    # Fallback: average the fine patch that covers this coarse cell
+                    fine_res = float(tdata["res"]) if "res" in tdata.files else vg.res
+                    scale = vg.res / fine_res
+                    hm = tdata["heightmap"]
+                    ix_lo = int(cam_ix * scale)
+                    ix_hi = min(hm.shape[0], int(math.ceil((cam_ix + 1) * scale)))
+                    iy_lo = int(cam_iy * scale)
+                    iy_hi = min(hm.shape[1], int(math.ceil((cam_iy + 1) * scale)))
+                    sub = hm[ix_lo:ix_hi, iy_lo:iy_hi]
+                    valid_mask = ~np.isnan(sub)
+                    if valid_mask.any():
+                        h_val = float(np.mean(sub[valid_mask]))
+                    else:
+                        h_val = float(cz)
+                    cam_iz = max(0, min(vg.nz - 1, int((h_val - min_z_b) / vg.res)))
                 fixed_first = (cam_ix, cam_iy, cam_iz)
                 if fixed_first not in component:
                     # Camera voxel was filtered out (e.g. particle-blocked).
