@@ -127,6 +127,7 @@ def run(blend_path: str, config: dict, output_dir: str,
             _run_bpy_module(
                 "genesis_tools.walkthrough_renderer.pipeline.path_plan",
                 ["--voxel-grid", str(vg_path), "--walkable", str(wk_path),
+                 "--blend", blend_path,
                  "--config", config_path, "--output", str(pd_path)],
             )
             pd = pd_load(str(pd_path))

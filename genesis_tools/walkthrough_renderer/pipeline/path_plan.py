@@ -782,13 +782,26 @@ def _travel_direction_target(cam_pos, path_points: list, t: float, ahead: float 
 # Public API
 # ---------------------------------------------------------------------------
 
-def build(vg, wk, config: dict) -> PathData:
+def build(vg, wk, config: dict, blend_path: str = None) -> PathData:
     """Build PathData from VoxelGridData + WalkableData.
+
+    blend_path: optional path to the .blend file.  When provided, the scene
+    is opened in bpy before path smoothing so that particle scatter instances
+    (pine trees, rocks, etc.) are visible to the sub-voxel particle-blocked
+    detection inside _build_smooth_path.  Without this, pip-bpy runs with an
+    empty scene and particle detection always returns 0.
 
     bpy-dependent smoothing functions are only called if bpy is importable.
     When running under system Python (e.g. in tests), smoothing is skipped
     and raw voxel-centre positions are used.
     """
+    if blend_path:
+        try:
+            import bpy as _bpy
+            _bpy.ops.wm.open_mainfile(filepath=str(blend_path))
+            print(f"[PathPlan] Opened blend for particle detection: {blend_path}")
+        except Exception as _e:
+            print(f"[PathPlan] Warning: could not open blend ({_e}) — particle detection unavailable")
     walkable_set = {tuple(r) for r in wk.walkable}
     if not walkable_set:
         return PathData(
@@ -1008,6 +1021,8 @@ def _cli():
     parser.add_argument("--walkable", required=True)
     parser.add_argument("--config", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--blend", required=False, default=None,
+                        help="Path to .blend file (enables particle scatter detection)")
     args = parser.parse_args()
     from genesis_tools.walkthrough_renderer.pipeline.voxel_grid import load as vg_load
     from genesis_tools.walkthrough_renderer.pipeline.walkable import load as wk_load
@@ -1015,7 +1030,7 @@ def _cli():
     wk = wk_load(args.walkable)
     with open(args.config) as f:
         config = json.load(f)
-    data = build(vg, wk, config)
+    data = build(vg, wk, config, blend_path=args.blend)
     save(data, args.output)
 
 
