@@ -14,12 +14,14 @@ Two modes — invoked from the GenesisTools repo root:
       python genesis_tools/active_contour/visualize.py terrain [result_dir]
     Default result_dir = results/arctic_midnight_sun_v1.  `path.npz` is
     optional — when missing, fig 1/2 omit the camera-path overlay.
-    Output: 5 figures in `<result_dir>/viz/`
-      figure_0_initial_vs_final.png — initial cloth (z_max) vs final cloth
-      figure_1_top_down.png         — coverage / heightmap / bridged
-      figure_2_side_profiles.png    — XZ / YZ projections (full grid)
-      figure_3_bridging_demo.png    — camera-anchored XY + XZ + YZ
-      figure_4_convergence.png      — max displacement per iteration
+    Output: figures in `<result_dir>/viz/`
+      figure_0_initial_vs_final.png   — initial cloth (z_max) vs final cloth
+      figure_1_top_down.png           — coverage / heightmap / bridged
+      figure_2_side_profiles.png      — XZ / YZ projections (full grid)
+      figure_3_bridging_demo.png      — camera-anchored XY + XZ + YZ
+      figure_4_convergence.png        — max displacement per iteration
+      figure_5_walkthrough_path.png   — XY top-down walkthrough path (optional)
+      figure_6_voxel_walkability.png  — voxel walkability overlay on heightmap (optional)
 
 ────────────────────────────────────────────────────────────────────────
 CONVENTION — camera-anchored 1-D slices (TerrainSnake mode)
@@ -304,6 +306,14 @@ class TerrainData:
     wps: np.ndarray                    # (W,3) world-coord waypoints (converted from voxel idx)
     camera_height: float
     has_path: bool
+    # Optional voxel grid overlay (loaded from voxel_grid.npz)
+    vg_walkable: np.ndarray            # (vg_nx, vg_ny) bool — walkable after all filters
+    vg_valid:    np.ndarray            # (vg_nx, vg_ny) bool — valid terrain domain (before filters)
+    vg_nx:       int
+    vg_ny:       int
+    vg_res:      float
+    vg_bounds:   tuple                 # same 6-element bounds as main bounds
+    has_voxels:  bool
 
 
 def _load_terrain_data(result_dir: Path) -> TerrainData:
@@ -350,12 +360,57 @@ def _load_terrain_data(result_dir: Path) -> TerrainData:
     valid_hmap  = ~np.isnan(heightmap)
     bridged     = valid_hmap & ~valid_floor
 
+    # --- Optional: voxel grid overlay (voxel_grid.npz) ---
+    vg_path = result_dir / "voxel_grid.npz"
+    has_voxels = False
+    vg_walkable = np.zeros((1, 1), dtype=bool)
+    vg_valid    = np.zeros((1, 1), dtype=bool)
+    vg_nx = vg_ny = 1
+    vg_res = res
+    vg_bounds = bounds
+    if vg_path.exists():
+        try:
+            vgd = np.load(vg_path)
+            vg_nx   = int(vgd["nx"])
+            vg_ny   = int(vgd["ny"])
+            vg_res  = float(vgd["res"])
+            vg_bounds = tuple(float(b) for b in vgd["bounds"])
+            candidates = vgd["candidates"]   # (N,3) int32 (ix,iy,iz)
+
+            # Walkable grid: cells that survived all filters
+            vg_walkable = np.zeros((vg_nx, vg_ny), dtype=bool)
+            for row in candidates:
+                ix_c, iy_c = int(row[0]), int(row[1])
+                if 0 <= ix_c < vg_nx and 0 <= iy_c < vg_ny:
+                    vg_walkable[ix_c, iy_c] = True
+
+            # Valid-domain grid: coarse cells with at least one fine valid-floor hit
+            scale = vg_res / res   # coarse / fine (e.g. 20 / 3.33 ≈ 6)
+            vg_valid = np.zeros((vg_nx, vg_ny), dtype=bool)
+            for ix_c in range(vg_nx):
+                for iy_c in range(vg_ny):
+                    fx0 = int(ix_c * scale);       fx1 = min(nx, int((ix_c + 1) * scale))
+                    fy0 = int(iy_c * scale);       fy1 = min(ny, int((iy_c + 1) * scale))
+                    if fx1 > fx0 and fy1 > fy0 and valid_floor[fx0:fx1, fy0:fy1].any():
+                        vg_valid[ix_c, iy_c] = True
+
+            has_voxels = True
+            n_walk = int(vg_walkable.sum())
+            n_excl = int((vg_valid & ~vg_walkable).sum())
+            print(f"[viz] voxel_grid.npz: {vg_nx}×{vg_ny} coarse grid, "
+                  f"{n_walk} walkable, {n_excl} excluded")
+        except Exception as _e:
+            print(f"[viz] could not load voxel_grid.npz: {_e}")
+
     return TerrainData(
         heightmap=heightmap, floor_raw=floor_raw, disps=disps,
         bounds=bounds, res=res, nx=nx, ny=ny,
         valid_floor=valid_floor, valid_hmap=valid_hmap, bridged=bridged,
         XX=XX, YY=YY, camera_xyz=camera_xyz,
         pts=pts, wps=wps, camera_height=camera_height, has_path=has_path,
+        vg_walkable=vg_walkable, vg_valid=vg_valid,
+        vg_nx=vg_nx, vg_ny=vg_ny, vg_res=vg_res, vg_bounds=vg_bounds,
+        has_voxels=has_voxels,
     )
 
 
@@ -836,8 +891,120 @@ def terrain_figure_5(td: TerrainData, out_dir: Path) -> None:
     print(f"Saved {out}")
 
 
+def terrain_figure_6(td: TerrainData, out_dir: Path) -> None:
+    """Voxel walkability overlay on heightmap.
+
+    Panel A — heightmap + voxel overlay (no path).
+    Panel B — heightmap + voxel overlay + path + waypoints (if has_path).
+
+    Colour key:
+      green (0, 0.75, 0, 0.45)  — walkable: survived all filters, in candidates
+      red   (0.9, 0, 0, 0.40)   — valid-domain but excluded by a filter
+      transparent                — outside valid terrain domain
+    Skipped (no-op) if no voxel_grid.npz was found.
+    """
+    if not td.has_voxels:
+        print("[viz] figure_6 skipped — no voxel_grid.npz")
+        return
+
+    min_x, min_y, max_x, max_y, _, _ = td.bounds
+    hm = np.where(td.valid_hmap, td.heightmap, np.nan)
+    vmin = float(np.nanmin(hm)) - 5
+    vmax = float(np.nanmax(hm)) + 5
+
+    # Build RGBA overlay at coarse voxel resolution (vg_ny × vg_nx × 4)
+    # imshow with origin="lower" expects row-major (iy, ix) ordering.
+    overlay = np.zeros((td.vg_ny, td.vg_nx, 4), dtype=np.float32)
+    for ix in range(td.vg_nx):
+        for iy in range(td.vg_ny):
+            if td.vg_walkable[ix, iy]:
+                overlay[iy, ix] = [0.0, 0.75, 0.0, 0.45]
+            elif td.vg_valid[ix, iy]:
+                overlay[iy, ix] = [0.9, 0.0, 0.0, 0.40]
+
+    n_walk = int(td.vg_walkable.sum())
+    n_excl = int((td.vg_valid & ~td.vg_walkable).sum())
+
+    def _draw_panel(ax, title, show_path: bool) -> None:
+        im = ax.imshow(hm.T, origin="lower",
+                       extent=[min_x, max_x, min_y, max_y],
+                       cmap="terrain", vmin=vmin, vmax=vmax,
+                       aspect="equal", interpolation="bilinear")
+        plt.colorbar(im, ax=ax, label="cloth Z (m)", fraction=0.046, pad=0.04)
+
+        ax.imshow(overlay, origin="lower",
+                  extent=[min_x, max_x, min_y, max_y],
+                  aspect="equal", interpolation="nearest")
+
+        if show_path and td.has_path:
+            from matplotlib.collections import LineCollection
+            pts2 = td.pts[:, :2]
+            diffs = np.diff(pts2, axis=0)
+            seg_len = np.sqrt((diffs ** 2).sum(axis=1))
+            cum = np.concatenate([[0.0], np.cumsum(seg_len)])
+            t_frac = cum / max(cum[-1], 1e-6)
+            segs = np.stack([pts2[:-1], pts2[1:]], axis=1)
+            lc = LineCollection(segs, cmap="plasma",
+                                norm=plt.Normalize(0, 1), linewidths=1.2)
+            lc.set_array(t_frac[:-1])
+            ax.add_collection(lc)
+            ax.scatter(td.wps[:, 0], td.wps[:, 1],
+                       c="white", s=50, zorder=6,
+                       edgecolor="black", linewidths=0.7)
+            for i, (wx, wy, _) in enumerate(td.wps):
+                ax.annotate(str(i + 1), (wx, wy),
+                            fontsize=5.5, ha="center", va="center",
+                            fontweight="bold", zorder=7)
+            ax.scatter(*td.pts[0, :2],  marker="D", c="lime",  s=80, zorder=8,
+                       edgecolor="black", linewidths=0.7, label="start")
+            ax.scatter(*td.pts[-1, :2], marker="s", c="red",   s=80, zorder=8,
+                       edgecolor="black", linewidths=0.7, label="end")
+
+        if td.camera_xyz is not None:
+            cx, cy = float(td.camera_xyz[0]), float(td.camera_xyz[1])
+            ax.scatter(cx, cy, marker="*", c="yellow", s=160, zorder=9,
+                       edgecolor="black", linewidths=0.6, label="scene camera")
+
+        walk_patch = Patch(facecolor=(0.0, 0.75, 0.0, 0.45), edgecolor="none",
+                           label=f"walkable ({n_walk} voxels)")
+        excl_patch = Patch(facecolor=(0.9, 0.0, 0.0, 0.40), edgecolor="none",
+                           label=f"valid but excluded ({n_excl} voxels)")
+        handles, lbls = ax.get_legend_handles_labels()
+        ax.legend(handles=handles + [walk_patch, excl_patch],
+                  fontsize=7.5, loc="upper right")
+        ax.set_title(title, fontsize=9)
+        ax.set_xlabel("X (m)"); ax.set_ylabel("Y (m)")
+        ax.set_xlim(min_x, max_x); ax.set_ylim(min_y, max_y)
+
+    n_panels = 2 if td.has_path else 1
+    fig, axes = plt.subplots(1, n_panels, figsize=(12 * n_panels, 10))
+    if n_panels == 1:
+        axes = [axes]
+
+    fig.suptitle(
+        f"Voxel Walkability Map — {td.vg_nx}×{td.vg_ny} coarse grid "
+        f"({td.vg_res:.0f} m/cell)\n"
+        f"green = walkable ({n_walk}),  red = valid-domain but excluded ({n_excl})",
+        fontsize=12,
+    )
+
+    _draw_panel(axes[0],
+                f"Heightmap + voxel walkability overlay",
+                show_path=False)
+    if td.has_path:
+        _draw_panel(axes[1],
+                    f"Heightmap + voxel overlay + path ({len(td.pts)} pts, "
+                    f"{len(td.wps)} waypoints)",
+                    show_path=True)
+
+    plt.tight_layout()
+    out = out_dir / "figure_6_voxel_walkability.png"
+    fig.savefig(out, dpi=150); plt.close(fig)
+    print(f"Saved {out}")
+
+
 def run_terrain_snake(result_dir: Path) -> None:
-    """Generate all 6 TerrainSnake figures for `result_dir`."""
+    """Generate all TerrainSnake figures for `result_dir`."""
     out_dir = result_dir / "viz"
     out_dir.mkdir(parents=True, exist_ok=True)
     td = _load_terrain_data(result_dir)
@@ -847,6 +1014,7 @@ def run_terrain_snake(result_dir: Path) -> None:
     terrain_figure_3(td, out_dir)
     terrain_figure_4(td, out_dir)
     terrain_figure_5(td, out_dir)
+    terrain_figure_6(td, out_dir)
     print(f"\nAll TerrainSnake figures saved to {out_dir}")
 
 
