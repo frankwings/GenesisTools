@@ -644,6 +644,121 @@ def _filter_terrain_by_mesh_objects(vgd: VoxelGridData, config: dict) -> VoxelGr
     )
 
 
+def _filter_terrain_by_boundary_margin(vgd: VoxelGridData, config: dict) -> VoxelGridData:
+    """Remove terrain candidates within N coarse cells of the scene boundary.
+
+    Infinigen terrain typically ends at scene boundaries with a vertical cliff
+    wall (the world just stops there).  Excluding the outermost N coarse cells
+    prevents the camera from being placed at these cliff edges where it would
+    look into a void and produce black renders.
+
+    N = config["terrain_boundary_margin"] (default 1 coarse cell = grid_resolution BU).
+    """
+    margin = int(config.get("terrain_boundary_margin", 1))
+    if margin <= 0:
+        return vgd
+
+    filtered = []
+    n_removed = 0
+    for row in vgd.candidates:
+        ix, iy, iz = int(row[0]), int(row[1]), int(row[2])
+        if (ix >= margin and ix < vgd.nx - margin and
+                iy >= margin and iy < vgd.ny - margin):
+            filtered.append((ix, iy, iz))
+        else:
+            n_removed += 1
+
+    filtered_arr = (np.array(sorted(filtered), dtype=np.int32)
+                    if filtered else np.empty((0, 3), dtype=np.int32))
+    print(f"[VoxelGrid] Terrain boundary-margin filter: margin={margin} coarse cells, "
+          f"-{n_removed} boundary voxels, {len(filtered_arr)} candidates remain")
+    return VoxelGridData(
+        solid=vgd.solid, candidates=filtered_arr,
+        nx=vgd.nx, ny=vgd.ny, nz=vgd.nz,
+        res=vgd.res, bounds=vgd.bounds, unit_scale=vgd.unit_scale,
+        mode=vgd.mode, hits=vgd.hits,
+    )
+
+
+def _filter_terrain_by_surface_normal(vgd: VoxelGridData, config: dict) -> VoxelGridData:
+    """Remove terrain candidates that sit on cliff faces (no floor-facing surface).
+
+    Strategy: fire a downward ray at each candidate's XY centre.  If every hit
+    has abs(surface_normal.z) < surface_normal_z_threshold, the surface is
+    nearly vertical (cliff wall) and the candidate is removed.
+
+    Sanity check: if ray_cast returns zero hits across the first 10 candidates,
+    the scene uses geometry-nodes / procedural terrain that is not visible to
+    pip-bpy ray_cast.  In that case the function falls back automatically to
+    _filter_terrain_by_boundary_margin (which requires no ray_cast).
+
+    Must be called with an open bpy scene.
+    """
+    import bpy
+    from mathutils import Vector
+
+    if not vgd.candidates.shape[0]:
+        return vgd
+
+    threshold = float(config.get("surface_normal_z_threshold", 0.1))
+    min_x, min_y = vgd.bounds[0], vgd.bounds[1]
+    scene_top    = vgd.bounds[5]
+    scene_floor  = vgd.bounds[4]
+    down = Vector((0.0, 0.0, -1.0))
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    scene = bpy.context.scene
+
+    # Sanity check: verify ray_cast actually hits something in this scene.
+    # Infinigen geometry-nodes terrain is invisible to pip-bpy ray_cast.
+    n_test = min(10, len(vgd.candidates))
+    n_hits = 0
+    for i in range(n_test):
+        ix = int(vgd.candidates[i, 0]); iy = int(vgd.candidates[i, 1])
+        cx = min_x + (ix + 0.5) * vgd.res
+        cy = min_y + (iy + 0.5) * vgd.res
+        hit, *_ = scene.ray_cast(depsgraph, Vector((cx, cy, scene_top + 10.0)), down)
+        if hit:
+            n_hits += 1
+
+    if n_hits == 0:
+        print("[VoxelGrid] Terrain surface-normal filter: ray_cast returned no hits "
+              "(geometry-nodes terrain?) — falling back to boundary-margin filter")
+        return _filter_terrain_by_boundary_margin(vgd, config)
+
+    # ray_cast works — filter by surface normal (abs to handle inverted-normal meshes)
+    def _has_non_cliff_face(wx: float, wy: float) -> bool:
+        pos = Vector((wx, wy, scene_top + 10.0))
+        while True:
+            hit, loc, normal, _i, _o, _m = scene.ray_cast(depsgraph, pos, down)
+            if not hit or loc.z < scene_floor - 0.5:
+                return False
+            if abs(normal.z) >= threshold:
+                return True
+            pos = loc + Vector((0.0, 0.0, -1e-4))
+
+    filtered = []
+    n_removed = 0
+    for row in vgd.candidates:
+        ix, iy, iz = int(row[0]), int(row[1]), int(row[2])
+        cx = min_x + (ix + 0.5) * vgd.res
+        cy = min_y + (iy + 0.5) * vgd.res
+        if _has_non_cliff_face(cx, cy):
+            filtered.append((ix, iy, iz))
+        else:
+            n_removed += 1
+
+    filtered_arr = (np.array(sorted(filtered), dtype=np.int32)
+                    if filtered else np.empty((0, 3), dtype=np.int32))
+    print(f"[VoxelGrid] Terrain surface-normal filter: -{n_removed} cliff-edge voxels, "
+          f"{len(filtered_arr)} candidates remain")
+    return VoxelGridData(
+        solid=vgd.solid, candidates=filtered_arr,
+        nx=vgd.nx, ny=vgd.ny, nz=vgd.nz,
+        res=vgd.res, bounds=vgd.bounds, unit_scale=vgd.unit_scale,
+        mode=vgd.mode, hits=vgd.hits,
+    )
+
+
 def _build_terrain_candidates(config: dict) -> VoxelGridData:
     """Load terrain_snake.npz and map heightmap Z → one walkable voxel per column.
 
@@ -762,6 +877,12 @@ def build(blend_path: str, config: dict) -> VoxelGridData:
             bpy.ops.wm.open_mainfile(filepath=blend_path)
             vgd = _filter_terrain_by_particles(vgd, config)
             vgd = _filter_terrain_by_mesh_objects(vgd, config)
+            # Note: _filter_terrain_by_surface_normal is NOT called here because Infinigen
+            # terrain geometry (geometry-nodes/displacement base meshes) reports all face
+            # normals as horizontal (nz≈0) in pip-bpy, making the ray_cast normal check
+            # unreliable.  _filter_terrain_by_boundary_margin handles the same use-case
+            # (removing scene-boundary cliff-edge candidates) without any ray_cast.
+        vgd = _filter_terrain_by_boundary_margin(vgd, config)
         return vgd
 
     import bpy
