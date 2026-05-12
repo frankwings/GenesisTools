@@ -27,6 +27,7 @@ class PathData:
     tour: np.ndarray         # (T,) int32  -- ordered indices into waypoints
     camera_height: float
     bounds: tuple            # (min_x, min_y, max_x, max_y, min_z, max_z)
+    res: float = 0.5         # voxel grid resolution in BU (unit_scale already applied)
 
 
 # ---------------------------------------------------------------------------
@@ -396,7 +397,9 @@ def _build_smooth_path(tour: list, walkable: set, config: dict, bounds: tuple,
 
     min_x = bounds[0]; min_y = bounds[1]; min_z = bounds[4]
     max_z = bounds[5]
-    res = config.get("_effective_grid_resolution", config["grid_resolution"])
+    res = (config["_effective_grid_resolution"]
+           if "_effective_grid_resolution" in config
+           else config["grid_resolution"])
     cam_h_bu = config.get("camera_height", 1.7) / config.get("_unit_scale", 1.0)
 
     # --- Terrain heightmap for Z floor clamping ----------------------------
@@ -626,8 +629,9 @@ def _fine_adjust_path(coarse_path: list, config: dict) -> list:
     if len(coarse_path) < 2:
         return coarse_path
     unit_scale = config.get("_unit_scale", 1.0)
-    coarse_res = config.get("_effective_grid_resolution",
-                            config["grid_resolution"] / unit_scale)
+    coarse_res = (config["_effective_grid_resolution"]
+                  if "_effective_grid_resolution" in config
+                  else config["grid_resolution"] / unit_scale)
     fine_res = coarse_res / 4.0
     cam_h_bu = config["camera_height"] / unit_scale
     patch_radius = coarse_res * 2.5
@@ -1013,6 +1017,7 @@ def build(vg, wk, config: dict, blend_path: str = None) -> PathData:
         tour=tour_arr,
         camera_height=config.get("camera_height", 1.7),
         bounds=vg.bounds,
+        res=vg.res,
     )
 
 
@@ -1024,6 +1029,7 @@ def save(data: PathData, path: str) -> None:
         tour=data.tour,
         camera_height=np.float64(data.camera_height),
         bounds=np.array(data.bounds, dtype=np.float64),
+        res=np.float64(data.res),
     )
     print(f"[PathPlan] Saved -> {path}")
 
@@ -1036,6 +1042,7 @@ def load(path: str) -> PathData:
         tour=npz["tour"],
         camera_height=float(npz["camera_height"]),
         bounds=tuple(npz["bounds"].tolist()),
+        res=float(npz["res"]) if "res" in npz.files else 0.5,
     )
 
 

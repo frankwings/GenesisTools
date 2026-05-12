@@ -142,7 +142,7 @@ def build(blend_path: str, path_data, config: dict) -> OrientData:
 
     # Build tour world positions from waypoints + bounds
     bounds = path_data.bounds
-    res = config.get("grid_resolution", 0.5) / unit_scale
+    res = path_data.res / unit_scale
     min_x, min_y, min_z = bounds[0], bounds[1], bounds[4]
 
     tour_world = [
