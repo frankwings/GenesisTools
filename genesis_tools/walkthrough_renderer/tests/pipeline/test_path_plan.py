@@ -251,6 +251,133 @@ class TestLaplacianItersConfig:
 
 
 # ---------------------------------------------------------------------------
+# Camera-voxel forcing: iz lookup + component injection
+# ---------------------------------------------------------------------------
+
+def _write_terrain_npz(tmp_path, camera_xyz, hm, camera_lookat=None):
+    """Write a terrain_snake.npz and return its path string."""
+    nx, ny = hm.shape
+    bounds = np.array([0.0, 0.0, float(nx), float(ny), 0.0, float(nx)])
+    arrays = dict(camera_xyz=np.array(camera_xyz, dtype=np.float64),
+                  heightmap=hm.astype(np.float64), bounds=bounds,
+                  res=np.float64(1.0), unit_scale=np.float64(1.0))
+    if camera_lookat is not None:
+        arrays["camera_lookat"] = np.array(camera_lookat, dtype=np.float64)
+    path = str(tmp_path / "terrain.npz")
+    np.savez_compressed(path, **arrays)
+    return path
+
+
+def _grid_wk_terrain(cam_ix, cam_iy, w=8, h=8, cam_iz_in_set=None):
+    """Walkable cells: flat iz=0 grid from (1,1) to (w-2,h-2), minus camera XY.
+
+    cam_iz_in_set: if given, add (cam_ix, cam_iy, cam_iz_in_set) to the set.
+    """
+    cells = [(x, y, 0)
+             for x in range(1, w - 1)
+             for y in range(1, h - 1)
+             if not (x == cam_ix and y == cam_iy)]
+    if cam_iz_in_set is not None:
+        cells.append((cam_ix, cam_iy, cam_iz_in_set))
+    return WalkableData(walkable=np.array(cells, dtype=np.int32))
+
+
+def _terrain_vg(nx=8, ny=8, nz=8, res=1.0):
+    return VoxelGridData(
+        solid=np.empty((0, 3), dtype=np.int32),
+        candidates=np.empty((0, 3), dtype=np.int32),
+        nx=nx, ny=ny, nz=nz, res=res,
+        bounds=(0.0, 0.0, nx * res, ny * res, 0.0, nz * res),
+        unit_scale=1.0, mode="terrain", hits=None,
+    )
+
+
+class TestCamIzFromWalkableSet:
+    """iz used in fixed_first comes from walkable_set lookup, not raw heightmap."""
+
+    def test_iz_from_walkable_set_not_heightmap(self, tmp_path):
+        """When (cam_ix, cam_iy, iz=5) is in walkable_set but heightmap gives iz=1,
+        fixed_first uses iz=5 (the walkable_set value)."""
+        cam_ix, cam_iy = 3, 3
+        hm = np.full((8, 8), 1.0)   # heightmap fallback would give iz=1
+        npz = _write_terrain_npz(tmp_path, [3.5, 3.5, 0.0], hm)
+        vg  = _terrain_vg()
+        # walkable_set includes (3,3,5) — camera cell at unusual height
+        wk  = _grid_wk_terrain(cam_ix, cam_iy, cam_iz_in_set=5)
+        cfg = {"terrain_npz": npz, "num_waypoints": 3, "seed": 42,
+               "camera_height": 1.7, "grid_resolution": 1.0,
+               "force_camera_walkable": True}
+        result = build(vg, wk, cfg)
+        # fixed_first should use iz=5 (from walkable_set), not iz=1 (from heightmap)
+        assert tuple(result.waypoints[0]) == (cam_ix, cam_iy, 5)
+
+    def test_iz_from_heightmap_when_not_in_walkable_set(self, tmp_path):
+        """When no (cam_ix, cam_iy, *) in walkable_set, iz is from heightmap patch."""
+        cam_ix, cam_iy = 3, 3
+        hm = np.full((8, 8), 3.0)   # heightmap gives iz=3
+        npz = _write_terrain_npz(tmp_path, [3.5, 3.5, 0.0], hm)
+        vg  = _terrain_vg()
+        # No camera-XY cell in walkable_set (cam_iz_in_set=None)
+        wk  = _grid_wk_terrain(cam_ix, cam_iy, cam_iz_in_set=None)
+        cfg = {"terrain_npz": npz, "num_waypoints": 3, "seed": 42,
+               "camera_height": 1.7, "grid_resolution": 1.0,
+               "force_camera_walkable": True}
+        result = build(vg, wk, cfg)
+        # fixed_first iz comes from heightmap: int((3.0 - 0.0) / 1.0) = 3
+        assert tuple(result.waypoints[0]) == (cam_ix, cam_iy, 3)
+
+
+class TestForceCameraWalkableInComponent:
+    """force_camera_walkable injects camera cell as wp0; lookat march used otherwise."""
+
+    def test_force_true_injects_camera_cell(self, tmp_path):
+        """force_camera_walkable=True: camera cell (not in component) is injected → wp0."""
+        cam_ix, cam_iy = 3, 3
+        hm = np.full((8, 8), 2.0)   # iz=2
+        npz = _write_terrain_npz(tmp_path, [3.5, 3.5, 0.0], hm)
+        vg  = _terrain_vg()
+        wk  = _grid_wk_terrain(cam_ix, cam_iy, cam_iz_in_set=None)
+        cfg = {"terrain_npz": npz, "num_waypoints": 3, "seed": 42,
+               "camera_height": 1.7, "grid_resolution": 1.0,
+               "force_camera_walkable": True}
+        result = build(vg, wk, cfg)
+        assert tuple(result.waypoints[0]) == (cam_ix, cam_iy, 2)
+
+    def test_force_false_uses_lookat_march(self, tmp_path):
+        """force_camera_walkable=False + lookat → first walkable cell along lookat is wp0."""
+        cam_ix, cam_iy = 3, 3
+        # heightmap gives iz=0 so march looks for (x,y,0) cells
+        hm = np.full((8, 8), 0.5)   # iz = int(0.5/1.0) = 0
+        # lookat=(1,0,0) → march in +x from (3,3)
+        # first reachable walkable cell in +x is (4,3,0) (since (3,3) excluded from wk)
+        npz = _write_terrain_npz(tmp_path, [3.5, 3.5, 0.0], hm,
+                                 camera_lookat=[1.0, 0.0, 0.0])
+        vg  = _terrain_vg()
+        wk  = _grid_wk_terrain(cam_ix, cam_iy, cam_iz_in_set=None)
+        cfg = {"terrain_npz": npz, "num_waypoints": 3, "seed": 42,
+               "camera_height": 1.7, "grid_resolution": 1.0,
+               "force_camera_walkable": False}
+        result = build(vg, wk, cfg)
+        # March finds (4,3,0) as first walkable cell along +x
+        assert tuple(result.waypoints[0]) == (4, cam_iy, 0)
+
+    def test_force_false_no_lookat_falls_back_to_inject(self, tmp_path):
+        """force_camera_walkable=False, no lookat key → no march → inject camera cell."""
+        cam_ix, cam_iy = 3, 3
+        hm = np.full((8, 8), 1.0)   # iz=1
+        # no camera_lookat in terrain_npz
+        npz = _write_terrain_npz(tmp_path, [3.5, 3.5, 0.0], hm)
+        vg  = _terrain_vg()
+        wk  = _grid_wk_terrain(cam_ix, cam_iy, cam_iz_in_set=None)
+        cfg = {"terrain_npz": npz, "num_waypoints": 3, "seed": 42,
+               "camera_height": 1.7, "grid_resolution": 1.0,
+               "force_camera_walkable": False}
+        result = build(vg, wk, cfg)
+        # No lookat → fallback inject → (3,3,1) is wp0
+        assert tuple(result.waypoints[0]) == (cam_ix, cam_iy, 1)
+
+
+# ---------------------------------------------------------------------------
 # save / load round-trip
 # ---------------------------------------------------------------------------
 

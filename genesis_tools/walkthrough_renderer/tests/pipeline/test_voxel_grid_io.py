@@ -6,6 +6,7 @@ from genesis_tools.walkthrough_renderer.pipeline.voxel_grid import (
     VoxelGridData,
     _build_terrain_candidates,
     _flood_fill_candidates,
+    _force_camera_walkable,
     load,
     save,
 )
@@ -174,3 +175,126 @@ class TestTerrainMode:
         save(data, path)
         loaded = load(path)
         assert loaded.mode == "terrain"
+
+
+# ---------------------------------------------------------------------------
+# _force_camera_walkable
+# ---------------------------------------------------------------------------
+
+def _make_terrain_npz(tmp_path, camera_xyz, heightmap, res=1.0, unit_scale=1.0,
+                      extra_arrays=None):
+    """Write a minimal terrain_snake.npz to tmp_path and return its path."""
+    nx, ny = heightmap.shape
+    bounds = np.array([0.0, 0.0, float(nx) * res, float(ny) * res, 0.0, float(nx) * res * 2])
+    arrays = dict(
+        camera_xyz=np.array(camera_xyz, dtype=np.float64),
+        heightmap=heightmap.astype(np.float64),
+        bounds=bounds,
+        res=np.float64(res),
+        unit_scale=np.float64(unit_scale),
+    )
+    if extra_arrays:
+        arrays.update(extra_arrays)
+    path = str(tmp_path / "terrain.npz")
+    np.savez_compressed(path, **arrays)
+    return path
+
+
+class TestForceCameraWalkable:
+    def test_disabled_returns_vgd_unchanged(self, tmp_path):
+        """force_camera_walkable=False → vgd returned unchanged (same object)."""
+        hm = np.full((5, 5), 3.0)
+        npz = _make_terrain_npz(tmp_path, [2.5, 3.5, 0.0], hm)
+        vg = _make_vg(nx=5, ny=5, nz=10, res=1.0,
+                      bounds=(0.0, 0.0, 5.0, 5.0, 0.0, 10.0))
+        result = _force_camera_walkable(vg, {"terrain_npz": npz, "force_camera_walkable": False})
+        assert result is vg
+
+    def test_no_terrain_npz_returns_unchanged(self):
+        """No terrain_npz key → vgd returned unchanged."""
+        vg = _make_vg()
+        result = _force_camera_walkable(vg, {})
+        assert result is vg
+
+    def test_no_camera_xyz_in_npz_returns_unchanged(self, tmp_path):
+        """terrain_npz without camera_xyz array → vgd returned unchanged."""
+        hm = np.full((5, 5), 3.0)
+        bounds = np.array([0.0, 0.0, 5.0, 5.0, 0.0, 10.0])
+        path = str(tmp_path / "no_cam.npz")
+        np.savez_compressed(path, heightmap=hm, bounds=bounds,
+                            res=np.float64(1.0), unit_scale=np.float64(1.0))
+        vg = _make_vg(nx=5, ny=5, nz=10, res=1.0,
+                      bounds=(0.0, 0.0, 5.0, 5.0, 0.0, 10.0))
+        result = _force_camera_walkable(vg, {"terrain_npz": path})
+        assert result is vg
+
+    def test_camera_already_in_candidates_returns_unchanged(self, tmp_path):
+        """Camera (ix,iy) already present in candidates → no-op, vgd unchanged."""
+        hm = np.full((5, 5), 3.0)
+        npz = _make_terrain_npz(tmp_path, [2.5, 3.5, 0.0], hm)
+        # Put camera cell (ix=2, iy=3) already in candidates at any iz
+        cands = np.array([[2, 3, 99]], dtype=np.int32)
+        vg = _make_vg(candidates=cands, nx=5, ny=5, nz=10, res=1.0,
+                      bounds=(0.0, 0.0, 5.0, 5.0, 0.0, 10.0))
+        result = _force_camera_walkable(vg, {"terrain_npz": npz})
+        assert result is vg
+
+    def test_all_nan_patch_returns_unchanged(self, tmp_path):
+        """All-NaN heightmap patch under camera → no terrain data, vgd unchanged."""
+        hm = np.full((5, 5), np.nan)
+        npz = _make_terrain_npz(tmp_path, [2.5, 3.5, 0.0], hm)
+        vg = _make_vg(candidates=np.empty((0, 3), dtype=np.int32),
+                      nx=5, ny=5, nz=10, res=1.0,
+                      bounds=(0.0, 0.0, 5.0, 5.0, 0.0, 10.0))
+        result = _force_camera_walkable(vg, {"terrain_npz": npz})
+        assert result is vg
+
+    def test_camera_cell_added_with_correct_iz(self, tmp_path):
+        """Camera cell not in candidates → re-inserted at iz from heightmap patch."""
+        # camera_xyz=[2.5, 3.5] → cam_ix=2, cam_iy=3 (res=1.0, bounds origin=0)
+        # hm[2,3]=5.0, min_z=0.0, res=1.0 → iz = int((5.0-0.0)/1.0) = 5
+        hm = np.zeros((5, 5))
+        hm[2, 3] = 5.0
+        npz = _make_terrain_npz(tmp_path, [2.5, 3.5, 0.0], hm)
+        vg = _make_vg(candidates=np.empty((0, 3), dtype=np.int32),
+                      nx=5, ny=5, nz=10, res=1.0,
+                      bounds=(0.0, 0.0, 5.0, 5.0, 0.0, 10.0))
+        result = _force_camera_walkable(vg, {"terrain_npz": npz})
+        cands = {tuple(r) for r in result.candidates}
+        assert (2, 3, 5) in cands
+
+    def test_iz_from_coarse_patch_average(self, tmp_path):
+        """When vg.res > fine_res, iz is derived from the average of the fine patch."""
+        # VG res=2.0, terrain fine_res=1.0 → scale=2.0
+        # cam_xyz=[1.0,1.0] → cam_ix=0, cam_iy=0 (at res=2.0)
+        # fine patch for coarse cell (0,0): hm[0:2, 0:2] = [[4,6],[2,8]] → mean=5.0
+        # iz = int((5.0 - 0.0) / 2.0) = 2
+        hm = np.array([[4.0, 6.0, 0.0, 0.0],
+                       [2.0, 8.0, 0.0, 0.0],
+                       [0.0, 0.0, 0.0, 0.0],
+                       [0.0, 0.0, 0.0, 0.0]], dtype=np.float64)
+        path = str(tmp_path / "fine.npz")
+        np.savez_compressed(path,
+                            camera_xyz=np.array([1.0, 1.0, 0.0]),
+                            heightmap=hm,
+                            bounds=np.array([0.0, 0.0, 4.0, 4.0, 0.0, 20.0]),
+                            res=np.float64(1.0), unit_scale=np.float64(1.0))
+        vg = _make_vg(candidates=np.empty((0, 3), dtype=np.int32),
+                      nx=2, ny=2, nz=10, res=2.0,
+                      bounds=(0.0, 0.0, 4.0, 4.0, 0.0, 20.0))
+        result = _force_camera_walkable(vg, {"terrain_npz": path})
+        cands = {tuple(r) for r in result.candidates}
+        assert (0, 0, 2) in cands
+
+    def test_forced_cell_is_prepended(self, tmp_path):
+        """Forced camera cell is prepended — first in candidates array."""
+        hm = np.zeros((5, 5))
+        hm[1, 1] = 3.0   # → iz=3
+        npz = _make_terrain_npz(tmp_path, [1.5, 1.5, 0.0], hm)
+        # Existing candidates at other positions
+        existing = np.array([[3, 3, 0], [4, 4, 0]], dtype=np.int32)
+        vg = _make_vg(candidates=existing, nx=5, ny=5, nz=10, res=1.0,
+                      bounds=(0.0, 0.0, 5.0, 5.0, 0.0, 10.0))
+        result = _force_camera_walkable(vg, {"terrain_npz": npz})
+        assert tuple(result.candidates[0]) == (1, 1, 3)
+        assert len(result.candidates) == len(existing) + 1
