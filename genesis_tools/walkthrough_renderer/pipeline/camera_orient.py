@@ -152,6 +152,24 @@ def build(blend_path: str, path_data, config: dict) -> OrientData:
     aerial = config.get("aerial", False)
     wp_oris = _compute_waypoint_orientations(tour_world, cam_h_bu, scene, dg, aerial=aerial)
 
+    # When wp0 is the scene camera cell (forced via force_camera_walkable), override
+    # its orientation with the original camera's lookat direction stored in terrain_npz.
+    # Without this, wp0 looks toward wp1 (next path waypoint), which is unrelated to
+    # the scene camera's intended viewing direction.
+    terrain_npz = config.get("terrain_npz")
+    if (config.get("force_camera_walkable", True)
+            and terrain_npz and len(wp_oris) > 0):
+        import numpy as _np
+        from pathlib import Path as _Path
+        _td_path = _Path(terrain_npz)
+        if _td_path.exists():
+            _td = _np.load(str(_td_path))
+            if "camera_lookat" in _td.files:
+                _lookat = _td["camera_lookat"]   # [dx, dy] unit vector in XY
+                wp_oris[0] = Vector((float(_lookat[0]), float(_lookat[1]), 0.0)).normalized()
+                print(f"[CameraOrient] wp0 orientation overridden from terrain camera_lookat "
+                      f"({float(_lookat[0]):.3f}, {float(_lookat[1]):.3f})")
+
     # Build path_points as Vector list and compute arc lengths
     path_vecs = [Vector(tuple(p)) for p in path_data.path_points]
     arc_lens = [0.0]

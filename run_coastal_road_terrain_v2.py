@@ -35,6 +35,12 @@ config["grid_resolution"] = "auto"
 # all cells walkable). Skip the bpy particle/mesh passes entirely.
 config["mark_particle_instances"] = False
 
+# 10 BU eye height above TerrainSnake cloth surface.  1.7 (human height) is
+# technically correct but produces a water-level view in coastal/low-elevation
+# cells and clips inside vegetation canopies.  10 BU clears most tree canopies
+# and gives a low-aerial perspective suited to this 50 km × 50 km scene.
+config["camera_height"] = 10.0
+
 # --- Phase 1: terrain snake (re-fit if not present) ---
 if NPZ.exists():
     print(f"[coastal_road terrain v2] Phase 1: reusing {NPZ}")

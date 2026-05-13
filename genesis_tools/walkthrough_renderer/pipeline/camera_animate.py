@@ -197,14 +197,18 @@ def build(blend_path: str, path_data, orient: "OrientData",
     for fi in range(total_frames):
         t = fi / max(1, total_frames - 1)
         path_pt = _sample_path(t)
-        # Get exact terrain Z: try ray_cast first (hits actual mesh, ignores
-        # scatter instances), then fall back to cloth heightmap, then keep
-        # the path point's own Z.
+        # Get exact terrain Z.
+        # In terrain mode (terrain_npz present) the TerrainSnake cloth is the
+        # canonical ground surface — it ignores vegetation and water-surface
+        # mesh objects that ray_cast would hit first.  Use heightmap first so
+        # the camera walks along smooth terrain rather than tree canopies.
+        # In non-terrain mode (interior / city) ray_cast is the primary source
+        # (finds exact floor Z) with heightmap as fallback.
         ground_z = None
-        if raycast_ground_z is not None:
-            ground_z = raycast_ground_z(path_pt.x, path_pt.y)
-        if ground_z is None and cloth_z_lookup is not None:
+        if cloth_z_lookup is not None and terrain_npz:
             ground_z = cloth_z_lookup(path_pt.x, path_pt.y)
+        if ground_z is None and raycast_ground_z is not None:
+            ground_z = raycast_ground_z(path_pt.x, path_pt.y)
         if ground_z is not None:
             path_pt = Vector((path_pt.x, path_pt.y, ground_z))
         cam_pos = path_pt + Vector((0, 0, cam_h))
