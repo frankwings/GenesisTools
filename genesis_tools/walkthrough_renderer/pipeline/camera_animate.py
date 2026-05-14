@@ -42,6 +42,7 @@ def build(blend_path: str, path_data, orient: "OrientData",
     # cloth_z + camera_height, eliminating voxel-quantisation clipping into hills.
     cloth_z_lookup = None
     raycast_ground_z = None
+    _camera_xyz = None   # original scene camera position from terrain_npz [x, y, z] in BU
     terrain_npz = config.get("terrain_npz")
     if terrain_npz and not config.get("aerial"):
         import numpy as _np
@@ -74,6 +75,12 @@ def build(blend_path: str, path_data, orient: "OrientData",
                              + (1-tx)*ty*z01 + tx*ty*z11)
             print(f"[CameraAnimate] Using cloth heightmap from {terrain_npz} "
                   f"for per-frame ground Z (eliminates voxel-Z quantisation)")
+
+            if "camera_xyz" in _td.files:
+                _camera_xyz = _np.asarray(_td["camera_xyz"], dtype=_np.float64)
+                print(f"[CameraAnimate] Original camera position: "
+                      f"({float(_camera_xyz[0]):.1f}, {float(_camera_xyz[1]):.1f}, "
+                      f"{float(_camera_xyz[2]):.1f}) BU — frame 1 will use this exactly")
 
     # Ray-cast ground Z: fires a downward ray through the actual terrain mesh at
     # each frame's XY.  Scatter instances are render-time only — ray_cast hits
@@ -129,6 +136,10 @@ def build(blend_path: str, path_data, orient: "OrientData",
         t = float(entry["t"])
         q = entry["quat"]
         wp_schedule.append((t, Quaternion((q[0], q[1], q[2], q[3]))))
+
+    # Arc-length fraction of the second waypoint — used as the blend endpoint
+    # for the wp0→normal transition (frame 1 = exact origin, by wp1 = terrain+cam_h).
+    _wp0_t1 = wp_schedule[1][0] if len(wp_schedule) >= 2 else 1.0
 
     wp_gaze_mode = config.get("waypoint_gaze_mode", "free")
 
@@ -212,6 +223,17 @@ def build(blend_path: str, path_data, orient: "OrientData",
         if ground_z is not None:
             path_pt = Vector((path_pt.x, path_pt.y, ground_z))
         cam_pos = path_pt + Vector((0, 0, cam_h))
+
+        # Smoothly blend from the exact original camera position (frame 1, t=0)
+        # to the normal terrain+cam_h position (at wp1, t=_wp0_t1).
+        # This places frame 1 at the original scene camera with no discontinuity.
+        if _camera_xyz is not None and _wp0_t1 > 1e-6 and t <= _wp0_t1:
+            alpha = t / _wp0_t1
+            cam_pos = Vector((
+                float(_camera_xyz[0]) * (1.0 - alpha) + cam_pos.x * alpha,
+                float(_camera_xyz[1]) * (1.0 - alpha) + cam_pos.y * alpha,
+                float(_camera_xyz[2]) * (1.0 - alpha) + cam_pos.z * alpha,
+            ))
 
         if wp_gaze_mode == "waypoint" and wp_schedule:
             # Slerp between pre-computed waypoint quaternions (future-WP average gaze)
