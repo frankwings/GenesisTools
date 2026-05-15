@@ -193,12 +193,14 @@ def build(blend_path: str, path_data, config: dict) -> OrientData:
     # tilt and roll.  Reading matrix_world gives the exact camera orientation so
     # frame 1 matches the original scene camera view precisely.
     if config.get("force_camera_walkable", True) and wp_schedule:
-        for obj in scene.objects:
+        _cam_candidates = ([scene.camera] if scene.camera and scene.camera.type == "CAMERA"
+                           else []) + [o for o in scene.objects if o.type == "CAMERA"]
+        for obj in _cam_candidates:
             if obj.type == "CAMERA":
                 _cam_q = obj.matrix_world.to_quaternion()
                 wp_schedule[0]["quat"] = [float(_cam_q.w), float(_cam_q.x),
                                           float(_cam_q.y), float(_cam_q.z)]
-                print(f"[CameraOrient] wp0 quat overridden with actual camera world rotation "
+                print(f"[CameraOrient] wp0 quat overridden with active camera '{obj.name}' "
                       f"(w={_cam_q.w:.4f} x={_cam_q.x:.4f} y={_cam_q.y:.4f} z={_cam_q.z:.4f})")
                 break
 

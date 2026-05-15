@@ -193,7 +193,10 @@ def fit_terrain_contour(
     # --- Camera lookup (anchor for cloth init Z + volume classification) ---
     cam_x = cam_y = cam_z = None
     cam_lookat_x = cam_lookat_y = None
-    for obj in scene.objects:
+    # Prefer the active (scene) camera; fall back to first camera in scene.objects.
+    _cam_candidates = ([scene.camera] if scene.camera and scene.camera.type == "CAMERA"
+                       else []) + [o for o in scene.objects if o.type == "CAMERA"]
+    for obj in _cam_candidates:
         if obj.type == "CAMERA":
             loc = obj.matrix_world @ Vector((0.0, 0.0, 0.0))
             cam_x, cam_y, cam_z = float(loc.x), float(loc.y), float(loc.z)
@@ -202,7 +205,7 @@ def fit_terrain_contour(
             mag = (fwd.x ** 2 + fwd.y ** 2) ** 0.5
             if mag > 1e-6:
                 cam_lookat_x, cam_lookat_y = float(fwd.x / mag), float(fwd.y / mag)
-            print(f"[TerrainSnake] original camera '{obj.name}' "
+            print(f"[TerrainSnake] active camera '{obj.name}' "
                   f"@ ({cam_x:.2f}, {cam_y:.2f}, {cam_z:.2f})  "
                   f"lookat_xy=({cam_lookat_x:.3f}, {cam_lookat_y:.3f})")
             break
