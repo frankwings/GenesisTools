@@ -187,6 +187,21 @@ def build(blend_path: str, path_data, config: dict) -> OrientData:
 
     wp_schedule = [{"t": float(t), "quat": _dir_to_quat(d, aerial=aerial)}
                    for t, d in schedule_raw]
+
+    # Override wp0 quaternion with the actual scene camera's full world rotation.
+    # camera_lookat only captures the XY-projected forward direction, losing vertical
+    # tilt and roll.  Reading matrix_world gives the exact camera orientation so
+    # frame 1 matches the original scene camera view precisely.
+    if config.get("force_camera_walkable", True) and wp_schedule:
+        for obj in scene.objects:
+            if obj.type == "CAMERA":
+                _cam_q = obj.matrix_world.to_quaternion()
+                wp_schedule[0]["quat"] = [float(_cam_q.w), float(_cam_q.x),
+                                          float(_cam_q.y), float(_cam_q.z)]
+                print(f"[CameraOrient] wp0 quat overridden with actual camera world rotation "
+                      f"(w={_cam_q.w:.4f} x={_cam_q.x:.4f} y={_cam_q.y:.4f} z={_cam_q.z:.4f})")
+                break
+
     return OrientData(wp_schedule=wp_schedule)
 
 
