@@ -189,12 +189,33 @@ def build(blend_path: str, path_data, orient: "OrientData",
         if obj.name == "WalkthroughCamera":
             bpy.data.objects.remove(obj, do_unlink=True)
 
+    # If we have the original camera position, find the matching scene camera and
+    # copy its exact optical settings so frame 1 renders identically to Camera006.
+    _src_lens = config.get("camera_lens", 35.0)
+    _src_sensor = config.get("camera_sensor_width", 36.0)
+    _src_clip_end = config.get("camera_clip_end", 10000.0) / unit_scale
+    if _camera_xyz is not None:
+        _tol = 5.0  # BU — position match tolerance
+        for _obj in bpy.context.scene.objects:
+            if _obj.type != "CAMERA":
+                continue
+            _p = _obj.matrix_world.translation
+            if (abs(_p.x - float(_camera_xyz[0])) < _tol and
+                    abs(_p.y - float(_camera_xyz[1])) < _tol and
+                    abs(_p.z - float(_camera_xyz[2])) < _tol):
+                _src_lens = _obj.data.lens
+                _src_sensor = _obj.data.sensor_width
+                _src_clip_end = _obj.data.clip_end
+                print(f"[CameraAnimate] Matched scene camera '{_obj.name}': "
+                      f"lens={_src_lens}mm sensor={_src_sensor}mm "
+                      f"clip_end={_src_clip_end:.0f} BU")
+                break
+
     cam_data = bpy.data.cameras.new("WalkthroughCamera")
-    cam_data.lens = 35
+    cam_data.lens = _src_lens
+    cam_data.sensor_width = _src_sensor
     cam_data.clip_start = 0.001 / unit_scale
-    # Match Infinigen scene cameras (clip_end=10000 BU). 100 m clips all distant
-    # terrain and vegetation on large outdoor scenes — must be >> scene radius.
-    cam_data.clip_end = config.get("camera_clip_end", 10000.0) / unit_scale
+    cam_data.clip_end = _src_clip_end
     cam_obj = bpy.data.objects.new("WalkthroughCamera", cam_data)
     bpy.context.scene.collection.objects.link(cam_obj)
     bpy.context.scene.camera = cam_obj
