@@ -128,7 +128,12 @@ def build(blend_path: str, path_data, orient: "OrientData",
         max_dur = config.get("max_duration_seconds")
         config["duration_seconds"] = min(raw_dur, max_dur) if max_dur else raw_dur
 
-    total_frames = max(1, int(config["duration_seconds"] * fps))
+    path_frames = max(1, int(config["duration_seconds"] * fps))
+    # camera_origin_hold_frames: extra stationary frames at the start where the
+    # camera holds at the original scene camera position before the path begins.
+    # Makes the opening shot clearly visible; 0 = no hold (default).
+    _origin_hold = int(config.get("camera_origin_hold_frames", 0))
+    total_frames = path_frames + _origin_hold
 
     # Build wp_schedule list of (t, Quaternion) from OrientData
     wp_schedule = []
@@ -205,9 +210,30 @@ def build(blend_path: str, path_data, orient: "OrientData",
     if raycast_ground_z is not None:
         _rc_dg[0] = bpy.context.evaluated_depsgraph_get()
 
+    _origin_quat = (wp_schedule[0][1] if wp_schedule
+                    else Quaternion((1.0, 0.0, 0.0, 0.0)))
+
     for fi in range(total_frames):
-        t = fi / max(1, total_frames - 1)
-        path_pt = _sample_path(t)
+        # --- Hold phase: camera stationary at original scene-camera position ---
+        if fi < _origin_hold and _camera_xyz is not None:
+            cam_pos = Vector((float(_camera_xyz[0]),
+                              float(_camera_xyz[1]),
+                              float(_camera_xyz[2])))
+            target_quat = _origin_quat
+            if prev_quat is not None:
+                if prev_quat.dot(target_quat) < 0:
+                    target_quat.negate()
+                target_quat = prev_quat.slerp(target_quat, slerp_alpha)
+            prev_quat = target_quat
+            cam_obj.location = cam_pos
+            cam_obj.rotation_quaternion = target_quat
+            cam_obj.keyframe_insert(data_path="location", frame=fi + 1)
+            cam_obj.keyframe_insert(data_path="rotation_quaternion", frame=fi + 1)
+            continue
+
+        # --- Path phase: traverse the walkable path ---
+        t_path = (fi - _origin_hold) / max(1, path_frames - 1)
+        path_pt = _sample_path(t_path)
         # Get exact terrain Z.
         # In terrain mode (terrain_npz present) the TerrainSnake cloth is the
         # canonical ground surface — it ignores vegetation and water-surface
@@ -224,11 +250,10 @@ def build(blend_path: str, path_data, orient: "OrientData",
             path_pt = Vector((path_pt.x, path_pt.y, ground_z))
         cam_pos = path_pt + Vector((0, 0, cam_h))
 
-        # Smoothly blend from the exact original camera position (frame 1, t=0)
+        # Smoothly blend from the exact original camera position (first path frame)
         # to the normal terrain+cam_h position (at wp1, t=_wp0_t1).
-        # This places frame 1 at the original scene camera with no discontinuity.
-        if _camera_xyz is not None and _wp0_t1 > 1e-6 and t <= _wp0_t1:
-            alpha = t / _wp0_t1
+        if _camera_xyz is not None and _wp0_t1 > 1e-6 and t_path <= _wp0_t1:
+            alpha = t_path / _wp0_t1
             cam_pos = Vector((
                 float(_camera_xyz[0]) * (1.0 - alpha) + cam_pos.x * alpha,
                 float(_camera_xyz[1]) * (1.0 - alpha) + cam_pos.y * alpha,
@@ -237,10 +262,10 @@ def build(blend_path: str, path_data, orient: "OrientData",
 
         if wp_gaze_mode == "waypoint" and wp_schedule:
             # Slerp between pre-computed waypoint quaternions (future-WP average gaze)
-            target_quat = _get_base_quat(t)
+            target_quat = _get_base_quat(t_path)
         else:
             # Look-ahead along travel direction: sample a fixed spatial distance ahead
-            lookahead_t = min(1.0, t + config.get("lookahead_fraction", 0.05))
+            lookahead_t = min(1.0, t_path + config.get("lookahead_fraction", 0.05))
             floor_ahead = _sample_path(lookahead_t)
             look_target = cam_pos + (floor_ahead - path_pt)
             target_quat = _look_at_quat(cam_pos, look_target)
