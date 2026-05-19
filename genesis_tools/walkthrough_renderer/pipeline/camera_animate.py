@@ -293,6 +293,17 @@ def build(blend_path: str, path_data, orient: "OrientData",
             for kp in fc.keyframe_points:
                 kp.interpolation = "LINEAR"
 
+    # Shift all emitter particle systems to emit before frame_start so they are
+    # fully alive by frame 1. Blender background render skips frame 0 init, which
+    # leaves start=1 particles in an unstable state for the first few frames.
+    _pre = bpy.context.scene.frame_start - 5
+    for _ps in bpy.data.particles:
+        if _ps.type == 'EMITTER' and _ps.frame_start >= bpy.context.scene.frame_start:
+            _dur = max(0, int(_ps.frame_end - _ps.frame_start))
+            _ps.frame_start = _pre
+            _ps.frame_end = _pre + _dur
+            print(f"[CameraAnimate] Particle '{_ps.name}': shifted emission to frame {_pre}")
+
     Path(output_blend).parent.mkdir(parents=True, exist_ok=True)
     bpy.data.use_autopack = False
     bpy.ops.wm.save_as_mainfile(filepath=str(output_blend))
