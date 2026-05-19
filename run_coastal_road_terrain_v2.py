@@ -41,9 +41,7 @@ config["mark_particle_instances"] = False
 # and gives a low-aerial perspective suited to this 50 km × 50 km scene.
 config["camera_height"] = 10.0
 
-# Hold the original scene-camera position for 3 s before the path tour begins.
-# Without this the opening shot is only 1 frame (~0.17 s) — imperceptible at 6 fps.
-config["camera_origin_hold_frames"] = int(3 * config["fps"])   # 18 frames = 3 s
+config["camera_origin_hold_frames"] = 6  # ~0.5 s opening hold at active camera position
 
 # --- Phase 1: terrain snake (re-fit if not present) ---
 if NPZ.exists():
