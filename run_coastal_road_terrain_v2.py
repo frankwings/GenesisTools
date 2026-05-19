@@ -92,7 +92,7 @@ from genesis_tools.gif_generator import create_gif
 from genesis_tools.walkthrough_renderer.combined_gif import make_combined_gif, make_combined_mp4
 
 create_gif(all_frames, ASSETS / "coastal_road_terrain_v2_walkthrough.gif",
-           duration=int(1000 / config["fps"]))
+           duration=int(1000 / config["fps"]), step=2, output_scale=0.5)
 
 make_combined_gif(all_frames, path_npz=OUT_DIR / "path.npz",
                   terrain_npz=NPZ,

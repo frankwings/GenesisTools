@@ -10,6 +10,8 @@ def create_gif(
     output_path: Union[str, Path],
     duration: int = 80,
     loop: int = 0,
+    step: int = 1,
+    output_scale: float = 1.0,
 ) -> Path:
     """Create a GIF from a list of image file paths.
 
@@ -18,6 +20,8 @@ def create_gif(
         output_path: Where to save the GIF.
         duration: Frame duration in milliseconds.
         loop: Number of loops (0 = infinite).
+        step: Use every Nth frame (default 1 = all frames).
+        output_scale: Resize factor (default 1.0 = original size).
 
     Returns:
         Path to the created GIF.
@@ -26,7 +30,15 @@ def create_gif(
     if not frames:
         raise ValueError("No frames provided")
 
-    images = [Image.open(f) for f in frames]
+    selected = frames[::step]
+    images = []
+    for f in selected:
+        img = Image.open(f)
+        if output_scale != 1.0:
+            w, h = img.size
+            img = img.resize((int(w * output_scale), int(h * output_scale)), Image.LANCZOS)
+        images.append(img)
+
     images[0].save(
         str(output_path),
         save_all=True,
