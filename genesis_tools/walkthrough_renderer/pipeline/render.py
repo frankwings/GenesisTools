@@ -59,6 +59,7 @@ def build(blend_path: str, config: dict, output_dir: str) -> List[str]:
         "frames_dir": str(frames_dir),
         "frame_end": config.get("frame_end") or (
             int(config["max_duration_seconds"] * config.get("fps", 12))
+            + int(config.get("camera_origin_hold_frames", 0))
             if config.get("max_duration_seconds") else None
         ),
         "use_denoise": config.get("use_denoise", True),  # Cycles OIDN denoise toggle
