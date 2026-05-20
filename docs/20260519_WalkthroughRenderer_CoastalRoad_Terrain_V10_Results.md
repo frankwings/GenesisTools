@@ -80,7 +80,7 @@
 | Avg frame time | ~3.3 s |
 | Total render time | ~55 min |
 
-### Walkthrough GIF (503 frames, 6.8 MB)
+### Walkthrough GIF (999 frames, 13.6 MB)
 
 ![Walkthrough](../docs/assets/coastal_road_terrain_v2/coastal_road_terrain_v10_walkthrough.gif)
 
@@ -104,7 +104,7 @@
 | ground_z source | heightmap first, ray_cast fallback |
 | wp0 orientation | actual Camera002 world rotation quat |
 | frame 1 lens/sensor | 30mm / 32mm (matched from Camera002) |
-| GIF step / scale | step=2, scale=0.5 → 503 frames, 6.8 MB |
+| GIF step / scale | step=1 (first 999 frames), scale=0.5 → 999 frames, 13.6 MB |
 
 ### Output File Tree
 
