@@ -5,6 +5,20 @@ For each frame the XY map shows:
   - full path in light-grey
   - visited trail coloured by progress (plasma: blue=start → yellow=current)
   - current camera position as a white circle + crosshair
+
+Terrain heightmap source selection
+-----------------------------------
+terrain_snake.npz stores heightmap Z values fitted around the *original* Infinigen
+scene camera.  If the walkthrough path was snapped to actual scene geometry via
+ray-casting, its Z range may be far outside the heightmap's Z range (e.g. path at
+Z=113-122 BU while heightmap is 1-24 BU).  In that case the terrain colormap is
+misleading.
+
+Fix: when the median path Z differs from the median heightmap value by more than
+``_Z_MISMATCH_THRESHOLD`` BU, we rebuild the heightmap by interpolating the
+terrain-floor Z from path_points (path Z minus camera height) over a regular XY
+grid.  This ensures the background color always reflects the *actual* terrain
+elevation under the walkthrough camera.
 """
 from __future__ import annotations
 
@@ -15,33 +29,103 @@ from typing import Generator, List, Union
 import numpy as np
 from PIL import Image, ImageDraw
 
+_Z_MISMATCH_THRESHOLD = 20.0  # BU; rebuild heightmap if gap is larger than this
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _build_path_heightmap(
+    path_pts: np.ndarray,
+    cam_h: float,
+    grid_n: int = 250,
+    margin: float = 10.0,
+) -> tuple[np.ndarray, tuple]:
+    """Interpolate terrain-floor Z from path points onto a regular XY grid.
+
+    Returns (heightmap, bounds_xy) where bounds_xy = (min_x, min_y, max_x, max_y).
+    Cells outside the path convex hull are filled via nearest-neighbour to avoid
+    hard NaN edges; the hull boundary is preserved as a soft mask by the caller.
+    """
+    from scipy.interpolate import griddata
+    from scipy.spatial import ConvexHull
+
+    floor_z = path_pts[:, 2] - cam_h
+    bx0 = path_pts[:, 0].min() - margin
+    bx1 = path_pts[:, 0].max() + margin
+    by0 = path_pts[:, 1].min() - margin
+    by1 = path_pts[:, 1].max() + margin
+    bounds_xy = (bx0, by0, bx1, by1)
+
+    gx = np.linspace(bx0, bx1, grid_n)
+    gy = np.linspace(by0, by1, grid_n)
+    GX, GY = np.meshgrid(gx, gy)
+
+    hm = griddata(path_pts[:, :2], floor_z, (GX, GY), method="linear", fill_value=np.nan)
+    hm_nn = griddata(path_pts[:, :2], floor_z, (GX, GY), method="nearest")
+    hm = np.where(np.isnan(hm), hm_nn, hm)
+
+    # Mask cells outside convex hull
+    try:
+        hull = ConvexHull(path_pts[:, :2])
+        from matplotlib.path import Path as MplPath
+        hull_path = MplPath(path_pts[:, :2][hull.vertices])
+        pts_flat = np.column_stack([GX.ravel(), GY.ravel()])
+        inside = hull_path.contains_points(pts_flat).reshape(grid_n, grid_n)
+        hm = np.where(inside, hm, np.nan)
+    except Exception:
+        pass
+
+    return hm, bounds_xy
+
+
 def _render_terrain_bg(heightmap: np.ndarray, bounds: tuple,
-                        path_pts: np.ndarray, map_px: int) -> Image.Image:
-    """Render terrain heightmap + full path (grey) as a PIL image (map_px × map_px)."""
+                        path_pts: np.ndarray, map_px: int,
+                        cam_h: float = 1.7) -> Image.Image:
+    """Render terrain heightmap + full path (grey) as a PIL image (map_px × map_px).
+
+    Automatically detects Z-coordinate mismatch between heightmap and path and
+    rebuilds the heightmap from path Z values when needed.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     min_x, min_y, max_x, max_y = bounds[0], bounds[1], bounds[2], bounds[3]
+
     hm = heightmap.copy().astype(np.float64)
-    hm[np.isnan(hm)] = np.nanmin(hm)
+    valid = ~np.isnan(hm)
+    if valid.any():
+        hm[~valid] = float(np.nanmin(hm))
 
     dpi = 100
     fig_size = map_px / dpi
     fig, ax = plt.subplots(figsize=(fig_size, fig_size), dpi=dpi)
     fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    ax.set_facecolor("#2a2a2a")
     ax.axis("off")
+
+    # Shift vmin so the lowest terrain value maps into the green/brown zone of
+    # the 'terrain' colormap (skipping the 0–0.22 blue/water region).
+    # terrain colormap: blue=0~0.22, green=0.22~0.5, brown=0.5~0.75, white=0.75~1.0
+    # We push data_min to colormap position 0.25 (start of green).
+    if valid.any():
+        d_min = float(np.nanmin(hm[valid]))
+        d_max = float(np.nanmax(hm[valid]))
+        delta = max(d_max - d_min, 1e-6)
+        # cmap_pos = (v - vmin) / (vmax - vmin); set cmap_pos(d_min) = 0.25
+        # → vmin = d_min - 0.25 / 0.75 * delta
+        adj_vmin = d_min - (0.25 / 0.75) * delta
+        adj_vmax = d_max
+    else:
+        adj_vmin, adj_vmax = 0, 1
 
     ax.imshow(hm.T, origin="lower",
               extent=[min_x, max_x, min_y, max_y],
               cmap="terrain",
-              vmin=float(np.nanmin(hm)) - 5,
-              vmax=float(np.nanmax(hm)) + 5,
+              vmin=adj_vmin,
+              vmax=adj_vmax,
               aspect="auto")
 
     if len(path_pts) > 1:
@@ -86,6 +170,7 @@ def _iter_combined_frames(
     """Yield composited PIL images (rendered frame + XY map) for each input frame."""
     pdata = np.load(path_npz)
     path_pts = pdata["path_points"].astype(np.float64)
+    cam_h = float(pdata["camera_height"]) if "camera_height" in pdata else 1.7
 
     tdata = np.load(terrain_npz)
     heightmap = tdata["heightmap"].astype(np.float64)
@@ -95,7 +180,7 @@ def _iter_combined_frames(
     n_frames = len(frames)
 
     print(f"[Combined] Pre-rendering terrain background ({map_px}×{map_px})…")
-    bg = _render_terrain_bg(heightmap, bounds, path_pts, map_px)
+    bg = _render_terrain_bg(heightmap, bounds, path_pts, map_px, cam_h=cam_h)
 
     all_px = _world_to_px(path_pts[:, :2], bounds, map_px)
 

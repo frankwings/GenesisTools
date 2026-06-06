@@ -25,6 +25,70 @@ def build(blend_path: str, path_data, orient: "OrientData",
 
     bpy.ops.wm.open_mainfile(filepath=blend_path)
 
+    # Fix Infinigen scatter: redirect GeoNode Object Info nodes from coarse
+    # inview-proxy terrain meshes (50–760 verts, near original scene camera)
+    # to OpaqueTerrain_fine (full terrain, ~355K verts).  Without this patch,
+    # "Distribute Points on Faces" scatters vegetation only in a tiny zone
+    # around the original camera position — walkthrough cameras that stray
+    # away from that zone see zero vegetation.
+    _fine = bpy.data.objects.get("OpaqueTerrain_fine")
+    if _fine and not config.get("aerial"):
+        _PROXY_NAMES = {
+            "OpaqueTerrain.inview_inview",
+            "OpaqueTerrain.inview_near",
+            "OpaqueTerrain.inview_center",
+        }
+        _n_patched = 0
+        for _sobj in bpy.data.objects:
+            if not _sobj.name.startswith("scatter:"):
+                continue
+            for _mod in _sobj.modifiers:
+                if _mod.type != "NODES" or not _mod.node_group:
+                    continue
+                for _node in _mod.node_group.nodes:
+                    if _node.type != "OBJECT_INFO":
+                        continue
+                    _inp = _node.inputs.get("Object")
+                    if _inp and _inp.default_value and _inp.default_value.name in _PROXY_NAMES:
+                        _old = _inp.default_value.name
+                        _inp.default_value = _fine
+                        _n_patched += 1
+                        print(f"[CameraAnimate] Scatter patch: '{_sobj.name}' "
+                              f"'{_old}' → 'OpaqueTerrain_fine'")
+        if _n_patched:
+            print(f"[CameraAnimate] Scatter terrain patch: {_n_patched} Object Info "
+                  f"node(s) redirected to OpaqueTerrain_fine "
+                  f"({len(_fine.data.vertices)} verts) — vegetation will render "
+                  f"across entire walkthrough path")
+        else:
+            print("[CameraAnimate] Scatter terrain patch: no inview proxies found "
+                  "(scene may not be Infinigen, or patch already applied)")
+
+        # Freeze scene-time in scatter GeoNodes: disconnect INPUT_SCENE_TIME outputs
+        # so scatter positions are static (t=0 default) across all frames.
+        # Without this, Blender rebuilds the scatter BVH every frame because the
+        # time-dependent geometry prevents use_persistent_data from reusing the BVH,
+        # making renders ~4-8x slower.
+        _time_frozen = 0
+        for _sobj in bpy.data.objects:
+            if not _sobj.name.startswith("scatter:"):
+                continue
+            for _mod in _sobj.modifiers:
+                if _mod.type != "NODES" or not _mod.node_group:
+                    continue
+                _ng = _mod.node_group
+                for _node in list(_ng.nodes):
+                    if _node.type != "INPUT_SCENE_TIME":
+                        continue
+                    # Remove all links from this node (downstream sockets use defaults)
+                    _links_to_remove = [_lnk for _lnk in _ng.links if _lnk.from_node == _node]
+                    for _lnk in _links_to_remove:
+                        _ng.links.remove(_lnk)
+                    _time_frozen += 1
+        if _time_frozen:
+            print(f"[CameraAnimate] Froze {_time_frozen} INPUT_SCENE_TIME node(s): "
+                  f"disconnected outputs → static scatter BVH reusable across frames")
+
     unit_scale = float(bpy.context.scene.unit_settings.scale_length or 1.0)
     # In aerial mode path points are 3D flying positions — the camera IS at the
     # path point. camera_height is a walking metaphor (eye above floor) and must
@@ -230,6 +294,88 @@ def build(blend_path: str, path_data, orient: "OrientData",
     _origin_quat = (wp_schedule[0][1] if wp_schedule
                     else Quaternion((1.0, 0.0, 0.0, 0.0)))
 
+    # ── smooth_adaptive: offline bidirectional Gaussian yaw/pitch smoothing ──────
+    # Precompute quaternions for all path frames before writing any keyframes.
+    # This allows zero-phase (symmetric) filtering — impossible in real-time.
+    #
+    # Yaw  : path tangent direction → unwrap → Gaussian bidirectional → rewrap
+    # Pitch: heightmap lookup 15 m ahead → atan2 → clamp ±deg → Gaussian bidir
+    _precomp_quats = None   # list[Quaternion] indexed by path frame index
+    if wp_gaze_mode == "smooth_adaptive" and not config.get("aerial"):
+        import numpy as _np
+        _lah_m       = float(config.get("smooth_pitch_lookahead_m",   15.0))
+        _lah_bu      = _lah_m / unit_scale
+        _pitch_min   = math.radians(float(config.get("smooth_pitch_min_deg", -15.0)))
+        _pitch_max   = math.radians(float(config.get("smooth_pitch_max_deg",   8.0)))
+        _yaw_sig     = float(config.get("smooth_yaw_sigma_s",   1.5)) * fps
+        _pitch_sig   = float(config.get("smooth_pitch_sigma_s", 0.8)) * fps
+
+        _raw_yaw   = _np.zeros(path_frames)
+        _raw_pitch = _np.zeros(path_frames)
+        _raw_pos   = []   # Vector: camera world position per frame
+
+        for _fi in range(path_frames):
+            _t = _fi / max(1, path_frames - 1)
+            _pt = _sample_path(_t)
+
+            # Ground Z (heightmap preferred over ray_cast for terrain)
+            _gz = None
+            if cloth_z_lookup is not None and terrain_npz:
+                _gz = cloth_z_lookup(_pt.x, _pt.y)
+            if _gz is None and raycast_ground_z is not None:
+                _gz = raycast_ground_z(_pt.x, _pt.y)
+            if _gz is not None:
+                _pt = Vector((_pt.x, _pt.y, _gz))
+            _eye = _pt + Vector((0, 0, cam_h))
+            _raw_pos.append(_eye)
+
+            # Yaw: from path tangent (look ahead along arc-length)
+            _t_ah = min(1.0, _t + config.get("lookahead_fraction", 0.05))
+            _ah   = _sample_path(_t_ah)
+            _raw_yaw[_fi] = math.atan2(_ah.y - _pt.y, _ah.x - _pt.x)
+
+            # Pitch: terrain height at _lah_bu ahead in current yaw direction
+            _yw   = _raw_yaw[_fi]
+            _ax   = _eye.x + math.cos(_yw) * _lah_bu
+            _ay   = _eye.y + math.sin(_yw) * _lah_bu
+            _atz  = None
+            if cloth_z_lookup is not None and terrain_npz:
+                _atz = cloth_z_lookup(_ax, _ay)
+            if _atz is None:
+                _atz = _pt.z               # fallback: assume flat
+            _raw_pitch[_fi] = math.atan2((_atz + cam_h) - _eye.z, _lah_bu)
+
+        # Gaussian smoothing: symmetric FIR kernel + edge padding = zero phase
+        def _gauss_smooth(arr, sig):
+            """1-D Gaussian convolution, nearest-edge padding, zero phase."""
+            if sig < 0.5:
+                return arr.copy()
+            radius = max(1, int(math.ceil(4.0 * sig)))
+            x = _np.arange(-radius, radius + 1, dtype=_np.float64)
+            k = _np.exp(-0.5 * (x / sig) ** 2)
+            k /= k.sum()
+            padded = _np.concatenate([[arr[0]] * radius, arr, [arr[-1]] * radius])
+            return _np.convolve(padded, k, mode="valid")[:len(arr)]
+
+        _yaw_uw   = _np.unwrap(_raw_yaw)
+        _yaw_sm   = _gauss_smooth(_yaw_uw,    _yaw_sig)
+        _pitch_sm = _gauss_smooth(_raw_pitch, _pitch_sig)
+        print(f"[CameraAnimate] smooth_adaptive: Gaussian smooth "
+              f"(yaw σ={_yaw_sig:.1f}fr, pitch σ={_pitch_sig:.1f}fr)")
+
+        # Convert to Blender quaternions
+        # Blender camera: -Z is forward, Y is up.
+        # We construct look direction from yaw+pitch, then to_track_quat.
+        _precomp_quats = []
+        for _fi in range(path_frames):
+            _yw  = float(_yaw_sm[_fi])
+            _pit = float(_pitch_sm[_fi])
+            _dz  = math.sin(_pit)
+            _dxy = math.cos(_pit)
+            _fwd = Vector((_dxy * math.cos(_yw), _dxy * math.sin(_yw), _dz)).normalized()
+            _precomp_quats.append(_fwd.to_track_quat("-Z", "Y"))
+        print(f"[CameraAnimate] smooth_adaptive: precomputed {path_frames} quaternions")
+
     for fi in range(total_frames):
         # --- Hold phase: camera stationary at original scene-camera position ---
         if fi < _origin_hold and _camera_xyz is not None:
@@ -267,11 +413,24 @@ def build(blend_path: str, path_data, orient: "OrientData",
             path_pt = Vector((path_pt.x, path_pt.y, ground_z))
         cam_pos = path_pt + Vector((0, 0, cam_h))
 
-        if wp_gaze_mode == "waypoint" and wp_schedule:
+        if wp_gaze_mode == "smooth_adaptive" and _precomp_quats is not None:
+            # Bidirectional-smoothed yaw+pitch from precomputed list
+            _pf_idx = fi - _origin_hold
+            target_quat = _precomp_quats[max(0, min(len(_precomp_quats) - 1, _pf_idx))]
+        elif wp_gaze_mode == "waypoint" and wp_schedule:
             # Slerp between pre-computed waypoint quaternions (future-WP average gaze)
             target_quat = _get_base_quat(t_path)
+        elif wp_gaze_mode == "eye_level":
+            # Option C: look at a point ahead on the path but at current eye height.
+            # look_target.z == cam_pos.z → gaze is always horizontal regardless of
+            # terrain slope, so camera never pitches toward the ground on descent.
+            lookahead_t = min(1.0, t_path + config.get("lookahead_fraction", 0.05))
+            floor_ahead = _sample_path(lookahead_t)
+            look_target = Vector((floor_ahead.x, floor_ahead.y, cam_pos.z))
+            target_quat = _look_at_quat(cam_pos, look_target)
         else:
-            # Look-ahead along travel direction: sample a fixed spatial distance ahead
+            # Look-ahead along travel direction: sample a fixed spatial distance ahead.
+            # Includes terrain Z delta so camera tilts up/down with slope.
             lookahead_t = min(1.0, t_path + config.get("lookahead_fraction", 0.05))
             floor_ahead = _sample_path(lookahead_t)
             look_target = cam_pos + (floor_ahead - path_pt)

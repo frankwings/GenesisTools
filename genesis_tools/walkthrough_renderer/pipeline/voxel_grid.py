@@ -825,9 +825,27 @@ def _build_terrain_candidates(config: dict) -> VoxelGridData:
         res = fine_res
         nx, ny = fine_nx, fine_ny
 
-    bounds = tuple(bounds)
-    min_z = bounds[4]
-    max_z = bounds[5]
+    # For terrain mode, use the actual terrain height range as Z bounds.
+    # The scene AABB (bounds[4/5]) spans the full mesh including empty space
+    # far below/above the terrain (e.g. -500 to +130 BU), which causes terrain
+    # voxel indices to map to completely wrong world-Z values.
+    hm_vals = heightmap[~np.isnan(heightmap)] if valid_domain is None else \
+              heightmap[valid_domain & ~np.isnan(heightmap)]
+    if len(hm_vals) > 0:
+        _hm_min = float(np.nanmin(hm_vals))
+        _hm_max = float(np.nanmax(hm_vals))
+        margin_z = res * 2          # 2-voxel margin above and below terrain
+        min_z = _hm_min - margin_z
+        max_z = _hm_max + margin_z
+        print(f"[VoxelGrid] Terrain Z clipped to heightmap range "
+              f"[{_hm_min:.2f}, {_hm_max:.2f}] + {margin_z:.1f} BU margin "
+              f"(was [{bounds[4]:.1f}, {bounds[5]:.1f}])")
+    else:
+        min_z = bounds[4]
+        max_z = bounds[5]
+
+    # Rebuild bounds tuple with updated Z so path_plan world-coord conversion is correct
+    bounds = (bounds[0], bounds[1], bounds[2], bounds[3], min_z, max_z)
     nz = max(1, int(math.ceil((max_z - min_z) / res)))
 
     candidates = []
