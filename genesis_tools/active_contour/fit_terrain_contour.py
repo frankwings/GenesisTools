@@ -322,10 +322,13 @@ def fit_terrain_contour(
     _mode = snake_mode.lower().strip()
     if _mode == "expand":
         print(f"[TerrainSnake] Using ExpandSnake (outward diffusion from {int(np.sum(~np.isnan(final_floor)))} seeds)")
+        # Single-seed expand: start from original scene camera XY
+        _seed_xy = (cam_x, cam_y) if cam_x is not None else None
         snake = ExpandSnake(
             terrain_z_floor=final_floor,
             bounds=final_bounds,
             res=final_res,
+            seed_xy=_seed_xy,
             alpha=expand_alpha,
             floor_tolerance=expand_floor_tolerance,
             max_iterations=max_iterations,

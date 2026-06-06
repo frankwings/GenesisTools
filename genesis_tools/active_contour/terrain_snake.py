@@ -166,17 +166,25 @@ class ExpandSnake:
     bounds : (min_x, min_y, max_x, max_y, min_z, max_z)
     res : float
         Grid cell size in Blender units.
+    seed_xy : (float, float) | None
+        World-space (x, y) of the single expansion seed (e.g. original scene
+        camera position).  When provided, expansion starts from ONLY that one
+        grid cell and grows outward — ray-cast floors constrain each cell as the
+        wave-front reaches it.  When None, all valid ray-cast hits are seeds
+        simultaneously (original behaviour).
     alpha : float
         Laplacian weight for the post-expansion smoothing passes (0–1).
     floor_tolerance : float
-        Maximum allowed deviation from a known floor hit (BU).  Prevents
-        Laplacian from pulling seed cells away from their ray-cast Z.
+        Maximum allowed deviation from a known floor hit (BU).
     max_iterations : int
-        Hard cap on expansion steps (each step can activate multiple cells).
+        Hard cap on expansion steps.
     smoothing_iterations : int
-        Extra Laplacian smoothing passes after full coverage is reached.
+        Extra Laplacian smoothing passes after full coverage.
     convergence_threshold : float
         Stop smoothing when max displacement drops below this value.
+    seed_filter_percentile : float
+        Remove ray-cast hits below this Z percentile before seeding (env-sphere
+        / scene-floor outlier removal).  Applied only when seed_xy is None.
     """
 
     def __init__(
@@ -184,12 +192,13 @@ class ExpandSnake:
         terrain_z_floor: np.ndarray,
         bounds: tuple,
         res: float,
+        seed_xy: "tuple[float, float] | None" = None,
         alpha: float = 0.3,
         floor_tolerance: float = 2.0,
         max_iterations: int = 500,
         smoothing_iterations: int = 50,
         convergence_threshold: float = 1e-3,
-        seed_filter_percentile: float = 5.0,  # remove seeds below this Z percentile (env-sphere hits)
+        seed_filter_percentile: float = 5.0,
     ) -> None:
         self.terrain_z_floor = np.asarray(terrain_z_floor, dtype=np.float64)
         self.bounds = bounds
@@ -200,7 +209,11 @@ class ExpandSnake:
         self.smoothing_iterations = smoothing_iterations
         self.convergence_threshold = convergence_threshold
 
-        # Filter outlier seeds (env-sphere / scene-floor hits far below real terrain)
+        self.nx, self.ny = self.terrain_z_floor.shape
+        min_x, min_y = bounds[0], bounds[1]
+
+        # Always filter env-sphere / scene-floor outliers from the floor constraint
+        # data, regardless of seed mode.
         if seed_filter_percentile > 0:
             _valid = ~np.isnan(self.terrain_z_floor)
             if _valid.any():
@@ -208,11 +221,25 @@ class ExpandSnake:
                 self.terrain_z_floor = np.where(
                     self.terrain_z_floor <= _z_lo, np.nan, self.terrain_z_floor)
 
-        self.nx, self.ny = self.terrain_z_floor.shape
         self.valid_mask = ~np.isnan(self.terrain_z_floor)
 
-        # Z grid: seeds at floor value, unknown cells → NaN
-        self._Z = np.where(self.valid_mask, self.terrain_z_floor, np.nan)
+        if seed_xy is not None:
+            # --- Single-seed mode: start from camera cell only ---
+            ix0 = int(np.clip((seed_xy[0] - min_x) / self.res, 0, self.nx - 1))
+            iy0 = int(np.clip((seed_xy[1] - min_y) / self.res, 0, self.ny - 1))
+            self._Z = np.full((self.nx, self.ny), np.nan)
+            # Seed Z: floor at camera cell if available, else median of nearby valid hits
+            if self.valid_mask[ix0, iy0]:
+                self._Z[ix0, iy0] = self.terrain_z_floor[ix0, iy0]
+            else:
+                near = self.terrain_z_floor[
+                    max(0, ix0-2):min(self.nx, ix0+3),
+                    max(0, iy0-2):min(self.ny, iy0+3)]
+                self._Z[ix0, iy0] = float(np.nanmedian(near)) if not np.all(np.isnan(near)) else 0.0
+            print(f"[ExpandSnake] single-seed mode: cell ({ix0},{iy0})  Z={self._Z[ix0,iy0]:.2f}")
+        else:
+            # --- Multi-seed mode: seed from all valid (filtered) hits ---
+            self._Z = np.where(self.valid_mask, self.terrain_z_floor, np.nan)
 
         self.max_displacements: list[float] = []
         self.iterations_run: int = 0
@@ -252,6 +279,11 @@ class ExpandSnake:
     def _expand_step(self) -> int:
         """Activate all NaN cells that have at least one known neighbour.
 
+        For newly activated cells:
+        - If a ray-cast floor hit exists for that cell, use the floor Z directly
+          (the wave-front "snaps" to the real terrain surface).
+        - Otherwise, use the mean Z of known neighbours (Laplacian interpolation).
+
         Returns the number of newly activated cells.
         """
         unknown = np.isnan(self._Z)
@@ -259,9 +291,16 @@ class ExpandSnake:
             return 0
 
         mean_z, n_known = self._neighbour_mean(self._Z)
-        # Activate cells that are unknown but have known neighbours
         activate = unknown & (n_known > 0)
-        self._Z[activate] = mean_z[activate]
+
+        # Snap to floor where available, else use neighbour mean
+        floor = self.terrain_z_floor
+        has_floor = activate & self.valid_mask
+        no_floor  = activate & ~self.valid_mask
+
+        self._Z[has_floor] = floor[has_floor]
+        self._Z[no_floor]  = mean_z[no_floor]
+
         return int(activate.sum())
 
     # ------------------------------------------------------------------
