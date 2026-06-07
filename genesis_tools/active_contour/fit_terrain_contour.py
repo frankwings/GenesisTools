@@ -44,7 +44,6 @@ def _load_module(name: str):
     return mod
 
 TerrainSnake           = _load_module("terrain_snake").TerrainSnake
-ExpandSnake            = _load_module("terrain_snake").ExpandSnake
 SceneObjectClassifier  = _load_module("scene_object_classifier").SceneObjectClassifier
 
 
@@ -150,31 +149,16 @@ def fit_terrain_contour(
     max_grid_cells_xy: int = 200,
     env_sphere_percentile: float = 5.0,
     ray_samples: int = 1,
-    # --- contract snake params ---
     alpha: float = 0.5,
     gravity: float = 0.1,
     dt: float = 1.0,
     max_iterations: int = 200,
     convergence_threshold: float = 1e-3,
     start_height: float = 1.7,
-    # --- expand snake params (terrain mode only) ---
-    snake_mode: str = "contract",        # "contract" | "expand"
-    expand_floor_tolerance: float = 2.0, # BU: max deviation from seed floor Z
-    expand_smoothing_iters: int = 50,    # Laplacian passes after expansion
-    expand_alpha: float = 0.3,           # smoothing weight for expand snake
-    # --- refine pass ---
     refine_pass: bool = True,
     refine_pad_cells: int = 2,
 ) -> str:
-    """Fit terrain snake to blend_path, save terrain_snake.npz, return output path.
-
-    snake_mode="expand"  (terrain mode only):
-        Seeds from ray-cast floor hits, diffuses outward via Laplacian propagation.
-        More robust than contract for scenes where the cloth init Z is far from the
-        actual terrain (e.g. when the walkthrough camera is 90+ BU above the cloth
-        start position).  Produces a heightmap whose Z values match the actual
-        ray-cast hits rather than a physics simulation.
-    """
+    """Fit terrain snake to blend_path, save terrain_snake.npz, return output path."""
     import bpy
     from mathutils import Vector
 
@@ -315,42 +299,22 @@ def fit_terrain_contour(
         final_res = res_bu
 
     # ------------------------------------------------------------------
-    # Fit snake on the final (refined) floor.
-    # mode="expand"  → ExpandSnake (terrain mode only, seeds from ray-cast hits)
-    # mode="contract" → TerrainSnake (classic cloth, default)
+    # Fit TerrainSnake on the final (refined) floor.
     # ------------------------------------------------------------------
-    _mode = snake_mode.lower().strip()
-    if _mode == "expand":
-        print(f"[TerrainSnake] Using ExpandSnake (outward diffusion from {int(np.sum(~np.isnan(final_floor)))} seeds)")
-        # Single-seed expand: start from original scene camera XY
-        _seed_xy = (cam_x, cam_y) if cam_x is not None else None
-        snake = ExpandSnake(
-            terrain_z_floor=final_floor,
-            bounds=final_bounds,
-            res=final_res,
-            seed_xy=_seed_xy,
-            alpha=expand_alpha,
-            floor_tolerance=expand_floor_tolerance,
-            max_iterations=max_iterations,
-            smoothing_iterations=expand_smoothing_iters,
-            convergence_threshold=convergence_threshold,
-            seed_filter_percentile=env_sphere_percentile,
-        )
-    else:
-        snake = TerrainSnake(
-            terrain_z_floor=final_floor,
-            cloth_init_z=cam_z,
-            bounds=final_bounds,
-            res=final_res,
-            alpha=alpha,
-            gravity=gravity,
-            dt=dt,
-            max_iterations=max_iterations,
-            convergence_threshold=convergence_threshold,
-            start_height=start_height,
-        )
+    snake = TerrainSnake(
+        terrain_z_floor=final_floor,
+        cloth_init_z=cam_z,
+        bounds=final_bounds,
+        res=final_res,
+        alpha=alpha,
+        gravity=gravity,
+        dt=dt,
+        max_iterations=max_iterations,
+        convergence_threshold=convergence_threshold,
+        start_height=start_height,
+    )
     snake.fit()
-    print(f"[TerrainSnake/{_mode}] converged in {snake.iterations_run} iterations")
+    print(f"[TerrainSnake] converged in {snake.iterations_run} iterations")
 
     # --- Save ---
     heightmap = snake.to_heightmap()
@@ -370,7 +334,6 @@ def fit_terrain_contour(
         camera_lookat=(np.array([cam_lookat_x, cam_lookat_y], dtype=np.float64)
                        if cam_lookat_x is not None
                        else np.array([0.0, 0.0], dtype=np.float64)),
-        snake_mode=np.bytes_(_mode),
         # Pass-1 (full-AABB) coverage saved for visualisation / debugging
         pass1_floor=floor_1.astype(np.float32),
         pass1_bounds=np.array(
