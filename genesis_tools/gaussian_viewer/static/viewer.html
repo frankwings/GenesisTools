@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Genesis Gaussian Splat Viewer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0a0f; color: #e0e0e0; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+
+    #canvas-container { width: 100vw; height: 100vh; }
+
+    #ui {
+      position: fixed; top: 16px; left: 16px; z-index: 10;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+
+    #title {
+      font-size: 13px; font-weight: 600; letter-spacing: 1px;
+      color: #7eb8f7; text-transform: uppercase;
+    }
+
+    #drop-zone {
+      width: 260px; padding: 14px 16px;
+      border: 1.5px dashed #3a4a6a; border-radius: 8px;
+      background: rgba(10,15,30,0.85); backdrop-filter: blur(8px);
+      cursor: pointer; transition: border-color 0.2s;
+      text-align: center;
+    }
+    #drop-zone:hover, #drop-zone.drag-over { border-color: #7eb8f7; }
+    #drop-zone p { font-size: 12px; color: #8899bb; margin-bottom: 8px; }
+    #drop-zone input { display: none; }
+
+    #load-btn {
+      width: 100%; padding: 8px; border-radius: 6px;
+      background: #1e3a5f; border: 1px solid #2e5a9f;
+      color: #7eb8f7; font-size: 12px; cursor: pointer; transition: background 0.2s;
+    }
+    #load-btn:hover { background: #2e4a7f; }
+
+    #url-input {
+      width: 100%; padding: 7px 10px; border-radius: 6px;
+      background: #0d1a2e; border: 1px solid #2a3a5a;
+      color: #c0d0e8; font-size: 12px; outline: none;
+    }
+    #url-input::placeholder { color: #4a5a7a; }
+
+    #status {
+      font-size: 11px; color: #5a8abb; padding: 4px 0;
+    }
+
+    #info {
+      position: fixed; bottom: 16px; left: 16px;
+      font-size: 11px; color: #4a6a9a;
+      background: rgba(10,15,30,0.7); padding: 8px 12px; border-radius: 6px;
+    }
+
+    #loading-bar {
+      position: fixed; top: 0; left: 0; height: 2px;
+      background: linear-gradient(90deg, #1e5aff, #7eb8f7);
+      transition: width 0.3s; width: 0%; z-index: 100;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading-bar"></div>
+  <div id="canvas-container"></div>
+
+  <div id="ui">
+    <div id="title">⬡ Genesis Splat Viewer</div>
+
+    <div id="drop-zone" id="drop-zone">
+      <p>Drop .ply / .splat file here</p>
+      <input type="file" id="file-input" accept=".ply,.splat" />
+      <button id="load-btn" onclick="document.getElementById('file-input').click()">Choose File</button>
+    </div>
+
+    <input type="text" id="url-input" placeholder="Or paste URL to .ply file" />
+    <button id="load-btn" onclick="loadFromUrl()" style="width:260px;padding:8px;border-radius:6px;background:#1e3a5f;border:1px solid #2e5a9f;color:#7eb8f7;font-size:12px;cursor:pointer;">Load from URL</button>
+
+    <div id="status">Ready. Drop a .ply file to begin.</div>
+  </div>
+
+  <div id="info">
+    Orbit: Left drag &nbsp;|&nbsp; Pan: Right drag &nbsp;|&nbsp; Zoom: Scroll
+  </div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "/static/lib/three.module.js",
+        "@mkkellogg/gaussian-splats-3d": "/static/lib/gaussian-splats-3d.module.min.js"
+      }
+    }
+  </script>
+
+  <script type="module">
+    console.log('[GS Viewer] Module script starting...');
+
+    let GaussianSplats3D;
+    try {
+      GaussianSplats3D = await import('@mkkellogg/gaussian-splats-3d');
+      console.log('[GS Viewer] Library loaded OK:', Object.keys(GaussianSplats3D));
+    } catch (importErr) {
+      console.error('[GS Viewer] FAILED to import library:', importErr);
+      document.getElementById('status').textContent = `Library load error: ${importErr.message}`;
+    }
+
+    const container = document.getElementById('canvas-container');
+    const status = document.getElementById('status');
+    const loadingBar = document.getElementById('loading-bar');
+
+    let viewer = null;
+
+    function initViewer() {
+      console.log('[GS Viewer] initViewer()');
+      if (viewer) {
+        viewer.dispose();
+        while (container.firstChild) container.removeChild(container.firstChild);
+      }
+      viewer = new GaussianSplats3D.Viewer({
+        rootElement: container,
+        sharedMemoryForWorkers: false,
+        dynamicScene: false,
+        webXRMode: GaussianSplats3D.WebXRMode.None,
+      });
+      console.log('[GS Viewer] Viewer instance created:', viewer);
+      return viewer;
+    }
+
+    async function loadSplat(source, isUrl = true) {
+      console.log(`[GS Viewer] loadSplat("${source}", isUrl=${isUrl})`);
+      try {
+        status.textContent = 'Initializing viewer...';
+        loadingBar.style.width = '10%';
+
+        const v = initViewer();
+
+        status.textContent = 'Loading splat data...';
+        loadingBar.style.width = '40%';
+        console.log('[GS Viewer] Calling addSplatScene...');
+
+        await v.addSplatScene(source, {
+          splatAlphaRemovalThreshold: 5,
+          showLoadingUI: false,
+          onProgress: (progress) => {
+            loadingBar.style.width = `${40 + progress * 0.5}%`;
+            status.textContent = `Loading... ${Math.round(progress * 100)}%`;
+            if (Math.round(progress * 100) % 10 === 0) {
+              console.log(`[GS Viewer] Progress: ${Math.round(progress * 100)}%`);
+            }
+          }
+        });
+
+        console.log('[GS Viewer] addSplatScene complete, calling start()');
+        loadingBar.style.width = '100%';
+        status.textContent = 'Loaded. Use mouse to navigate.';
+        setTimeout(() => { loadingBar.style.width = '0%'; }, 800);
+
+        v.start();
+      } catch (e) {
+        console.error('[GS Viewer] loadSplat ERROR:', e);
+        status.textContent = `Error: ${e.message}`;
+        loadingBar.style.width = '0%';
+      }
+    }
+
+    // File drop / select
+    const dropZone = document.getElementById('drop-zone');
+    const fileInput = document.getElementById('file-input');
+
+    dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+    dropZone.addEventListener('drop', e => {
+      e.preventDefault();
+      dropZone.classList.remove('drag-over');
+      const file = e.dataTransfer.files[0];
+      console.log('[GS Viewer] File dropped:', file?.name, file?.size);
+      if (file) handleFile(file);
+    });
+
+    fileInput.addEventListener('change', e => {
+      if (e.target.files[0]) handleFile(e.target.files[0]);
+    });
+
+    function handleFile(file) {
+      console.log('[GS Viewer] handleFile:', file.name, file.size);
+      status.textContent = `Reading ${file.name}...`;
+      const url = URL.createObjectURL(file);
+      loadSplat(url, false);
+    }
+
+    // URL load
+    window.loadFromUrl = function() {
+      const url = document.getElementById('url-input').value.trim();
+      console.log('[GS Viewer] loadFromUrl:', url);
+      if (!url) return;
+      loadSplat(url, true);
+    };
+
+    // Auto-load from query param
+    const params = new URLSearchParams(window.location.search);
+    const autoLoad = params.get('ply');
+    console.log('[GS Viewer] window.location.search:', window.location.search);
+    console.log('[GS Viewer] autoLoad param:', autoLoad);
+    if (autoLoad) {
+      status.textContent = `Auto-loading: ${autoLoad}`;
+      loadSplat(autoLoad, true);
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+{
+  "name": "genesistools",
+  "version": "1.0.0",
+  "description": "Shared utilities for the Genesis world model system. See [STRUCTURE.md](STRUCTURE.md) for details.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@playcanvas/supersplat-viewer": "^1.26.2"
+  }
+}
