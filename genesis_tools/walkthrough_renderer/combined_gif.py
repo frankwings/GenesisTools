@@ -5,6 +5,7 @@ For each frame the XY map shows:
   - full path in light-grey
   - visited trail coloured by progress (plasma: blue=start → yellow=current)
   - current camera position as a white circle + crosshair
+  - camera heading arrow + semi-transparent FOV cone
 
 Terrain heightmap source selection
 -----------------------------------
@@ -23,6 +24,7 @@ elevation under the walkthrough camera.
 from __future__ import annotations
 
 import io
+import math
 from pathlib import Path
 from typing import Generator, List, Union
 
@@ -160,12 +162,76 @@ def _plasma_color(t: float) -> tuple:
     return (int(r * 255), int(g * 255), int(b * 255))
 
 
+def _draw_fov_cone(
+    img: "Image.Image",
+    cx: int, cy: int,
+    yaw_rad: float,
+    fov_rad: float,
+    length_px: int,
+    fill_rgba: tuple = (255, 255, 100, 80),
+    edge_color: tuple = (255, 255, 100, 255),
+    edge_width: int = 2,
+    n_arc: int = 16,
+) -> "Image.Image":
+    """Draw a semi-transparent FOV cone onto *img* (RGB) and return the result.
+
+    Parameters
+    ----------
+    img        : PIL RGB image to draw onto.
+    cx, cy     : Camera pixel position (image coords, Y-down).
+    yaw_rad    : Camera heading in radians (math convention: 0=+X, CCW positive).
+                 Y-axis is flipped for image space.
+    fov_rad    : Full horizontal FOV in radians.
+    length_px  : Cone length in pixels.
+    fill_rgba  : Fill colour + alpha (0-255) for the cone polygon.
+    edge_color : RGB colour for the two boundary lines + heading arrow.
+    edge_width : Boundary line width in pixels.
+    n_arc      : Number of arc segments (more = smoother fan).
+    """
+    half = fov_rad / 2.0
+
+    # Arc polygon (image Y is downward, so sin is negated)
+    pts = [(cx, cy)]
+    for i in range(n_arc + 1):
+        angle = yaw_rad - half + i * (fov_rad / n_arc)
+        px = cx + length_px * math.cos(angle)
+        py = cy - length_px * math.sin(angle)
+        pts.append((int(px), int(py)))
+    pts.append((cx, cy))
+
+    # Semi-transparent fill via RGBA overlay
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ov_draw = ImageDraw.Draw(overlay)
+    ov_draw.polygon(pts, fill=fill_rgba)
+    img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+
+    # Edge lines and heading arrow drawn on top
+    draw = ImageDraw.Draw(img)
+    left_angle  = yaw_rad + half
+    right_angle = yaw_rad - half
+    lx = cx + length_px * math.cos(left_angle)
+    ly = cy - length_px * math.sin(left_angle)
+    rx = cx + length_px * math.cos(right_angle)
+    ry = cy - length_px * math.sin(right_angle)
+    draw.line([(cx, cy), (int(lx), int(ly))], fill=edge_color[:3], width=edge_width)
+    draw.line([(cx, cy), (int(rx), int(ry))], fill=edge_color[:3], width=edge_width)
+
+    # Heading arrow (centre of cone)
+    arrow_len = int(length_px * 0.8)
+    ax = cx + arrow_len * math.cos(yaw_rad)
+    ay = cy - arrow_len * math.sin(yaw_rad)
+    draw.line([(cx, cy), (int(ax), int(ay))], fill=(255, 255, 255), width=max(2, edge_width + 1))
+
+    return img
+
+
 def _iter_combined_frames(
     frames: List[Path],
     path_npz: Union[str, Path],
     terrain_npz: Union[str, Path],
     map_px: int = 480,
     output_scale: float = 1.0,
+    fov_deg: float = 35.7,
 ) -> Generator[Image.Image, None, None]:
     """Yield composited PIL images (rendered frame + XY map) for each input frame."""
     pdata = np.load(path_npz)
@@ -189,6 +255,18 @@ def _iter_combined_frames(
     seg_len = np.sqrt((diffs**2).sum(axis=1))
     cum = np.concatenate([[0.0], np.cumsum(seg_len)])
     t_frac = cum / max(cum[-1], 1e-6)   # (P,) ∈ [0,1]
+
+    # Pre-compute yaw (radians) at each path point from path tangent (lookahead).
+    # Use a 5% arc-length lookahead, clamped to available range.
+    _yaws = np.zeros(P, dtype=np.float64)
+    _lah_steps = max(1, int(P * 0.05))
+    for _i in range(P):
+        _j = min(_i + _lah_steps, P - 1)
+        dx = path_pts[_j, 0] - path_pts[_i, 0]
+        dy = path_pts[_j, 1] - path_pts[_i, 1]
+        _yaws[_i] = math.atan2(dy, dx)
+
+    fov_rad = math.radians(fov_deg)
 
     dot_r = max(4, map_px // 80)
     trail_w = max(1, map_px // 200)
@@ -220,6 +298,24 @@ def _iter_combined_frames(
             draw.line([(x0, y0), (x1, y1)], fill=_plasma_color(t_frac[k]), width=trail_w)
 
         cx, cy = int(cur_px[0]), int(cur_px[1])
+
+        # Interpolate yaw at current path position
+        cur_yaw = float(_yaws[p_lo] + frac * (_yaws[p_hi] - _yaws[p_lo]))
+
+        # FOV cone + heading arrow (drawn before the dot so dot sits on top)
+        cone_len = max(dot_r * 6, mw // 10)
+        map_img = _draw_fov_cone(
+            map_img, cx, cy,
+            yaw_rad=cur_yaw,
+            fov_rad=fov_rad,
+            length_px=cone_len,
+            fill_rgba=(255, 255, 80, 70),
+            edge_color=(255, 255, 80, 255),
+            edge_width=max(1, dot_r // 3),
+        )
+        draw = ImageDraw.Draw(map_img)
+
+        # Camera position dot (drawn on top of cone)
         draw.ellipse([(cx - dot_r, cy - dot_r), (cx + dot_r, cy + dot_r)],
                      fill="white", outline="black")
         draw.line([(cx - dot_r*2, cy), (cx + dot_r*2, cy)],
@@ -250,18 +346,21 @@ def make_combined_gif(
     map_px: int = 480,
     step: int = 3,
     output_scale: float = 0.5,
+    fov_deg: float = 35.7,
 ) -> Path:
-    """Create side-by-side GIF: rendered frames + live XY map.
+    """Create side-by-side GIF: rendered frames + live XY map with FOV cone.
 
     step=3 + output_scale=0.5 keeps file size ~25 MB for 1000-frame renders.
     Path colors: plasma colormap, blue=start → yellow=end (arc-length progress).
+    fov_deg: horizontal camera FOV in degrees (default 35.7° = 50mm/32mm sensor).
     """
     frames_sub = [Path(f) for f in frames][::step]
     output_gif = Path(output_gif)
     output_gif.parent.mkdir(parents=True, exist_ok=True)
 
     imgs = list(_iter_combined_frames(frames_sub, path_npz, terrain_npz,
-                                      map_px=map_px, output_scale=output_scale))
+                                      map_px=map_px, output_scale=output_scale,
+                                      fov_deg=fov_deg))
     if not imgs:
         raise RuntimeError("No frames to combine.")
 
