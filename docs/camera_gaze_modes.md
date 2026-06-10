@@ -31,6 +31,58 @@ Because the smoothing is offline (global), a zero-phase symmetric FIR kernel can
 ✅ Naturally looks up on ascents, slightly down on descents  
 ⚠️ Only active in non-aerial mode
 
+### What "Gaussian smoothing" means here
+
+The smoothing is **temporal — across frames**. Each frame's yaw/pitch is replaced
+by a Gaussian-weighted average of the surrounding frames, both **past and
+future**:
+
+```python
+# camera_animate.py — _gauss_smooth()
+radius = ceil(4.0 * sigma)              # window: ±4σ frames
+x = arange(-radius, radius + 1)
+k = exp(-0.5 * (x / sigma)**2)          # Gaussian kernel
+k /= k.sum()                            # normalize weights to 1
+smoothed = convolve(padded_signal, k)   # symmetric convolution
+```
+
+**Concrete example.** With `smooth_yaw_sigma_s = 0.6` at 12 fps:
+
+- σ = 0.6 s × 12 fps = **7.2 frames**
+- window radius = 4σ ≈ **29 frames** on each side
+- → each frame's yaw becomes a weighted average of **~58 surrounding frames**,
+  with weights falling off as a bell curve (the current frame counts most,
+  frames 29 away contribute almost nothing).
+
+The σ parameters are specified in **seconds** (not frames) so the smoothing
+strength is independent of the render fps.
+
+**Why both past AND future frames (zero-phase)?**
+A real-time filter could only average over *past* frames, which shifts the
+signal later in time — the camera would start turning *after* the path bends
+(visible lag). Because `smooth_adaptive` precomputes the entire trajectory
+offline, it can use a symmetric window centered on each frame. A symmetric FIR
+kernel has **zero phase delay**: the smoothed camera turns exactly *at* the
+bend, just more gradually. This is the main reason the mode must run offline.
+
+**Why unwrap yaw before smoothing?**
+Yaw is a circular quantity that wraps at ±180°. Naively averaging 179° and
+−179° gives 0° — the camera would whip around the wrong way. `np.unwrap()`
+first converts the sequence to a continuous signal (… 179°, 181°, 183° …) so
+the convolution averages along the short arc; the result is re-wrapped
+afterwards.
+
+**Edge handling.** The first/last `radius` frames don't have enough neighbours
+on one side, so the signal is padded by repeating the boundary value
+(nearest-edge padding). This keeps the camera stable at the start and end of
+the walkthrough instead of drifting toward 0.
+
+**Order of operations for pitch.** Pitch is clamped to
+`[smooth_pitch_min_deg, smooth_pitch_max_deg]` *before* Gaussian smoothing, so
+a brief extreme spike (e.g. the lookahead point falling off a cliff edge) is
+first capped, then blended away — the spike never leaks into neighbouring
+frames at full amplitude.
+
 ---
 
 ## 2. `waypoint`
