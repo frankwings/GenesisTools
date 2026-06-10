@@ -5,95 +5,95 @@ Source: `genesis_tools/walkthrough_renderer/pipeline/camera_animate.py`
 
 ---
 
-## 1. `smooth_adaptive`（推荐用于 terrain 场景）
+## 1. `smooth_adaptive` (recommended for terrain scenes)
 
-**原理**  
-离线预计算所有帧的朝向，再写入关键帧。分两步：
+**How it works**  
+All frame orientations are precomputed offline before any keyframes are written. Two stages:
 
-- **Yaw（水平朝向）**：采样路径切线方向（lookahead），对 yaw 序列做 unwrap + 双向 Gaussian 平滑，消除抖动。
-- **Pitch（仰俯角）**：在当前 yaw 方向前方 `smooth_pitch_lookahead_m` 处查询 cloth heightmap，用 atan2 计算仰俯角，clamp 到 `[smooth_pitch_min_deg, smooth_pitch_max_deg]`，再做 Gaussian 平滑。
+- **Yaw (horizontal heading)**: sample the path tangent direction (lookahead), then unwrap the yaw sequence and apply bidirectional Gaussian smoothing to remove jitter.
+- **Pitch (vertical angle)**: query the cloth heightmap at `smooth_pitch_lookahead_m` ahead in the current yaw direction, compute the pitch via atan2, clamp to `[smooth_pitch_min_deg, smooth_pitch_max_deg]`, then apply Gaussian smoothing.
 
-因为是"离线"（全局）平滑，可以实现 zero-phase（对称 FIR），不引入时间延迟。
+Because the smoothing is offline (global), a zero-phase symmetric FIR kernel can be used — no temporal lag is introduced.
 
-**相关参数**
+**Parameters**
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `smooth_pitch_lookahead_m` | `15.0` | Pitch 向前看距离（米） |
-| `smooth_pitch_min_deg` | `-15.0` | 最大下看角度（负 = 向下） |
-| `smooth_pitch_max_deg` | `8.0` | 最大上看角度 |
-| `smooth_yaw_sigma_s` | `1.5` | Yaw 高斯平滑 σ（秒） |
-| `smooth_pitch_sigma_s` | `0.8` | Pitch 高斯平滑 σ（秒） |
-| `lookahead_fraction` | `0.05` | Yaw 切线采样的 arc-length 前瞻比例 |
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `smooth_pitch_lookahead_m` | `15.0` | Pitch lookahead distance (meters) |
+| `smooth_pitch_min_deg` | `-15.0` | Maximum downward angle (negative = down) |
+| `smooth_pitch_max_deg` | `8.0` | Maximum upward angle |
+| `smooth_yaw_sigma_s` | `1.5` | Yaw Gaussian smoothing σ (seconds) |
+| `smooth_pitch_sigma_s` | `0.8` | Pitch Gaussian smoothing σ (seconds) |
+| `lookahead_fraction` | `0.05` | Arc-length lookahead fraction for yaw tangent sampling |
 
-**特点**  
-✅ 最自然的视角，适合起伏地形  
-✅ 上坡自然仰头，下坡轻微低头  
-⚠️ 仅在非 aerial 模式下生效
+**Characteristics**  
+✅ Most natural viewing angle; ideal for undulating terrain  
+✅ Naturally looks up on ascents, slightly down on descents  
+⚠️ Only active in non-aerial mode
 
 ---
 
 ## 2. `waypoint`
 
-**原理**  
-预先计算每个路点的朝向（取该路点之后所有未到达路点的平均方向），在路点之间用 **Slerp** 插值。相机始终朝向"未来路点的平均方向"。
+**How it works**  
+Each waypoint's gaze direction is precomputed as the average direction toward all future (not-yet-visited) waypoints. Between waypoints the camera orientation is interpolated via **Slerp**. The camera always faces the "average direction of upcoming waypoints."
 
-**特点**  
-✅ 视角变化平滑，Slerp 保证最短路径旋转  
-❌ 路点在地面上，视线会向下倾斜（视角偏低）  
-❌ 不感知地形高度，只看路点位置
+**Characteristics**  
+✅ Smooth orientation changes; Slerp guarantees shortest-arc rotation  
+❌ Waypoints sit on the ground, so the gaze tilts downward (low viewing angle)  
+❌ Terrain-height unaware — only waypoint positions matter
 
 ---
 
 ## 3. `eye_level`
 
-**原理**  
-每帧在路径上向前采样 `lookahead_fraction` 比例的弧长，取该点的 XY 坐标，但 **Z 固定为当前摄像机高度**，构造 look_target：
+**How it works**  
+Each frame samples the path `lookahead_fraction` of arc-length ahead, takes that point's XY coordinates, but **fixes Z to the current camera height** to build the look target:
 
 ```python
 look_target = Vector((floor_ahead.x, floor_ahead.y, cam_pos.z))
 ```
 
-相机始终保持水平视线，不随地形上下俯仰。
+The camera gaze stays perfectly horizontal and never pitches with the terrain.
 
-**特点**  
-✅ 视线永远水平，稳定感强  
-✅ 适合平坦场景或不希望视角抖动的场景  
-❌ 上下坡时视角与地面脱节（不自然）
+**Characteristics**  
+✅ Gaze is always level — very stable feel  
+✅ Good for flat scenes or when pitch jitter must be avoided  
+❌ On slopes the gaze disconnects from the ground (looks unnatural)
 
 ---
 
-## 4. `free`（默认值）
+## 4. `free` (default)
 
-**原理**  
-每帧在路径上向前采样，取 look_target = cam_pos + (路径前方点 - 当前路点)，**包含地形 Z 差值**：
+**How it works**  
+Each frame samples the path ahead and sets look_target = cam_pos + (point ahead − current path point), **including the terrain Z delta**:
 
 ```python
 look_target = cam_pos + (floor_ahead - path_pt)
 ```
 
-相当于沿路径切线方向看，地形坡度会直接影响 pitch。
+Effectively looks along the path tangent; terrain slope directly drives the pitch.
 
-**特点**  
-✅ 无额外配置，开箱即用  
-✅ 自然跟随路径方向  
-❌ 没有平滑，陡坡会导致大角度俯仰  
-❌ 比 `smooth_adaptive` 抖动更多
-
----
-
-## 对比总结
-
-| 模式 | Pitch 来源 | Yaw 平滑 | Pitch 平滑 | 适合场景 |
-|------|-----------|---------|-----------|---------|
-| `smooth_adaptive` | heightmap atan2 + clamp | ✅ Gaussian | ✅ Gaussian | 户外地形、起伏地貌 |
-| `waypoint` | 路点方向 Slerp | ✅ Slerp | ❌（隐含） | 室内/平坦、需要看向目标点 |
-| `eye_level` | 固定水平（cam_pos.z） | ❌ 逐帧 | ✅（强制水平） | 平坦场景、稳定感优先 |
-| `free` | 路径切线 Z 差值 | ❌ 逐帧 | ❌ 逐帧 | 快速原型、无特殊需求 |
+**Characteristics**  
+✅ No extra configuration — works out of the box  
+✅ Naturally follows the path direction  
+❌ No smoothing — steep slopes cause large pitch swings  
+❌ More jitter than `smooth_adaptive`
 
 ---
 
-## 配置示例（terrain 场景推荐）
+## Comparison
+
+| Mode | Pitch source | Yaw smoothing | Pitch smoothing | Best for |
+|------|-------------|---------------|-----------------|----------|
+| `smooth_adaptive` | heightmap atan2 + clamp | ✅ Gaussian | ✅ Gaussian | Outdoor terrain, rolling landscapes |
+| `waypoint` | waypoint-direction Slerp | ✅ Slerp | ❌ (implicit) | Indoor / flat scenes, target-focused gaze |
+| `eye_level` | fixed horizontal (cam_pos.z) | ❌ per-frame | ✅ (forced level) | Flat scenes, stability first |
+| `free` | path-tangent Z delta | ❌ per-frame | ❌ per-frame | Quick prototypes, no special requirements |
+
+---
+
+## Example config (recommended for terrain scenes)
 
 ```json
 {
