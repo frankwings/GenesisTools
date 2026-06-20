@@ -206,7 +206,8 @@ def build(blend_path: str, path_data, orient: "OrientData",
         q = entry["quat"]
         wp_schedule.append((t, Quaternion((q[0], q[1], q[2], q[3]))))
 
-    wp_gaze_mode = config.get("waypoint_gaze_mode", "free")
+    _default_gaze = "smooth_adaptive" if config.get("aerial") else "free"
+    wp_gaze_mode = config.get("waypoint_gaze_mode", _default_gaze)
 
     def _get_base_quat(t):
         if not wp_schedule:
@@ -301,7 +302,7 @@ def build(blend_path: str, path_data, orient: "OrientData",
     # Yaw  : path tangent direction → unwrap → Gaussian bidirectional → rewrap
     # Pitch: heightmap lookup 15 m ahead → atan2 → clamp ±deg → Gaussian bidir
     _precomp_quats = None   # list[Quaternion] indexed by path frame index
-    if wp_gaze_mode == "smooth_adaptive" and not config.get("aerial"):
+    if wp_gaze_mode == "smooth_adaptive":
         import numpy as _np
         _lah_m       = float(config.get("smooth_pitch_lookahead_m",   15.0))
         _lah_bu      = _lah_m / unit_scale

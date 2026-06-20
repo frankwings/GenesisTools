@@ -445,8 +445,19 @@ def _build_smooth_path(tour: list, walkable: set, config: dict, bounds: tuple,
         )
         return float(loc.z) if hit else None
 
+    _aerial = config.get("aerial", False)
+
     def _best_z(wx: float, wy: float, lin_z: float) -> list:
-        """Return camera-above-ground Z using downward ray_cast, with heightmap fallback."""
+        """Return camera-above-ground Z using downward ray_cast, with heightmap fallback.
+
+        In aerial mode the downward ray_cast is skipped because it hits the
+        roof/ceiling of indoor scenes instead of the interior floor.  The
+        voxel-grid Z (lin_z) is already properly constrained by the walkable
+        volume, so we only apply the terrain heightmap clamp (no-op when
+        there is no heightmap).
+        """
+        if _aerial:
+            return _clamp_above_terrain([wx, wy, lin_z])
         gz = _raycast_ground_z(wx, wy)
         if gz is not None:
             return [wx, wy, gz + cam_h_bu]
