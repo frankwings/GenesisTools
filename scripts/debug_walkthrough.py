@@ -382,11 +382,12 @@ def main():
         if args.resume and frames_dir.exists() and len(list(frames_dir.glob("frame_*.png"))) > 0:
             print(f"\n[SKIP] render (found frames in {frames_dir})")
         else:
+            # render.py creates frames/ subdir internally, so pass output_dir=out
             timings["6_render"] = _run_step(
                 "render",
                 "genesis_tools.walkthrough_renderer.pipeline.render",
                 ["--blend", blend_out, "--config", config_path,
-                 "--output", str(out / "frames")],
+                 "--output-dir", str(out)],
                 bpy_python,
             )
 
