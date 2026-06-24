@@ -4,11 +4,19 @@
 Usage:
     python3 scripts/debug_walkthrough.py \
         --blend /path/to/scene.blend \
-        --snake results/active_contour/my_scene/snake_mesh.npz \
         --output results/debug_run \
         [--width 480] [--height 360] [--samples 16] \
         [--fps 12] [--duration 10] [--gaze smooth_adaptive] \
         [--no-render] [--visualize]
+
+The pipeline computes everything from scratch:
+  Step 0: Fit active contour (Snake3D) to define walkable volume
+  Step 1: Build voxel grid from snake mesh
+  Step 2: Flood-fill walkable voxels
+  Step 3: Plan path (waypoints + smooth interpolation)
+  Step 4: Compute camera orientations per waypoint
+  Step 5: Create keyframed camera animation
+  Step 6: Render frames (optional, skip with --no-render)
 
 Each step outputs its intermediate files. After all steps complete, a summary
 report is printed showing data shapes, path stats, and file sizes.
@@ -25,12 +33,18 @@ import time
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# BPY_PYTHON candidates (try local Blender first, then system)
+# BPY_PYTHON / BLENDER candidates
 # ---------------------------------------------------------------------------
 _BPY_CANDIDATES = [
     "/home/kingy/blender/4.5/python/bin/python3.11",        # local WSL
     "/opt/blender/4.5/python/bin/python3.11",                # GCP/Linux
     "/mnt/c/Program Files/Blender Foundation/Blender 4.5/4.5/python/bin/python3.11",
+]
+
+_BLENDER_CANDIDATES = [
+    "/home/kingy/blender/blender",                           # local WSL
+    "/opt/blender/blender",                                  # GCP/Linux
+    "/usr/local/bin/blender",                                # system
 ]
 
 
@@ -39,6 +53,18 @@ def _find_bpy_python() -> str:
         if os.path.isfile(p):
             return p
     raise FileNotFoundError("No Blender Python found. Tried: " + str(_BPY_CANDIDATES))
+
+
+def _find_blender() -> str:
+    for p in _BLENDER_CANDIDATES:
+        if os.path.isfile(p):
+            return p
+    # fallback: try PATH
+    import shutil
+    b = shutil.which("blender")
+    if b:
+        return b
+    raise FileNotFoundError("No Blender found. Tried: " + str(_BLENDER_CANDIDATES))
 
 
 def _run_step(name: str, mod: str, args: list, bpy_python: str) -> float:
@@ -59,6 +85,47 @@ def _run_step(name: str, mod: str, args: list, bpy_python: str) -> float:
         sys.exit(1)
     print(f"\n  OK ({elapsed:.1f}s)")
     return elapsed
+
+
+def _run_snake_fitting(blend: str, output_dir: Path, blender: str,
+                       alpha: float, beta: float, subdiv: int,
+                       resume: bool) -> tuple[str, float]:
+    """Run Step 0: Active Contour snake fitting. Returns (snake_npz_path, elapsed)."""
+    snake_dir = output_dir / "snake"
+    snake_npz = snake_dir / "snake_mesh.npz"
+
+    if resume and snake_npz.exists():
+        print(f"\n[SKIP] snake_fitting (found {snake_npz})")
+        return str(snake_npz), 0.0
+
+    print(f"\n{'='*60}")
+    print(f"  Step 0: Snake Fitting (Active Contour)")
+    print(f"  alpha={alpha}  beta={beta}  subdivision_levels={subdiv}")
+    print(f"{'='*60}")
+
+    t0 = time.time()
+    # Import and run directly (no bpy needed for snake fitting, but it
+    # calls Blender for mesh extraction internally)
+    project_root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(project_root))
+    from genesis_tools.active_contour.fit_scene_contour import fit_scene_active_contour
+
+    result = fit_scene_active_contour(
+        blend_path=Path(blend),
+        output_dir=snake_dir,
+        alpha=alpha,
+        beta=beta,
+        subdivision_levels=subdiv,
+        blender_command=blender,
+    )
+    elapsed = time.time() - t0
+
+    print(f"\n  Snake: {result['snake_vertices']} vertices, "
+          f"{result['snake_faces']} faces, "
+          f"{result['sampled_points']:,} sampled points, "
+          f"{result['snake_iterations']} iterations ({elapsed:.1f}s)")
+
+    return str(snake_npz), elapsed
 
 
 def _print_summary(out: Path, timings: dict):
@@ -86,6 +153,14 @@ def _print_summary(out: Path, timings: dict):
                 print(f"    {f.relative_to(out)!s:40s}  {size/1024/1024:.1f} MB")
             else:
                 print(f"    {f.relative_to(out)!s:40s}  {size/1024:.1f} KB")
+
+    # Snake
+    snake_npz = out / "snake" / "snake_mesh.npz"
+    if snake_npz.exists():
+        sn = np.load(str(snake_npz), allow_pickle=True)
+        print(f"\n  Snake Mesh:")
+        print(f"    vertices:  {sn['vertices'].shape[0]}")
+        print(f"    faces:     {sn['faces'].shape[0]}")
 
     # Voxel grid
     vg_path = out / "voxel_grid.npz"
@@ -156,7 +231,6 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument("--blend", required=True, help="Input .blend file")
-    parser.add_argument("--snake", required=True, help="Path to snake_mesh.npz")
     parser.add_argument("--output", required=True, help="Output directory")
     parser.add_argument("--width", type=int, default=480, help="Render width (default: 480)")
     parser.add_argument("--height", type=int, default=360, help="Render height (default: 360)")
@@ -169,7 +243,16 @@ def main():
     parser.add_argument("--engine", default="BLENDER_WORKBENCH",
                         choices=["BLENDER_WORKBENCH", "CYCLES", "BLENDER_EEVEE"],
                         help="Render engine (default: BLENDER_WORKBENCH)")
-    parser.add_argument("--config", default=None, help="Base config JSON (default: configs/standard_scene.json)")
+    parser.add_argument("--config", default=None,
+                        help="Base config JSON (default: configs/standard_scene.json)")
+    # Snake fitting parameters
+    parser.add_argument("--snake-alpha", type=float, default=0.6,
+                        help="Snake smoothness weight (default: 0.6)")
+    parser.add_argument("--snake-beta", type=float, default=0.3,
+                        help="Snake attraction weight (default: 0.3)")
+    parser.add_argument("--snake-subdiv", type=int, default=2,
+                        help="Snake convex hull subdivision levels (default: 2)")
+    # Control flags
     parser.add_argument("--no-render", action="store_true", help="Skip render step")
     parser.add_argument("--visualize", action="store_true",
                         help="Generate debug .blend with all visualization layers")
@@ -183,21 +266,35 @@ def main():
     sys.path.insert(0, str(project_root))
 
     blend = str(Path(args.blend).resolve())
-    snake = str(Path(args.snake).resolve())
     out = Path(args.output).resolve()
     out.mkdir(parents=True, exist_ok=True)
 
     bpy_python = _find_bpy_python()
+    blender = _find_blender()
     print(f"Using Blender Python: {bpy_python}")
+    print(f"Using Blender:        {blender}")
 
-    # Build config
+    timings = {}
+
+    # ── Step 0: Snake Fitting ──────────────────────────────────────────────
+    snake_npz, t = _run_snake_fitting(
+        blend, out, blender,
+        alpha=args.snake_alpha,
+        beta=args.snake_beta,
+        subdiv=args.snake_subdiv,
+        resume=args.resume,
+    )
+    if t > 0:
+        timings["0_snake_fitting"] = t
+
+    # ── Build config ───────────────────────────────────────────────────────
     config_base = args.config or str(project_root / "configs" / "standard_scene.json")
     with open(config_base) as f:
         config = json.load(f)
 
     config.update({
         "aerial": True,
-        "snake_npz": snake,
+        "snake_npz": snake_npz,
         "waypoint_gaze_mode": args.gaze,
         "render_engine": args.engine,
         "render_width": args.width,
@@ -210,7 +307,7 @@ def main():
     config_path = str(out / "_config.json")
     with open(config_path, "w") as f:
         json.dump(config, f, indent=2)
-    print(f"Config saved: {config_path}")
+    print(f"\nConfig saved: {config_path}")
 
     # Define step outputs
     vg_path = str(out / "voxel_grid.npz")
@@ -220,9 +317,7 @@ def main():
     blend_stem = Path(blend).stem
     blend_out = str(out / f"{blend_stem}_walkthrough.blend")
 
-    timings = {}
-
-    # Step 1: voxel_grid
+    # ── Step 1: voxel_grid ─────────────────────────────────────────────────
     if args.resume and os.path.exists(vg_path):
         print(f"\n[SKIP] voxel_grid (found {vg_path})")
     else:
@@ -233,7 +328,7 @@ def main():
             bpy_python,
         )
 
-    # Step 2: walkable
+    # ── Step 2: walkable ───────────────────────────────────────────────────
     if args.resume and os.path.exists(wk_path):
         print(f"\n[SKIP] walkable (found {wk_path})")
     else:
@@ -245,7 +340,7 @@ def main():
             bpy_python,
         )
 
-    # Step 3: path_plan
+    # ── Step 3: path_plan ──────────────────────────────────────────────────
     if args.resume and os.path.exists(pd_path):
         print(f"\n[SKIP] path_plan (found {pd_path})")
     else:
@@ -257,7 +352,7 @@ def main():
             bpy_python,
         )
 
-    # Step 4: camera_orient
+    # ── Step 4: camera_orient ──────────────────────────────────────────────
     if args.resume and os.path.exists(orient_path):
         print(f"\n[SKIP] camera_orient (found {orient_path})")
     else:
@@ -269,7 +364,7 @@ def main():
             bpy_python,
         )
 
-    # Step 5: camera_animate
+    # ── Step 5: camera_animate ─────────────────────────────────────────────
     if args.resume and os.path.exists(blend_out):
         print(f"\n[SKIP] camera_animate (found {blend_out})")
     else:
@@ -281,7 +376,7 @@ def main():
             bpy_python,
         )
 
-    # Step 6: render (optional)
+    # ── Step 6: render (optional) ──────────────────────────────────────────
     if not args.no_render:
         frames_dir = out / "frames"
         if args.resume and frames_dir.exists() and len(list(frames_dir.glob("frame_*.png"))) > 0:
@@ -295,7 +390,7 @@ def main():
                 bpy_python,
             )
 
-    # Visualize (optional)
+    # ── Visualize (optional) ───────────────────────────────────────────────
     if args.visualize:
         viz_blend = str(out / f"{blend_stem}_debug_viz.blend")
         viz_args = [
@@ -315,13 +410,21 @@ def main():
             bpy_python,
         )
 
-    # Summary
+    # ── Summary ────────────────────────────────────────────────────────────
     _print_summary(out, timings)
 
     # Dump comparison data for cross-platform verification
     dump_path = out / "debug_dump.json"
     import numpy as np
     dump = {}
+
+    snake_path = out / "snake" / "snake_mesh.npz"
+    if snake_path.exists():
+        sn = np.load(str(snake_path), allow_pickle=True)
+        dump["snake"] = {
+            "vertices": int(sn["vertices"].shape[0]),
+            "faces": int(sn["faces"].shape[0]),
+        }
     if os.path.exists(vg_path):
         vg = np.load(vg_path, allow_pickle=True)
         dump["voxel_grid"] = {

@@ -647,26 +647,30 @@ One-command debug runner that executes every step individually with full interme
 
 ```bash
 # Basic debug run (low-res, no render)
+# Snake is computed from scratch automatically (Step 0)
 python3 scripts/debug_walkthrough.py \
     --blend /path/to/scene.blend \
-    --snake results/active_contour/my_scene/snake_mesh.npz \
     --output results/debug_run \
     --no-render
 
 # Full debug run with visualization overlay
 python3 scripts/debug_walkthrough.py \
     --blend /path/to/scene.blend \
-    --snake results/active_contour/my_scene/snake_mesh.npz \
     --output results/debug_run \
     --width 480 --height 360 --samples 16 \
     --fps 12 --duration 10 \
     --gaze smooth_adaptive \
     --visualize
 
+# Custom snake parameters
+python3 scripts/debug_walkthrough.py \
+    --blend /path/to/scene.blend \
+    --output results/debug_run \
+    --snake-alpha 0.7 --snake-beta 0.25 --snake-subdiv 2
+
 # Resume a partially-completed run (skip existing outputs)
 python3 scripts/debug_walkthrough.py \
     --blend /path/to/scene.blend \
-    --snake results/active_contour/my_scene/snake_mesh.npz \
     --output results/debug_run \
     --resume
 ```
@@ -676,7 +680,6 @@ python3 scripts/debug_walkthrough.py \
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--blend` | required | Input .blend scene file |
-| `--snake` | required | Path to snake_mesh.npz |
 | `--output` | required | Output directory for all intermediate files |
 | `--width` | 480 | Render width (px) |
 | `--height` | 360 | Render height (px) |
@@ -686,7 +689,10 @@ python3 scripts/debug_walkthrough.py \
 | `--gaze` | smooth_adaptive | Gaze mode: smooth_adaptive / waypoint / eye_level / free |
 | `--engine` | BLENDER_WORKBENCH | Render engine: BLENDER_WORKBENCH / CYCLES / BLENDER_EEVEE |
 | `--config` | standard_scene.json | Base config JSON path |
-| `--no-render` | False | Skip the render step (steps 1–5 only) |
+| `--snake-alpha` | 0.6 | Snake smoothness weight |
+| `--snake-beta` | 0.3 | Snake attraction weight |
+| `--snake-subdiv` | 2 | Convex hull subdivision levels (use 2 for production) |
+| `--no-render` | False | Skip the render step (steps 0–5 only) |
 | `--visualize` | False | Generate debug .blend with all visualization layers |
 | `--resume` | False | Skip steps whose output files already exist |
 
@@ -695,6 +701,14 @@ python3 scripts/debug_walkthrough.py \
 ```
 results/debug_run/
 ├── _config.json                         # Full config used
+├── snake/                               # Step 0: Active Contour fitting
+│   ├── meshes.npz                       #   Extracted mesh data from Blender
+│   ├── snake_mesh.npz                   #   Final snake mesh (vertices + faces)
+│   ├── summary.json                     #   Fitting metadata and parameters
+│   ├── figure_1_pointcloud.png          #   Sampled surface point cloud
+│   ├── figure_2_contour.png             #   Hull vs final contour
+│   ├── figure_3_slices.png              #   Inside/outside slices
+│   └── figure_4_convergence.png         #   Energy convergence curve
 ├── voxel_grid.npz                       # Step 1: 3D occupancy grid
 ├── walkable.npz                         # Step 2: BFS-reachable walkable voxels
 ├── path.npz                             # Step 3: waypoints + smooth path
