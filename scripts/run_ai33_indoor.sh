@@ -13,6 +13,7 @@
 #   bash scripts/run_ai33_indoor.sh --visualize      # include debug overlay
 #   bash scripts/run_ai33_indoor.sh --resume          # resume interrupted run
 #
+# For outdoor/terrain scenes, use scripts/run_outdoor.sh instead.
 # All output goes to results/ai33_indoor_walkthrough/
 # ============================================================================
 

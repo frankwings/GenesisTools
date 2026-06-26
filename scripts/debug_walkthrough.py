@@ -2,6 +2,7 @@
 """Debug walkthrough pipeline — run all steps with full intermediate output.
 
 Usage:
+    # Indoor scene (active contour snake):
     python3 scripts/debug_walkthrough.py \
         --blend /path/to/scene.blend \
         --output results/debug_run \
@@ -9,8 +10,19 @@ Usage:
         [--fps 12] [--duration 10] [--gaze smooth_adaptive] \
         [--no-render] [--visualize]
 
+    # Outdoor/terrain scene (terrain snake via Blender raycasting):
+    python3 scripts/debug_walkthrough.py \
+        --blend /path/to/outdoor.blend \
+        --output results/outdoor_run \
+        --config configs/terrain_scene.json \
+        [--no-render]
+
+Mode is auto-detected from the config's "aerial" field:
+  aerial=true  → indoor mode  → active contour snake (Step 0a)
+  aerial=false → outdoor mode → terrain snake via blender --background (Step 0b)
+
 The pipeline computes everything from scratch:
-  Step 0: Fit active contour (Snake3D) to define walkable volume
+  Step 0: Fit snake mesh (indoor: active contour, outdoor: terrain cloth)
   Step 1: Build voxel grid from snake mesh
   Step 2: Flood-fill walkable voxels
   Step 3: Plan path (waypoints + smooth interpolation)
@@ -90,7 +102,7 @@ def _run_step(name: str, mod: str, args: list, bpy_python: str) -> float:
 def _run_snake_fitting(blend: str, output_dir: Path, blender: str,
                        alpha: float, beta: float, subdiv: int,
                        resume: bool) -> tuple[str, float]:
-    """Run Step 0: Active Contour snake fitting. Returns (snake_npz_path, elapsed)."""
+    """Run Step 0a: Active Contour snake fitting (indoor). Returns (snake_npz_path, elapsed)."""
     snake_dir = output_dir / "snake"
     snake_npz = snake_dir / "snake_mesh.npz"
 
@@ -99,13 +111,11 @@ def _run_snake_fitting(blend: str, output_dir: Path, blender: str,
         return str(snake_npz), 0.0
 
     print(f"\n{'='*60}")
-    print(f"  Step 0: Snake Fitting (Active Contour)")
+    print(f"  Step 0a: Snake Fitting (Active Contour — Indoor)")
     print(f"  alpha={alpha}  beta={beta}  subdivision_levels={subdiv}")
     print(f"{'='*60}")
 
     t0 = time.time()
-    # Import and run directly (no bpy needed for snake fitting, but it
-    # calls Blender for mesh extraction internally)
     project_root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(project_root))
     from genesis_tools.active_contour.fit_scene_contour import fit_scene_active_contour
@@ -126,6 +136,59 @@ def _run_snake_fitting(blend: str, output_dir: Path, blender: str,
           f"{result['snake_iterations']} iterations ({elapsed:.1f}s)")
 
     return str(snake_npz), elapsed
+
+
+def _run_terrain_fitting(blend: str, output_dir: Path, blender: str,
+                         config: dict, resume: bool) -> tuple[str, float]:
+    """Run Step 0b: Terrain snake fitting (outdoor). Returns (terrain_npz_path, elapsed).
+
+    Runs fit_terrain_contour.py via `blender --background` because it needs
+    bpy's scene.ray_cast which requires a loaded scene.
+    """
+    terrain_npz = output_dir / "terrain_snake.npz"
+
+    if resume and terrain_npz.exists():
+        print(f"\n[SKIP] terrain_fitting (found {terrain_npz})")
+        return str(terrain_npz), 0.0
+
+    print(f"\n{'='*60}")
+    print(f"  Step 0b: Terrain Snake Fitting (Outdoor)")
+    print(f"  grid_resolution={config.get('terrain_snake_resolution', config.get('grid_resolution', 5.0))}")
+    print(f"{'='*60}")
+
+    project_root = Path(__file__).resolve().parents[1]
+    fit_script = str(project_root / "genesis_tools" / "active_contour" / "fit_terrain_contour.py")
+
+    cmd = [
+        blender, "--background", blend,
+        "--python-exit-code", "1", "--python", fit_script, "--",
+        "--blend", blend,
+        "--output-dir", str(output_dir),
+        "--grid-resolution",       str(config.get("terrain_snake_resolution", config.get("grid_resolution", 5.0))),
+        "--max-grid-cells-xy",     str(config.get("max_grid_cells_xy", 200)),
+        "--env-sphere-percentile", str(config.get("env_sphere_percentile", 5.0)),
+        "--ray-samples",           str(config.get("terrain_ray_samples", 1)),
+        "--alpha",                 str(config.get("terrain_alpha", 0.5)),
+        "--gravity",               str(config.get("terrain_gravity", 0.1)),
+        "--dt",                    str(config.get("terrain_dt", 1.0)),
+        "--max-iterations",        str(config.get("terrain_max_iterations", 200)),
+        "--convergence-threshold", str(config.get("terrain_convergence_threshold", 1e-3)),
+        "--start-height",          str(config.get("terrain_start_height", 1.7)),
+        "--refine-pad-cells",      str(config.get("refine_pad_cells", 2)),
+    ]
+
+    t0 = time.time()
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(project_root)
+    r = subprocess.run(cmd, env=env)
+    elapsed = time.time() - t0
+
+    if r.returncode != 0:
+        print(f"\n  FAILED with exit code {r.returncode} ({elapsed:.1f}s)")
+        sys.exit(1)
+
+    print(f"\n  Terrain snake saved: {terrain_npz} ({elapsed:.1f}s)")
+    return str(terrain_npz), elapsed
 
 
 def _print_summary(out: Path, timings: dict):
@@ -154,13 +217,25 @@ def _print_summary(out: Path, timings: dict):
             else:
                 print(f"    {f.relative_to(out)!s:40s}  {size/1024:.1f} KB")
 
-    # Snake
+    # Snake (indoor)
     snake_npz = out / "snake" / "snake_mesh.npz"
     if snake_npz.exists():
         sn = np.load(str(snake_npz), allow_pickle=True)
-        print(f"\n  Snake Mesh:")
+        print(f"\n  Snake Mesh (Indoor):")
         print(f"    vertices:  {sn['vertices'].shape[0]}")
         print(f"    faces:     {sn['faces'].shape[0]}")
+
+    # Terrain snake (outdoor)
+    terrain_npz = out / "terrain_snake.npz"
+    if terrain_npz.exists():
+        tn = np.load(str(terrain_npz), allow_pickle=True)
+        print(f"\n  Terrain Snake (Outdoor):")
+        for k in tn.files:
+            arr = tn[k]
+            if hasattr(arr, 'shape'):
+                print(f"    {k:20s}  shape={arr.shape}  dtype={arr.dtype}")
+            else:
+                print(f"    {k:20s}  {arr}")
 
     # Voxel grid
     vg_path = out / "voxel_grid.npz"
@@ -276,25 +351,42 @@ def main():
 
     timings = {}
 
-    # ── Step 0: Snake Fitting ──────────────────────────────────────────────
-    snake_npz, t = _run_snake_fitting(
-        blend, out, blender,
-        alpha=args.snake_alpha,
-        beta=args.snake_beta,
-        subdiv=args.snake_subdiv,
-        resume=args.resume,
-    )
-    if t > 0:
-        timings["0_snake_fitting"] = t
-
-    # ── Build config ───────────────────────────────────────────────────────
+    # ── Load base config ──────────────────────────────────────────────────
     config_base = args.config or str(project_root / "configs" / "standard_scene.json")
     with open(config_base) as f:
         config = json.load(f)
+    config.pop("_description", None)
 
+    # Auto-detect mode from config: aerial=true → indoor, aerial=false → outdoor
+    is_outdoor = not config.get("aerial", True)
+    mode_label = "outdoor (terrain)" if is_outdoor else "indoor (active contour)"
+    print(f"\nMode: {mode_label}  (aerial={config.get('aerial', True)})")
+
+    # ── Step 0: Snake Fitting ──────────────────────────────────────────────
+    if is_outdoor:
+        # Outdoor: terrain snake via blender --background
+        terrain_npz, t = _run_terrain_fitting(
+            blend, out, blender, config, resume=args.resume,
+        )
+        if t > 0:
+            timings["0_terrain_fitting"] = t
+        config["terrain_npz"] = terrain_npz
+    else:
+        # Indoor: active contour snake
+        snake_npz, t = _run_snake_fitting(
+            blend, out, blender,
+            alpha=args.snake_alpha,
+            beta=args.snake_beta,
+            subdiv=args.snake_subdiv,
+            resume=args.resume,
+        )
+        if t > 0:
+            timings["0_snake_fitting"] = t
+        config["snake_npz"] = snake_npz
+
+    # ── Build final config ─────────────────────────────────────────────────
+    # Override render/playback params from CLI args (do NOT override aerial)
     config.update({
-        "aerial": True,
-        "snake_npz": snake_npz,
         "waypoint_gaze_mode": args.gaze,
         "render_engine": args.engine,
         "render_width": args.width,
@@ -425,6 +517,13 @@ def main():
         dump["snake"] = {
             "vertices": int(sn["vertices"].shape[0]),
             "faces": int(sn["faces"].shape[0]),
+        }
+    terrain_path = out / "terrain_snake.npz"
+    if terrain_path.exists():
+        tn = np.load(str(terrain_path), allow_pickle=True)
+        dump["terrain_snake"] = {
+            k: list(tn[k].shape) if hasattr(tn[k], 'shape') else str(tn[k])
+            for k in tn.files
         }
     if os.path.exists(vg_path):
         vg = np.load(vg_path, allow_pickle=True)
